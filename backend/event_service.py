@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend import baseline as baseline_service
-from backend import detection_engine, investigation_service, threat_engine
+from backend import controls, detection_engine, investigation_service, threat_engine
 from backend.catalog import ACCESS_LEVEL_RANK, ACTION_REQUIRED_LEVEL, ACTION_TO_EVENT, SEVERITY_LABELS, SEVERITY_RANK, STAGE_LABELS, is_self_service
 from backend.config import get_settings
 from backend.database import utcnow
@@ -57,6 +57,8 @@ def write_audit(
 def has_access(db: Session, employee_id: int, resource: str, action: str) -> bool:
     if is_self_service(resource):
         return action in ("view", "download")
+    if controls.is_isolated(db, resource):   # an isolated system denies everyone
+        return False
     permission = db.scalar(
         select(AccessPermission).where(
             AccessPermission.employee_id == employee_id, AccessPermission.resource == resource
@@ -159,6 +161,7 @@ def access_resource(
 ) -> tuple[EventResult, bool]:
     """Authorise a resource action against the permission table and log the outcome."""
     permitted = has_access(db, employee.id, resource, action)
+    reason = {"reason": "system_isolated"} if not permitted and controls.is_isolated(db, resource) else {}
     result = record_event(
         db,
         employee,
@@ -166,7 +169,7 @@ def access_resource(
         source_ip=source_ip,
         resource=resource,
         outcome="success" if permitted else "denied",
-        details={**(details or {}), "action": action, "requested_records": record_count},
+        details={**(details or {}), **reason, "action": action, "requested_records": record_count},
         session=session,
         device_info=device_info,
         records_accessed=record_count if permitted else 0,
@@ -207,9 +210,14 @@ def _maybe_raise_alert(
                               event_id=event.id, detected_at=event.timestamp, title=title, description=description)
         db.add(alert)
     else:
+        previous = (alert.severity, alert.stage)
         if SEVERITY_RANK[threat.level] > SEVERITY_RANK[alert.severity]:
             alert.severity = threat.level
         alert.title, alert.description, alert.updated_at = title, description, utcnow()
+        if (alert.severity, threat.stage) != previous:
+            write_audit(db, "alert_updated", target_type="alert", target_id=alert.id,
+                        details={"employee_id": employee.id, "from_stage": previous[1], "to_stage": threat.stage,
+                                 "severity": alert.severity, "confidence": threat.confidence, "trigger_event_id": event.id})
     alert.assessment_id = assessment.id
     alert.risk_score = max(alert.risk_score or 0, threat.score)
     alert.attack_confidence = max(alert.attack_confidence or 0.0, threat.confidence)

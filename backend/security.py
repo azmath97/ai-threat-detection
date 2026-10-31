@@ -103,7 +103,9 @@ class AuthContext:
 
 
 def get_auth(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer), db: Session = Depends(get_db)
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    db: Session = Depends(get_db),
 ) -> AuthContext:
     unauthorized = HTTPException(
         status.HTTP_401_UNAUTHORIZED, "Invalid or expired session", headers={"WWW-Authenticate": "Bearer"}
@@ -116,6 +118,10 @@ def get_auth(
     employee = session.employee
     if employee.status != "active":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account is locked")
+    from backend import controls
+
+    if controls.is_ip_blocked(db, resolve_ip(request, employee)):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access from this network address is blocked")
     return AuthContext(employee=employee, session=session)
 
 

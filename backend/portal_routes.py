@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend import portal_data
+from backend import controls
 from backend.auth_service import create_account
 from backend.catalog import RESOURCES
 from backend.database import get_db
@@ -37,7 +38,8 @@ class Ctx:
     def require(self, resource: str, action: str, event_type: str, details: dict | None = None) -> None:
         if has_access(self.db, self.auth.employee.id, resource, action):
             return
-        self.log(event_type, resource, outcome="denied", details={**(details or {}), "action": action})
+        reason = {"reason": "system_isolated"} if controls.is_isolated(self.db, resource) else {}
+        self.log(event_type, resource, outcome="denied", details={**(details or {}), **reason, "action": action})
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"Access to {RESOURCES[resource]['name']} is not permitted for your role")
 
 

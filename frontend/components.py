@@ -55,6 +55,7 @@ _CSS = """
   td.res-ok { color: var(--green); font-weight: 600; }
   td.res-bad { color: var(--red); font-weight: 600; }
   td.res-warn { color: var(--amber); font-weight: 600; }
+  td.res-high { color: #9A4A00; font-weight: 600; }
 
   /* notices */
   .notice { border: 1px solid var(--line); border-left-width: 4px; border-radius: 2px; padding: .6rem .8rem; margin: .5rem 0; font-size: .9rem; }
@@ -130,23 +131,33 @@ def fmt_ts(iso: str | None, with_time: bool = True) -> str:
     return parsed.strftime("%d %b %Y %H:%M" if with_time else "%d %b %Y")
 
 
+def fmt_time(iso: str | None) -> str:
+    """Compact timestamp with seconds, for event feeds."""
+    return datetime.fromisoformat(iso).strftime("%d %b %H:%M:%S") if iso else "-"
+
+
 def fmt_money(value: float, currency: str = "USD") -> str:
     return f"{currency} {value:,.2f}"
 
 
 _RESULT_CLASS = {"Completed": "res-ok", "Denied": "res-bad", "Failed": "res-bad",
-                 "Denied by backend": "res-bad", "Blocked": "res-warn"}
+                 "Denied by backend": "res-bad", "Blocked": "res-warn",
+                 "Critical": "res-bad", "High Risk": "res-high", "Suspicious": "res-warn",
+                 "contained": "res-warn", "Done": "res-ok", "Pending": "res-warn",
+                 "denied": "res-bad", "failure": "res-bad"}
 
 
-def table(rows: list[dict], columns: dict[str, str], result_column: str | None = None) -> None:
-    """Static HTML table (no client-side export toolbar). `columns` maps field -> header."""
+def table(rows: list[dict], columns: dict[str, str], result_column: str | list[str] | None = None) -> None:
+    """Static HTML table (no client-side export toolbar). `columns` maps field -> header.
+    `result_column` names the column(s) whose values are colour-coded (status / severity)."""
+    coded = {result_column} if isinstance(result_column, str) else set(result_column or [])
     head = "".join(f"<th>{_esc(h)}</th>" for h in columns.values())
     body = []
     for row in rows:
         cells = []
         for key in columns:
             value = row.get(key, "")
-            css = _RESULT_CLASS.get(value, "") if key == result_column else ""
+            css = _RESULT_CLASS.get(value, "") if key in coded else ""
             cells.append(f'<td class="{css}">{_esc(value)}</td>')
         body.append(f"<tr>{''.join(cells)}</tr>")
     if not body:

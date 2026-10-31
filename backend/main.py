@@ -16,6 +16,7 @@ from backend import (
     response_service,
     rules,
     simulation_routes,
+    soc_routes,
     threat_engine,
 )
 from backend.auth_service import authenticate, find_employee
@@ -106,6 +107,7 @@ app.add_middleware(
 
 app.include_router(portal_routes.router)
 app.include_router(simulation_routes.router)
+app.include_router(soc_routes.router)
 
 
 @app.exception_handler(ServiceError)
@@ -526,7 +528,8 @@ def create_containment(
 ):
     target = _get_employee_or_404(db, body.employee_id)
     return response_service.apply_action(
-        db, auth.employee, target, body.action_type, body.reason, body.investigation_id, ip=resolve_ip(request)
+        db, auth.employee, target, body.action_type, body.reason, body.investigation_id, ip=resolve_ip(request, auth.employee),
+        confirm=body.confirm, value=body.target,
     )
 
 

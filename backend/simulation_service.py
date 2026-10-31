@@ -18,6 +18,7 @@ from backend.models import (
     Employee,
     EmployeeSession,
     RiskAssessment,
+    ResponseControl,
     SecurityAlert,
     SecurityEvent,
 )
@@ -274,6 +275,7 @@ def reset(db: Session, admin: Employee) -> dict:
     containment_filter = [ContainmentAction.employee_id.in_(synthetic_accounts)] if synthetic_accounts else []
     if investigation_ids:
         containment_filter.append(ContainmentAction.investigation_id.in_(investigation_ids))
+    removed["response_controls"] = db.execute(delete(ResponseControl).where(ResponseControl.is_synthetic.is_(True))).rowcount
     removed["containment_actions"] = (
         db.execute(delete(ContainmentAction).where(or_(*containment_filter))).rowcount if containment_filter else 0
     )

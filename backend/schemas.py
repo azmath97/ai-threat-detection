@@ -95,10 +95,12 @@ class InvestigationUpdate(BaseModel):
 
 
 class ContainmentRequest(BaseModel):
-    employee_id: int = Field(gt=0)
+    employee_id: int = Field(gt=0, description="The account concerned, or the incident's employee for IP / system actions")
     action_type: str
     reason: str = Field(min_length=3, max_length=500)
     investigation_id: int | None = Field(default=None, gt=0)
+    confirm: bool = Field(default=False, description="Must be true for disruptive actions")
+    target: str | None = Field(default=None, max_length=64, description="IP address or system for block_ip / isolate_system")
 
     @field_validator("action_type")
     @classmethod

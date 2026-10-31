@@ -114,6 +114,16 @@ class ApiClient:
     def synthetic_events(self, limit: int = 20) -> list[dict]:
         return self._json("GET", "/api/events", params={"synthetic": "true", "limit": limit})["items"]
 
+    # generic helpers used by the SOC dashboard
+    def get(self, path: str, **params):
+        return self._json("GET", path, params={k: v for k, v in params.items() if v not in (None, "")})
+
+    def post(self, path: str, body: dict | None = None):
+        return self._json("POST", path, json=body or {})
+
+    def patch(self, path: str, body: dict):
+        return self._json("PATCH", path, json=body)
+
 
 def _detail(response: requests.Response) -> str:
     try:

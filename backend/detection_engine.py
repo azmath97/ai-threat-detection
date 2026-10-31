@@ -122,7 +122,9 @@ def evaluate_event(db: Session, employee: Employee, event: SecurityEvent, baseli
         sensitivity = sensitivity_of(event.resource)
         owner = RESOURCES[event.resource]["department"]
         permission = baseline.permissions.get(event.resource)
-        if event.outcome == "denied":
+        if event.outcome == "denied" and (event.details or {}).get("reason") == "system_isolated":
+            pass  # isolated by the SOC: not the employee's doing, so not evidence against them
+        elif event.outcome == "denied":
             if permission is None and sensitivity >= 3:
                 fire("restricted_denied", resource=event.resource)
             elif permission is None and sensitivity >= 2 and owner not in ("All", employee.department):

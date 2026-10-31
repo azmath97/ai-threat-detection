@@ -220,7 +220,7 @@ def test_simulation_full_chain_uses_real_pipeline_and_resets(client, admin, db_p
 
     # containment applies to the simulated attacker exactly as to a real one
     lock = client.post("/api/containment", headers=admin, json={
-        "employee_id": david, "action_type": "lock_account", "reason": "Simulation drill"})
+        "employee_id": david, "action_type": "lock_account", "reason": "Simulation drill", "confirm": True})
     assert lock.status_code == 201
     blocked = client.post("/api/simulation/steps", headers=admin, json={
         "target_employee_id": david, "step": "unfamiliar_login", "source_ip": "185.220.101.45"}).json()
@@ -272,7 +272,7 @@ def test_real_account_creation_requires_admin_console_access(client, admin):
 def test_restrict_and_restore_access(client, admin):
     emp_id = _employee_id(client, admin, "grace.lee")
     r = client.post("/api/containment", headers=admin, json={
-        "employee_id": emp_id, "action_type": "restrict_access", "reason": "Precaution"})
+        "employee_id": emp_id, "action_type": "restrict_access", "reason": "Precaution", "confirm": True})
     assert r.status_code == 201 and r.json()["details"]["removed_permissions"]
     grace = auth_header(client, "EMP-1007")
     assert client.post("/api/resources/audit-reports/access", headers=grace, json={}).status_code == 403
@@ -284,7 +284,7 @@ def test_restrict_and_restore_access(client, admin):
 def test_admin_cannot_contain_self_and_unknown_action(client, admin):
     me = client.get("/api/employees/me", headers=admin).json()
     assert client.post("/api/containment", headers=admin, json={
-        "employee_id": me["id"], "action_type": "lock_account", "reason": "oops"}).status_code == 400
+        "employee_id": me["id"], "action_type": "lock_account", "reason": "oops", "confirm": True}).status_code == 400
     assert client.post("/api/containment", headers=admin, json={
         "employee_id": me["id"], "action_type": "nuke", "reason": "oops"}).status_code == 422
 

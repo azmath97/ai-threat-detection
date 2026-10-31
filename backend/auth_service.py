@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend import controls
 from backend.catalog import managed_resources
 from backend.database import utcnow
 from backend.errors import ServiceError
@@ -49,6 +50,9 @@ def authenticate(
         raise ServiceError(401, "Invalid employee ID or password")
 
     context = dict(source_ip=ip, device_info=device_info, is_synthetic=synthetic, scenario=scenario)
+    if controls.is_ip_blocked(db, ip):
+        record_event(db, employee, "login_failed", outcome="denied", details={**(details or {}), "reason": "ip_blocked"}, **context)
+        raise ServiceError(403, "Access from this network address is blocked")
     if not verify_password(password, employee.password_hash):
         record_event(db, employee, "login_failed", outcome="failure", details={**(details or {}), "reason": "bad_password"}, **context)
         raise ServiceError(401, "Invalid employee ID or password")

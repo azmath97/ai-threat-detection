@@ -195,3 +195,20 @@ class AuditLog(Base):
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     timestamp: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+
+
+class ResponseControl(Base):
+    """An active containment control enforced by the backend: a blocked source IP or an isolated system."""
+
+    __tablename__ = "response_controls"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(24), index=True)  # blocked_ip | isolated_system
+    value: Mapped[str] = mapped_column(String(64), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    created_by: Mapped[int] = mapped_column(ForeignKey("employees.id"))
+    action_id: Mapped[int | None] = mapped_column(ForeignKey("containment_actions.id", ondelete="SET NULL"), nullable=True)
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    released_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)

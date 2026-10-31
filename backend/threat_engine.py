@@ -39,6 +39,7 @@ class ThreatAssessment:
     exposure: dict = field(default_factory=dict)
     factors: list[dict] = field(default_factory=list)
     related_accounts: dict[int, str] = field(default_factory=dict)
+    suspicious_ips: list[str] = field(default_factory=list)
     capped: bool = False
 
     @property
@@ -134,6 +135,9 @@ def assess(db: Session, employee: Employee, as_of: datetime | None = None) -> Th
     }
     result.exposure = data_exposure.assess(events, result.level != "normal")
     result.related_accounts = {e.employee_id: e.employee.username for e in events if e.employee_id != employee.id}
+    # Addresses worth blocking: unfamiliar to this employee and not a colleague's registered workstation.
+    colleague_ips = {ip for ips in db.scalars(select(Employee.known_ips).where(Employee.id != employee.id)) for ip in (ips or [])}
+    result.suspicious_ips = [ip for ip in corr.links["ips"] if ip not in colleague_ips and not ip.startswith("127.")]
     return result
 
 
@@ -176,9 +180,22 @@ def recommend_actions(threat: ThreatAssessment) -> list[dict]:
         add("revoke_sessions", "immediate", "Terminate sessions that may be controlled by an attacker")
     if stages & {"collection", "exfiltration", "privilege_escalation"} or exposure["status"] != "none":
         add("restrict_access", "immediate", "Remove confidential and restricted access to stop further collection")
+    for ip in threat.suspicious_ips:
+        add("block_ip", "immediate", f"Block unfamiliar source address {ip} used throughout the incident", target=ip)
     for account_id, username in threat.related_accounts.items():
         add("lock_account", "immediate", f"Account {username} was created during the incident (persistence)",
             target=username, target_id=account_id)
+    if stages & {"privilege_escalation", "persistence"}:
+        add("remove_privileges", "high", "Strip elevated (write) privileges gained or used during the incident")
+    if threat.level == "critical":
+        systems = []
+        for ev in threat.correlation.evidence:
+            if ev.resource and ({"large_export", "unusual_outbound_transfer"} & set(ev.rules)):
+                systems.append(ev.resource)
+            if {"admin_console_login_failed", "privileged_account_created"} & set(ev.rules):
+                systems.append("it-admin-console")
+        for system in dict.fromkeys(systems):
+            add("isolate_system", "high", f"Isolate {system}: it was targeted during the incident", target=system)
     if threat.level == "critical" or exposure["external_transfer_confirmed"]:
         add("lock_account", "high", "Critical confidence; lock the account pending identity verification",
             target=None)

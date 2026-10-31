@@ -38,12 +38,16 @@ class Settings:
     password_hash_iterations: int
     demo_employee_password: str
     demo_admin_password: str
-    risk_window_minutes: int
     correlation_window_minutes: int
     investigation_window_hours: int
-    risk_medium_threshold: int
-    risk_high_threshold: int
-    risk_critical_threshold: int
+    threat_suspicious_threshold: int
+    threat_high_threshold: int
+    threat_critical_threshold: int
+    alert_min_severity: str
+    baseline_days: int
+    detection_rules_path: str
+    ml_model_path: str
+    ml_auto_train: bool
     bulk_record_threshold: int
     business_hours_start: int
     business_hours_end: int
@@ -72,12 +76,16 @@ def get_settings() -> Settings:
         password_hash_iterations=_int("PASSWORD_HASH_ITERATIONS", 260_000),
         demo_employee_password=_str("DEMO_EMPLOYEE_PASSWORD", "Employee#Demo2026"),
         demo_admin_password=_str("DEMO_ADMIN_PASSWORD", "SocAdmin#Demo2026"),
-        risk_window_minutes=_int("RISK_WINDOW_MINUTES", 120),
         correlation_window_minutes=_int("CORRELATION_WINDOW_MINUTES", 240),
         investigation_window_hours=_int("INVESTIGATION_WINDOW_HOURS", 24),
-        risk_medium_threshold=_int("RISK_MEDIUM_THRESHOLD", 25),
-        risk_high_threshold=_int("RISK_HIGH_THRESHOLD", 50),
-        risk_critical_threshold=_int("RISK_CRITICAL_THRESHOLD", 75),
+        threat_suspicious_threshold=_int("THREAT_SUSPICIOUS_THRESHOLD", 25),
+        threat_high_threshold=_int("THREAT_HIGH_THRESHOLD", 50),
+        threat_critical_threshold=_int("THREAT_CRITICAL_THRESHOLD", 80),
+        alert_min_severity=_str("ALERT_MIN_SEVERITY", "critical"),
+        baseline_days=_int("BASELINE_DAYS", 30),
+        detection_rules_path=_str("DETECTION_RULES_PATH", str(BASE_DIR / "backend" / "detection_rules.json")),
+        ml_model_path=_str("ML_MODEL_PATH", str(BASE_DIR / "ml" / "artifacts" / "isolation_forest.joblib")),
+        ml_auto_train=_bool("ML_AUTO_TRAIN", True),
         bulk_record_threshold=_int("BULK_RECORD_THRESHOLD", 500),
         business_hours_start=_int("BUSINESS_HOURS_START", 7),
         business_hours_end=_int("BUSINESS_HOURS_END", 19),

@@ -7,8 +7,9 @@ front end. All data is synthetic; no real credentials, personal or banking data 
 | Phase | Status |
 |---|---|
 | Backend, database, event pipeline, API | done |
-| **Employee Workspace Portal** (Streamlit) + admin simulation console | done |
-| SOC Dashboard, ML anomaly detector | next |
+| Employee Workspace Portal (Streamlit) + admin simulation console | done |
+| **AI-powered detection and attack correlation engine** | done |
+| SOC Dashboard | next |
 
 ## How it works
 
@@ -21,9 +22,8 @@ Simulation Console --HTTP-->      |
 * The portal holds only a session token. **The backend decides identity, permissions, source IP and session.**
   The browser cannot set an employee ID or a source IP on any request.
 * The portal never shows risk scores, attack confidence, investigations or alerts.
-* Kill-chain stages: `initial_access -> discovery -> privilege_escalation -> collection -> exfiltration`.
-  Risk levels: low < 25 <= medium < 50 <= high < 75 <= critical (configurable). Contextual signals
-  (off-hours, unfamiliar IP, repeat access to one restricted resource) score once per window, not once per click.
+* Kill-chain stages: Initial Access, Credential Misuse, Sensitive Resource Access, Collection, Privilege Escalation,
+  Persistence, Lateral Movement, Exfiltration (see "Detection engine" below).
 
 ## File structure
 
@@ -32,21 +32,24 @@ ai-threat-detection/
 ├── app.py                          # launcher: backend | portal | simulation | all
 ├── backend/
 │   ├── main.py                     # FastAPI app, auth/events/risk/alerts/containment/dashboard endpoints
-│   ├── portal_routes.py            # employee portal endpoints (payslips, HR, documents, directory, accounts)
-│   ├── simulation_routes.py        # admin-only simulation endpoints
-│   ├── auth_service.py             # login + account creation (shared by portal and simulation)
-│   ├── event_service.py            # event pipeline: persist -> score -> correlate -> alert
-│   ├── detection_engine.py  correlation_engine.py  investigation_service.py  response_service.py
-│   ├── simulation_service.py       # attack steps + reset
-│   ├── portal_data.py              # deterministic synthetic payslips, HR data, documents
+│   ├── threat_engine.py            # hybrid confidence score, assessment storage, recommended actions
+│   ├── detection_engine.py  detection_rules.json  rules.py   # configurable rule layer
+│   ├── correlation_engine.py  data_exposure.py  baseline.py
+│   ├── event_service.py            # event pipeline: persist -> rules -> ML/correlation -> alert
+│   ├── portal_routes.py  simulation_routes.py  auth_service.py  simulation_service.py  portal_data.py
+│   ├── investigation_service.py  response_service.py
 │   ├── models.py  database.py  schemas.py  security.py  catalog.py  config.py  errors.py
+├── ml/
+│   ├── features.py                 # one feature pipeline for training and live scoring
+│   ├── synthetic_data.py           # synthetic normal + suspicious behaviour
+│   ├── train_model.py  anomaly_detector.py   # Isolation Forest training, loading, fallback
 ├── frontend/
 │   ├── employee_portal.py          # Employee Workspace Portal
 │   ├── simulation_console.py       # separate, administrator-only simulation control panel
 │   ├── components.py  api_client.py
 ├── .streamlit/config.toml          # enterprise light theme
 ├── data/seed_data.py               # synthetic employees + 14 days of history
-├── tests/                          # pytest suite (14 tests)
+├── tests/                          # pytest suite (32 tests: API, portal, ML, detection scenarios)
 └── requirements.txt  .env.example  README.md
 ```
 
@@ -131,6 +134,41 @@ for risk, correlation and alerting. **Reset simulation** removes all synthetic d
 the affected employees and restores their last-login time. Run the simulation on accounts that are not in active
 use: genuine activity during a run is scored in the same window.
 
+## Detection engine
+
+Every event goes through one pipeline in `backend/event_service.py`; dashboards only read what it stores.
+
+```
+event -> rules (detection_engine) -> baseline -> ML anomaly score (ml/) -> correlation -> attack confidence 0-100
+      -> data exposure -> stage -> alert + investigation (when the configured severity is reached)
+```
+
+| Part | Module | What it does |
+|---|---|---|
+| Behavioural anomaly detection | `ml/` | Isolation Forest on 10 behavioural features (login hour, unfamiliar IP, failed logins, resources and departments accessed, download volume, restricted attempts, privilege escalation, external transfer volume, denied accesses). Trained **only on normal** synthetic sessions, saved to `ml/artifacts/isolation_forest.joblib`, loaded at start (trained automatically if the file is missing). **Fallback mode** (a bounded heuristic on the same features) is used if the model is missing, corrupt or incompatible. |
+| Rule detection | `backend/detection_engine.py`, `backend/detection_rules.json` | 18 configurable rules (severity, stages, enabled). Judged against the employee's role, permissions, 30-day baseline (known IPs, usual resources, after-hours habits, usual download size) and session context. An unfamiliar IP or after-hours login alone is a weak signal, not an attack; a missing privilege level in your own department is not "unauthorised access". |
+| Correlation | `backend/correlation_engine.py` | Links events by employee, session, unfamiliar IP and related (created) accounts inside `CORRELATION_WINDOW_MINUTES` (default 240). Stages come from evidence in any order; each event counts for one independent stage, and repeated identical evidence is discounted, so nothing is double-counted. |
+| Attack confidence | `backend/threat_engine.py` | `100 x (0.20 ML + 0.30 rules + 0.25 correlation + 0.10 baseline + 0.15 stage)`. Every component is 0-1 and the weights sum to 1, so the score is bounded by construction. Fewer than 2 independent stages cannot exceed High Risk, fewer than 3 cannot be Critical. |
+| Data exposure | `backend/data_exposure.py` | Separate indicator: sensitive records accessed, exported, potentially exposed, in external transfers, and whether a transfer was **confirmed**. Status is `suspicious_access`, `confirmed_export` or `confirmed_external_transfer`; a large export alone never claims exfiltration. |
+| Stages | `backend/catalog.py` | Initial Access, Credential Misuse, Sensitive Resource Access, Collection, Privilege Escalation, Persistence, Lateral Movement, Exfiltration. Exfiltration needs a confirmed external transfer. |
+
+Severity (configurable): 0-24 **Normal**, 25-49 **Suspicious**, 50-79 **High Risk**, 80-100 **Critical**
+(`THREAT_SUSPICIOUS_THRESHOLD`, `THREAT_HIGH_THRESHOLD`, `THREAT_CRITICAL_THRESHOLD`). An alert is raised at the
+critical threshold (`ALERT_MIN_SEVERITY`) and contains: alert ID, employee ID, attack confidence, severity, detection
+time, first suspicious event, triggering event, correlated evidence (with relations), current stage, data exposure
+and recommended containment actions (including accounts created during the incident).
+
+In the full simulated attack the alert is raised at the **large export** step, before the privileged account,
+privileged login and external transfer have happened. Duplicate requests (same `request_id` / `Idempotency-Key`) are
+stored and scored once.
+
+```powershell
+python -m ml.train_model --export   # retrain; --export also writes the synthetic datasets to ml/artifacts/*.csv
+```
+Held-out results of the shipped configuration on synthetic data: ROC-AUC 0.98, 2% false positives on normal
+sessions, about 6% on deliberately tricky normal sessions (after-hours, travel, heavy downloads, routine admin
+work), 84% of attack windows scored anomalous by the ML component alone (the rules and correlation cover the rest).
+
 ## API
 
 Auth is `Authorization: Bearer <token>`. "Admin" = `security_admin` role. Interactive docs: `/docs`.
@@ -157,6 +195,7 @@ Auth is `Authorization: Bearer <token>`. "Admin" = `security_admin` role. Intera
 | GET / POST / PATCH | `/api/investigations[/{id}]` | admin | investigation reports |
 | GET / POST | `/api/containment` | admin | `revoke_sessions`, `lock_account`, `restrict_access`, `restore_account` |
 | GET | `/api/dashboard/stats`, `/api/audit-logs` | admin | KPIs, audit trail |
+| GET / POST | `/api/detection/status`, `/reload`, `/retrain` | admin | model mode + metrics, thresholds, rules; reload config; retrain |
 | GET / POST | `/api/simulation/scenarios`, `/status`, `/steps`, `/run`, `/reset` | admin + simulation enabled | attack simulation |
 
 Timestamps are stored in UTC; responses carry both `timestamp` (UTC) and `timestamp_local` (`DISPLAY_TIMEZONE`,

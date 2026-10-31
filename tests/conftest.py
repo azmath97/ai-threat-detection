@@ -10,6 +10,7 @@ os.environ["DATABASE_URL"] = f"sqlite:///{Path(_tmp, 'test.db').as_posix()}"
 os.environ["AUTO_SEED"] = "true"
 os.environ["PASSWORD_HASH_ITERATIONS"] = "1000"
 os.environ["SECRET_KEY"] = "test-secret"
+os.environ["ML_MODEL_PATH"] = str(Path(_tmp, "isolation_forest.joblib"))  # exercises train-on-first-start
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402

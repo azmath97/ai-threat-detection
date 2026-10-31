@@ -43,7 +43,32 @@ ACTION_TO_EVENT = {v: k for k, v in EVENT_TO_ACTION.items()}
 ACTION_REQUIRED_LEVEL = {"view": "read", "download": "read", "export": "write"}
 ACCESS_LEVEL_RANK = {"read": 1, "write": 2}
 
-LEVELS = ("low", "medium", "high", "critical")
+SEVERITY_LEVELS = ("normal", "suspicious", "high_risk", "critical")
+SEVERITY_RANK = {level: rank for rank, level in enumerate(SEVERITY_LEVELS)}
+SEVERITY_LABELS = {"normal": "Normal", "suspicious": "Suspicious", "high_risk": "High Risk", "critical": "Critical"}
+
+# Attack stages in progression order. Evidence decides which are present; no fixed sequence is required.
+STAGES = (
+    "initial_access",
+    "credential_misuse",
+    "sensitive_resource_access",
+    "collection",
+    "privilege_escalation",
+    "persistence",
+    "lateral_movement",
+    "exfiltration",
+)
+STAGE_LABELS = {
+    "none": "None",
+    "initial_access": "Initial Access",
+    "credential_misuse": "Credential Misuse",
+    "sensitive_resource_access": "Sensitive Resource Access",
+    "collection": "Collection",
+    "privilege_escalation": "Privilege Escalation",
+    "persistence": "Persistence",
+    "lateral_movement": "Lateral Movement",
+    "exfiltration": "Exfiltration",
+}
 
 
 def sensitivity_of(resource: str | None) -> int:

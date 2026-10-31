@@ -82,6 +82,7 @@ class SecurityEvent(Base):
     records_downloaded: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     scenario: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     risk_points: Mapped[int] = mapped_column(Integer, default=0)
     risk_flags: Mapped[list] = mapped_column(JSON, default=list)
@@ -102,8 +103,12 @@ class RiskAssessment(Base):
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"))
     event_id: Mapped[int | None] = mapped_column(ForeignKey("security_events.id", ondelete="SET NULL"), nullable=True)
     score: Mapped[int] = mapped_column(Integer)
-    level: Mapped[str] = mapped_column(String(16))  # low | medium | high | critical
+    level: Mapped[str] = mapped_column(String(16))  # normal | suspicious | high_risk | critical
     factors: Mapped[list] = mapped_column(JSON, default=list)
+    ml_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    components: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    exposure: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
@@ -120,6 +125,7 @@ class AttackInvestigation(Base):
     timeline: Mapped[list] = mapped_column(JSON, default=list)
     indicators: Mapped[list] = mapped_column(JSON, default=list)
     recommended_actions: Mapped[list] = mapped_column(JSON, default=list)
+    exposure: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
@@ -146,6 +152,13 @@ class SecurityAlert(Base):
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text)
     risk_score: Mapped[int] = mapped_column(Integer, default=0)
+    attack_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    first_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    evidence: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    exposure: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    recommended_actions: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    detected_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)

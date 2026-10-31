@@ -1,0 +1,109 @@
+{
+  "_comment": "Detection configuration. Severity is how strongly a rule alone indicates an attack (0-1). Edit and call POST /api/detection/reload, or restart. Override the path with DETECTION_RULES_PATH.",
+  "scoring": {
+    "weights": {"ml": 0.20, "rules": 0.30, "correlation": 0.25, "baseline": 0.10, "stage": 0.15},
+    "stage_weights": {
+      "initial_access": 0.15,
+      "credential_misuse": 0.30,
+      "sensitive_resource_access": 0.35,
+      "collection": 0.55,
+      "privilege_escalation": 0.70,
+      "persistence": 0.80,
+      "lateral_movement": 0.80,
+      "exfiltration": 1.00
+    },
+    "correlation_curve": [0.0, 0.12, 0.40, 0.65, 0.82, 0.93, 1.0],
+    "repeat_factor": 0.25,
+    "repeat_cap": 1.5,
+    "min_stages_for_high_risk": 2,
+    "min_stages_for_critical": 3,
+    "ml_calibration_span": 0.16
+  },
+  "parameters": {
+    "failed_login_burst_count": 3,
+    "failed_login_burst_minutes": 10,
+    "login_after_failures_count": 3,
+    "login_after_failures_minutes": 30,
+    "rapid_enumeration_resources": 5,
+    "rapid_enumeration_minutes": 10,
+    "large_export_baseline_multiplier": 3.0,
+    "after_hours_baseline_rate_max": 0.15,
+    "new_account_hours": 24,
+    "legitimate_role_scale": 0.45,
+    "min_evidence_severity": 0.10
+  },
+  "rules": {
+    "unfamiliar_ip": {
+      "enabled": true, "severity": 0.18, "stages": ["initial_access"],
+      "description": "Activity from an IP address not part of the employee's baseline"
+    },
+    "off_hours_login": {
+      "enabled": true, "severity": 0.08, "stages": [],
+      "description": "Login outside business hours by an employee who rarely works after hours"
+    },
+    "failed_login": {
+      "enabled": true, "severity": 0.05, "stages": [],
+      "description": "Failed login attempt"
+    },
+    "failed_login_burst": {
+      "enabled": true, "severity": 0.38, "stages": ["credential_misuse"],
+      "description": "Multiple failed logins in a short period"
+    },
+    "admin_console_login_failed": {
+      "enabled": true, "severity": 0.45, "stages": ["credential_misuse"],
+      "description": "Failed login against the administrator console"
+    },
+    "login_after_failures": {
+      "enabled": true, "severity": 0.38, "stages": ["credential_misuse"],
+      "description": "Successful login following repeated failures"
+    },
+    "access_denied": {
+      "enabled": true, "severity": 0.06, "stages": [],
+      "description": "Access denied (own department or insufficient privilege level)"
+    },
+    "unauthorised_department_access": {
+      "enabled": true, "severity": 0.26, "stages": ["sensitive_resource_access"],
+      "description": "Attempt to access another department's classified resource without permission"
+    },
+    "restricted_denied": {
+      "enabled": true, "severity": 0.32, "stages": ["sensitive_resource_access"],
+      "description": "Denied attempt on a restricted-classification resource with no permission"
+    },
+    "sensitive_access_novel": {
+      "enabled": true, "severity": 0.12, "stages": ["sensitive_resource_access"],
+      "description": "First access to a restricted resource outside the employee's normal duties"
+    },
+    "rapid_enumeration": {
+      "enabled": true, "severity": 0.30, "stages": ["sensitive_resource_access"],
+      "description": "Rapid access to many different classified resources"
+    },
+    "large_export": {
+      "enabled": true, "severity": 0.42, "stages": ["collection"],
+      "description": "Large data export or download well above the employee's baseline"
+    },
+    "data_export": {
+      "enabled": true, "severity": 0.08, "stages": [],
+      "description": "Data export operation"
+    },
+    "unusual_outbound_transfer": {
+      "enabled": true, "severity": 0.38, "stages": ["collection"],
+      "description": "Outbound transfer to an external destination that is unusual for this employee"
+    },
+    "external_transfer_confirmed": {
+      "enabled": true, "severity": 0.72, "stages": ["exfiltration"],
+      "description": "Confirmed transfer of records to an external destination"
+    },
+    "permission_change_attempt": {
+      "enabled": true, "severity": 0.40, "stages": ["privilege_escalation"],
+      "description": "Attempt to change permissions or perform an administrative action without authority"
+    },
+    "privileged_account_created": {
+      "enabled": true, "severity": 0.58, "stages": ["privilege_escalation", "persistence"],
+      "description": "New privileged account created"
+    },
+    "new_account_login": {
+      "enabled": true, "severity": 0.45, "stages": ["lateral_movement"],
+      "description": "Login by an account created within the last day by another user"
+    }
+  }
+}

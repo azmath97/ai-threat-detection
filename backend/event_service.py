@@ -1,12 +1,13 @@
-"""The event pipeline: persist -> risk score -> correlate -> alert -> investigation."""
+"""The event pipeline: persist -> rules -> ML/correlation/confidence -> alert -> investigation."""
 from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend import correlation_engine, detection_engine, investigation_service
-from backend.catalog import ACCESS_LEVEL_RANK, ACTION_REQUIRED_LEVEL, ACTION_TO_EVENT, is_self_service
+from backend import baseline as baseline_service
+from backend import detection_engine, investigation_service, threat_engine
+from backend.catalog import ACCESS_LEVEL_RANK, ACTION_REQUIRED_LEVEL, ACTION_TO_EVENT, SEVERITY_LABELS, SEVERITY_RANK, STAGE_LABELS, is_self_service
 from backend.config import get_settings
 from backend.database import utcnow
 from backend.models import (
@@ -19,15 +20,16 @@ from backend.models import (
     SecurityEvent,
 )
 
-SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 OPEN_ALERT_STATUSES = ("open", "investigating")
 
 
 @dataclass
 class EventResult:
     event: SecurityEvent
-    assessment: RiskAssessment
+    assessment: RiskAssessment | None
     alert: SecurityAlert | None
+    threat: "threat_engine.ThreatAssessment | None" = None
+    duplicate: bool = False
 
 
 def write_audit(
@@ -81,9 +83,23 @@ def record_event(
     is_synthetic: bool = False,
     scenario: str | None = None,
     occurred_at: datetime | None = None,
+    request_id: str | None = None,
     evaluate_alerts: bool = True,
     commit: bool = True,
 ) -> EventResult:
+    """Store an event and run it through detection.
+
+    `request_id` makes the call idempotent: replaying the same request returns the original event without scoring
+    it again. `evaluate_alerts=False` (used for bulk history seeding) stores rule flags but skips ML scoring and alerts.
+    """
+    if request_id:
+        existing = db.scalar(select(SecurityEvent).where(SecurityEvent.employee_id == employee.id,
+                                                         SecurityEvent.request_id == request_id))
+        if existing is not None:
+            latest = db.scalar(select(RiskAssessment).where(RiskAssessment.event_id == existing.id)
+                               .order_by(RiskAssessment.id.desc()))
+            return EventResult(event=existing, assessment=latest, alert=None, duplicate=True)
+
     synthetic = is_synthetic or bool(session and session.is_synthetic)
     event = SecurityEvent(
         employee_id=employee.id,
@@ -97,6 +113,7 @@ def record_event(
         records_downloaded=records_downloaded,
         is_synthetic=synthetic,
         scenario=scenario,
+        request_id=request_id,
         details={**(details or {}), **({"synthetic": True} if synthetic else {})},
         timestamp=occurred_at or utcnow(),
     )
@@ -104,24 +121,25 @@ def record_event(
     db.add(event)
     db.flush()
 
-    assessment = detection_engine.assess_event(db, employee, event)
-    alert = None
+    # 1. rules, judged against this employee's own baseline, permissions and session context
+    detection_engine.apply_rules(db, employee, event, baseline_service.baseline_for(db, employee, event.timestamp))
+
+    assessment, alert, threat = None, None, None
     if evaluate_alerts:
+        # 2. ML anomaly score + correlation + baseline + stage -> bounded attack confidence
+        threat, assessment = threat_engine.assess_and_store(db, employee, event)
+        target = employee
         # Accounts created by another employee are attributed to their creator for alerting.
         parent = db.get(Employee, employee.created_by_id) if employee.created_by_id else None
         if parent is not None:
-            summary = detection_engine.current_risk(db, parent.id, event.timestamp)
-            assessment = RiskAssessment(
-                employee_id=parent.id, event_id=event.id, score=summary.score, level=summary.level,
-                factors=event.risk_flags, created_at=event.timestamp,
-            )
-            db.add(assessment)
-            db.flush()
-        alert = _maybe_raise_alert(db, parent or employee, event, assessment)
+            threat, assessment = threat_engine.assess_and_store(db, parent, event)
+            target = parent
+        # 3. alert + investigation when the configured severity is reached
+        alert = _maybe_raise_alert(db, target, event, assessment, threat)
 
     if commit:
         db.commit()
-    return EventResult(event=event, assessment=assessment, alert=alert)
+    return EventResult(event=event, assessment=assessment, alert=alert, threat=threat)
 
 
 def access_resource(
@@ -137,6 +155,7 @@ def access_resource(
     device_info: str | None = None,
     is_synthetic: bool = False,
     scenario: str | None = None,
+    request_id: str | None = None,
 ) -> tuple[EventResult, bool]:
     """Authorise a resource action against the permission table and log the outcome."""
     permitted = has_access(db, employee.id, resource, action)
@@ -154,32 +173,27 @@ def access_resource(
         records_downloaded=record_count if permitted and action in ("download", "export") else 0,
         is_synthetic=is_synthetic,
         scenario=scenario,
+        request_id=request_id,
     )
     return result, permitted
 
 
 def _maybe_raise_alert(
-    db: Session, employee: Employee, event: SecurityEvent, assessment: RiskAssessment
+    db: Session, employee: Employee, event: SecurityEvent, assessment: RiskAssessment, threat: "threat_engine.ThreatAssessment"
 ) -> SecurityAlert | None:
-    corr = correlation_engine.correlate(db, employee.id, event.timestamp)
-    chain = corr.is_attack and assessment.score >= get_settings().risk_medium_threshold
-    if assessment.level not in ("high", "critical") and not chain:
+    """Raise (or update) the employee's alert once attack confidence reaches ALERT_MIN_SEVERITY (critical by default)."""
+    settings = get_settings()
+    if SEVERITY_RANK[threat.level] < SEVERITY_RANK[settings.alert_min_severity]:
         return None
-
-    severity = assessment.level if assessment.level in ("high", "critical") else "high"
-    investigation = investigation_service.upsert_investigation(db, employee, event.timestamp, synthetic=event.is_synthetic)
-
-    top = ", ".join(f["rule"] for f in assessment.factors) or "accumulated risk"
-    stages = " -> ".join(corr.stage_names) if corr.stages else "none"
-    title = (
-        f"Possible insider threat attack chain: {employee.full_name}"
-        if chain
-        else f"{severity.title()} risk activity: {employee.full_name}"
-    )
-    description = (
-        f"Risk score {assessment.score}/100 ({assessment.level}). Attack stages: {stages}. "
-        f"Latest event: {event.event_type} on {event.resource or 'n/a'} from {event.source_ip} (triggers: {top})."
-    )
+    corr = threat.correlation
+    investigation = investigation_service.upsert_investigation(db, employee, event.timestamp, synthetic=event.is_synthetic,
+                                                               threat=threat)
+    chain = " -> ".join(STAGE_LABELS[s] for s in corr.stage_history) or "none"
+    title = f"{SEVERITY_LABELS[threat.level]}: possible insider threat, {employee.full_name} ({threat.stage_label})"
+    description = (f"Attack confidence {threat.score}/100 ({SEVERITY_LABELS[threat.level]}). Current stage: {threat.stage_label}. "
+                   f"Observed: {chain}. {threat.exposure['statement']}")
+    actions = threat_engine.recommend_actions(threat)
+    evidence = [ev.as_dict() for ev in corr.evidence]
 
     statuses = OPEN_ALERT_STATUSES if employee.status == "active" else (*OPEN_ALERT_STATUSES, "contained")
     alert = db.scalar(
@@ -189,21 +203,25 @@ def _maybe_raise_alert(
     )
     created = alert is None
     if created:
-        alert = SecurityAlert(employee_id=employee.id, severity=severity, status="open", title=title,
-                              description=description, is_synthetic=event.is_synthetic)
+        alert = SecurityAlert(employee_id=employee.id, severity=threat.level, status="open", is_synthetic=event.is_synthetic,
+                              event_id=event.id, detected_at=event.timestamp, title=title, description=description)
         db.add(alert)
     else:
-        if SEVERITY_RANK[severity] > SEVERITY_RANK[alert.severity]:
-            alert.severity = severity
-        alert.title = title
-        alert.description = description
-        alert.updated_at = utcnow()
-    alert.event_id = event.id
+        if SEVERITY_RANK[threat.level] > SEVERITY_RANK[alert.severity]:
+            alert.severity = threat.level
+        alert.title, alert.description, alert.updated_at = title, description, utcnow()
     alert.assessment_id = assessment.id
-    alert.risk_score = assessment.score
+    alert.risk_score = max(alert.risk_score or 0, threat.score)
+    alert.attack_confidence = max(alert.attack_confidence or 0.0, threat.confidence)
+    alert.stage = threat.stage
+    alert.first_event_id = corr.first_event_id
+    alert.evidence = evidence
+    alert.exposure = threat.exposure
+    alert.recommended_actions = actions
     alert.investigation_id = investigation.id
     db.flush()
     if created:
         write_audit(db, "alert_created", target_type="alert", target_id=alert.id,
-                    details={"employee_id": employee.id, "severity": severity, "risk_score": assessment.score})
+                    details={"employee_id": employee.id, "severity": threat.level, "confidence": threat.confidence,
+                             "stage": threat.stage, "trigger_event_id": event.id})
     return alert

@@ -7,4 +7,5 @@ venv/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+ml/artifacts/
 *.egg-info/

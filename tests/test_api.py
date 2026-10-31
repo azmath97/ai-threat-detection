@@ -138,7 +138,7 @@ def test_ordinary_working_session_raises_no_alert(client, admin):
         assert client.get("/api/portal/directory", headers=carol, params={"q": "a"}).status_code == 200
     assert client.post("/api/auth/logout", headers=carol).status_code == 204
     risk = client.get(f"/api/risk/employees/{carol_id}", headers=admin).json()
-    assert risk["level"] in ("low", "medium"), risk
+    assert risk["level"] in ("normal", "suspicious"), risk
     assert client.get("/api/alerts", headers=admin, params={"employee_id": carol_id}).json() == []
 
 
@@ -208,7 +208,8 @@ def test_simulation_full_chain_uses_real_pipeline_and_resets(client, admin, db_p
     # the real detection engine reacted: attack chain, critical risk, synthetic alert + investigation
     risk = client.get(f"/api/risk/employees/{david}", headers=admin).json()
     assert risk["level"] == "critical"
-    assert {"initial_access", "privilege_escalation", "collection", "exfiltration"} <= set(risk["attack_stages"])
+    assert {"initial_access", "credential_misuse", "sensitive_resource_access", "collection", "privilege_escalation",
+            "persistence", "lateral_movement", "exfiltration"} <= set(risk["attack_stages"])
     alerts = client.get("/api/alerts", headers=admin, params={"employee_id": david}).json()
     assert len(alerts) == 1 and alerts[0]["severity"] == "critical"
     assert _query(db_path, "select is_synthetic from security_alerts where id=?", (alerts[0]["id"],))[0][0] == 1

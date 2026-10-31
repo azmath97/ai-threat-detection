@@ -53,6 +53,7 @@ class EventCreate(BaseModel):
     resource: str | None = None
     record_count: int = Field(default=0, ge=0, le=10_000_000)
     details: dict[str, Any] = Field(default_factory=dict)
+    request_id: str | None = Field(default=None, max_length=64, description="Idempotency key: a replay is stored once")
 
     @field_validator("event_type")
     @classmethod
@@ -196,6 +197,7 @@ class EventCreated(BaseModel):
     risk_score: int | None = None
     risk_level: str | None = None
     alert_id: int | None = None
+    duplicate: bool = False
 
 
 class RiskFactorOut(BaseModel):
@@ -213,6 +215,9 @@ class EmployeeRiskOut(BaseModel):
     status: str
     score: int
     level: str
+    current_stage: str = "none"
+    stage_label: str = "None"
+    data_exposure: str = "none"
 
 
 class AssessmentOut(APIModel):
@@ -222,6 +227,10 @@ class AssessmentOut(APIModel):
     score: int
     level: str
     factors: list[dict[str, Any]]
+    ml_score: float | None = None
+    stage: str | None = None
+    components: dict[str, Any] | None = None
+    exposure: dict[str, Any] | None = None
     created_at: datetime
 
 
@@ -229,11 +238,24 @@ class RiskDetailOut(BaseModel):
     employee_id: int
     username: str
     score: int
+    confidence: float
     level: str
     window_minutes: int
     factors: list[dict[str, Any]]
     attack_stages: list[str]
     attack_confidence: float
+    current_stage: str
+    stage_label: str
+    stage_history: list[str]
+    independent_stages: int
+    components: dict[str, Any]
+    ml: dict[str, Any] | None
+    features: dict[str, Any]
+    exposure: dict[str, Any]
+    evidence: list[dict[str, Any]]
+    links: dict[str, Any]
+    first_event_id: int | None
+    recommended_actions: list[dict[str, Any]]
     history: list[AssessmentOut]
 
 
@@ -241,13 +263,20 @@ class AlertOut(APIModel):
     id: int
     employee_id: int
     employee_username: str
-    event_id: int | None
+    event_id: int | None          # the triggering event
+    first_event_id: int | None    # first suspicious event in the correlated chain
     investigation_id: int | None
     severity: str
     status: str
     title: str
     description: str
     risk_score: int
+    attack_confidence: float
+    stage: str | None
+    evidence: list[dict[str, Any]] | None
+    exposure: dict[str, Any] | None
+    recommended_actions: list[dict[str, Any]] | None
+    detected_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -276,6 +305,7 @@ class InvestigationOut(APIModel):
     timeline: list[dict[str, Any]]
     indicators: list[str]
     recommended_actions: list[dict[str, Any]]
+    exposure: dict[str, Any] | None
     created_at: datetime
     updated_at: datetime
     closed_at: datetime | None

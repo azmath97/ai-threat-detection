@@ -188,7 +188,8 @@ def _step_external_transfer(sim: _Sim) -> dict:
     resource, _ = _best_resource(actor)
     record_event(
         sim.db, actor, "external_transfer", source_ip=sim.ip, resource=resource, outcome="success",
-        details={**sim.meta("external_transfer"), "destination": EXFIL_DESTINATION, "protocol": "https"},
+        details={**sim.meta("external_transfer"), "destination": EXFIL_DESTINATION, "protocol": "https",
+                 "transfer_status": "confirmed"},
         session=session, device_info=SIM_DEVICE, records_accessed=EXPORT_RECORDS, records_downloaded=EXPORT_RECORDS,
         is_synthetic=True, scenario=sim.scenario,
     )

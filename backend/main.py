@@ -9,13 +9,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend import (
-    correlation_engine,
-    detection_engine,
+    baseline as baseline_service,
     event_service,
     investigation_service,
     portal_routes,
     response_service,
+    rules,
     simulation_routes,
+    threat_engine,
 )
 from backend.auth_service import authenticate, find_employee
 from backend.catalog import (
@@ -24,6 +25,7 @@ from backend.catalog import (
     RESOURCE_EVENT_TYPES,
     RESOURCES,
     SENSITIVITY_LABELS,
+    SEVERITY_LEVELS,
     is_self_service,
 )
 from backend.config import get_settings
@@ -69,6 +71,7 @@ from backend.schemas import (
     RiskDetailOut,
 )
 from backend.security import AuthContext, device_info, get_auth, require_admin, resolve_ip
+from ml.anomaly_detector import ensure_model, get_detector, reload_detector
 
 logger = logging.getLogger("insider_threat")
 
@@ -76,6 +79,8 @@ logger = logging.getLogger("insider_threat")
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    detector = ensure_model()  # loads the saved Isolation Forest (trains one on first start); falls back if unavailable
+    logger.info("Anomaly detection mode: %s", detector.status()["mode"])
     if get_settings().auto_seed:
         from data.seed_data import seed_database
 
@@ -236,25 +241,30 @@ def access_resource(
 def create_event(
     body: EventCreate, request: Request, auth: AuthContext = Depends(get_auth), db: Session = Depends(get_db)
 ):
-    """Telemetry for the authenticated employee only; identity, IP and device are derived by the backend."""
+    """Telemetry for the authenticated employee only; identity, IP and device are derived by the backend.
+
+    Send `request_id` (or an `Idempotency-Key` header) so a retried request is stored and scored only once.
+    """
     ip, device = resolve_ip(request, auth.employee), device_info(request)
+    request_id = (body.request_id or request.headers.get("idempotency-key") or "")[:64] or None
     if body.event_type in RESOURCE_EVENT_TYPES:
         result, _ = event_service.access_resource(
             db, auth.employee, body.resource, EVENT_TO_ACTION[body.event_type], source_ip=ip, session=auth.session,
-            record_count=body.record_count, details=body.details, device_info=device,
+            record_count=body.record_count, details=body.details, device_info=device, request_id=request_id,
         )
     else:
         outcome = "denied" if body.event_type == "permission_change_attempt" else "success"
         result = event_service.record_event(
             db, auth.employee, body.event_type, source_ip=ip, resource=body.resource, outcome=outcome,
-            details=body.details, session=auth.session, device_info=device,
+            details=body.details, session=auth.session, device_info=device, request_id=request_id,
             records_accessed=body.record_count, records_downloaded=body.record_count if outcome == "success" else 0,
         )
 
-    if auth.is_admin:
+    if auth.is_admin and result.assessment is not None:
         return EventCreated(event=EventPublic.model_validate(result.event), risk_score=result.assessment.score,
-                            risk_level=result.assessment.level, alert_id=result.alert.id if result.alert else None)
-    return EventCreated(event=EventPublic.model_validate(result.event))
+                            risk_level=result.assessment.level, alert_id=result.alert.id if result.alert else None,
+                            duplicate=result.duplicate)
+    return EventCreated(event=EventPublic.model_validate(result.event), duplicate=result.duplicate)
 
 
 def _parse_ts(raw: str) -> datetime:
@@ -313,31 +323,38 @@ def my_events(
 
 
 # ---------------------------------------------------------------- risk
+def _risk_row(e: Employee, threat: threat_engine.ThreatAssessment) -> EmployeeRiskOut:
+    return EmployeeRiskOut(
+        employee_id=e.id, username=e.username, full_name=e.full_name, department=e.department, status=e.status,
+        score=threat.score, level=threat.level, current_stage=threat.stage, stage_label=threat.stage_label,
+        data_exposure=threat.exposure.get("status", "none"),
+    )
+
+
 @app.get("/api/risk/employees", response_model=list[EmployeeRiskOut], tags=["risk"])
 def risk_overview(_: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
-    scores = detection_engine.all_current_scores(db)
-    rows = [
-        EmployeeRiskOut(
-            employee_id=e.id, username=e.username, full_name=e.full_name, department=e.department,
-            status=e.status, score=scores.get(e.id, 0), level=detection_engine.level_for(scores.get(e.id, 0)),
-        )
-        for e in db.scalars(select(Employee).order_by(Employee.id))
-    ]
+    threats = threat_engine.assess_all(db)
+    rows = [_risk_row(e, threats[e.id]) for e in db.scalars(select(Employee).order_by(Employee.id))]
     return sorted(rows, key=lambda r: r.score, reverse=True)
 
 
 def _risk_detail(db: Session, employee: Employee) -> RiskDetailOut:
-    now = utcnow()
-    summary = detection_engine.current_risk(db, employee.id, now)
-    corr = correlation_engine.correlate(db, employee.id, now)
+    threat = threat_engine.assess(db, employee)
+    corr = threat.correlation
     history = db.scalars(
         select(RiskAssessment).where(RiskAssessment.employee_id == employee.id)
         .order_by(RiskAssessment.created_at.desc(), RiskAssessment.id.desc()).limit(50)
     ).all()
     return RiskDetailOut(
-        employee_id=employee.id, username=employee.username, score=summary.score, level=summary.level,
-        window_minutes=get_settings().risk_window_minutes, factors=summary.factors,
-        attack_stages=corr.stage_names, attack_confidence=corr.confidence,
+        employee_id=employee.id, username=employee.username, score=threat.score, confidence=threat.confidence,
+        level=threat.level, window_minutes=get_settings().correlation_window_minutes, factors=threat.factors,
+        attack_stages=threat.stage_names, attack_confidence=round(threat.confidence / 100, 4),
+        current_stage=threat.stage, stage_label=threat.stage_label,
+        stage_history=corr.stage_history if corr else [], independent_stages=threat.counted_stages,
+        components=threat.components, ml=threat.ml.as_dict() if threat.ml else None, features=threat.features,
+        exposure=threat.exposure, evidence=[ev.as_dict() for ev in corr.evidence] if corr else [],
+        links=corr.links if corr else {}, first_event_id=corr.first_event_id if corr else None,
+        recommended_actions=threat_engine.recommend_actions(threat),
         history=[AssessmentOut.model_validate(a) for a in history],
     )
 
@@ -350,10 +367,49 @@ def risk_detail(employee_id: int, _: AuthContext = Depends(require_admin), db: S
 @app.post("/api/risk/assess", response_model=RiskDetailOut, tags=["risk"])
 def assess_risk(body: RiskAssessRequest, auth: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
     employee = _get_employee_or_404(db, body.employee_id)
-    detection_engine.assess_employee(db, employee)
+    threat = threat_engine.assess(db, employee)
+    db.add(threat_engine.to_row(threat, None))
     write_audit(db, "risk_assessment_run", actor_id=auth.employee.id, target_type="employee", target_id=employee.id)
     db.commit()
     return _risk_detail(db, employee)
+
+
+# ---------------------------------------------------------------- detection engine
+@app.get("/api/detection/status", tags=["detection"])
+def detection_status(_: AuthContext = Depends(require_admin)):
+    """ML model state (Isolation Forest or fallback), thresholds and rule configuration."""
+    s = get_settings()
+    return {
+        "model": get_detector().status(),
+        "thresholds": {"suspicious": s.threat_suspicious_threshold, "high_risk": s.threat_high_threshold,
+                       "critical": s.threat_critical_threshold, "alert_min_severity": s.alert_min_severity},
+        "correlation_window_minutes": s.correlation_window_minutes,
+        "baseline_days": s.baseline_days,
+        "rules": rules.summary(),
+    }
+
+
+@app.post("/api/detection/reload", tags=["detection"])
+def detection_reload(auth: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
+    """Re-read detection_rules.json and the saved model without restarting."""
+    rules.reload_rules()
+    baseline_service.clear_cache()
+    detector = reload_detector()
+    write_audit(db, "detection_reloaded", actor_id=auth.employee.id)
+    db.commit()
+    return {"model_mode": detector.status()["mode"], "rules": len(rules.rules())}
+
+
+@app.post("/api/detection/retrain", tags=["detection"])
+def detection_retrain(auth: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
+    """Retrain the Isolation Forest on synthetic normal behaviour, save it and load it."""
+    from ml.train_model import train
+
+    metrics = train()
+    detector = reload_detector()
+    write_audit(db, "model_retrained", actor_id=auth.employee.id, details={"roc_auc": metrics["roc_auc"]})
+    db.commit()
+    return {"model_mode": detector.status()["mode"], "metrics": metrics}
 
 
 # ---------------------------------------------------------------- alerts
@@ -362,7 +418,7 @@ def list_alerts(
     _: AuthContext = Depends(require_admin),
     db: Session = Depends(get_db),
     alert_status: str | None = Query(None, alias="status", pattern="^(open|investigating|contained|resolved|false_positive)$"),
-    severity: str | None = Query(None, pattern="^(low|medium|high|critical)$"),
+    severity: str | None = Query(None, pattern="^(normal|suspicious|high_risk|critical)$"),
     employee_id: int | None = Query(None, gt=0),
     limit: int = Query(100, ge=1, le=500),
 ):
@@ -495,8 +551,9 @@ def list_containment(
 def dashboard_stats(_: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
     now = utcnow()
     day_ago = now - timedelta(hours=24)
-    scores = detection_engine.all_current_scores(db)
+    threats = threat_engine.assess_all(db)
     employees = db.scalars(select(Employee).order_by(Employee.id)).all()
+    scores = {e.id: threats[e.id].score for e in employees}
 
     recent = db.execute(
         select(SecurityEvent.event_type, SecurityEvent.timestamp).where(SecurityEvent.timestamp >= day_ago)
@@ -516,11 +573,11 @@ def dashboard_stats(_: AuthContext = Depends(require_admin), db: Session = Depen
         select(SecurityAlert.severity, func.count(SecurityAlert.id))
         .where(SecurityAlert.status.in_(("open", "investigating"))).group_by(SecurityAlert.severity)
     ).all()
-    alerts_by_severity = {level: 0 for level in ("low", "medium", "high", "critical")}
+    alerts_by_severity = {level: 0 for level in SEVERITY_LEVELS}
     alerts_by_severity.update({sev: n for sev, n in severity_rows})
 
     ranked = sorted(employees, key=lambda e: scores.get(e.id, 0), reverse=True)
-    high_threshold = get_settings().risk_high_threshold
+    high_threshold = get_settings().threat_high_threshold
     return DashboardStats(
         generated_at=now,
         total_employees=len(employees),
@@ -538,13 +595,7 @@ def dashboard_stats(_: AuthContext = Depends(require_admin), db: Session = Depen
         locked_accounts=sum(1 for e in employees if e.status == "locked"),
         events_by_type_24h=by_type,
         events_per_hour_24h=[{"hour": h.isoformat(), "count": c} for h, c in buckets.items()],
-        top_risk_employees=[
-            EmployeeRiskOut(
-                employee_id=e.id, username=e.username, full_name=e.full_name, department=e.department,
-                status=e.status, score=scores.get(e.id, 0), level=detection_engine.level_for(scores.get(e.id, 0)),
-            )
-            for e in ranked[:5]
-        ],
+        top_risk_employees=[_risk_row(e, threats[e.id]) for e in ranked[:5]],
     )
 
 

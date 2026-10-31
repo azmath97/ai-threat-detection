@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from backend.config import get_settings
 from backend.database import Base, SessionLocal, engine, init_db, utcnow
 from backend.event_service import record_event, write_audit
-from backend.models import AccessPermission, Employee, EmployeeSession
+from backend.models import AccessPermission, Employee, EmployeeSession, employee_code_for
 from backend.security import hash_password, hash_token
 
 HISTORY_DAYS = 14
@@ -45,6 +45,11 @@ EMPLOYEES = [
 
 # A few employees occasionally work from home / travel: (username -> unfamiliar IP)
 TRAVEL_IPS = {"bob.chen": "82.45.113.20", "emma.wilson": "92.118.30.7", "isla.murphy": "203.0.113.58"}
+DEVICES = [
+    "Windows 11 / Edge 130 (corporate laptop)",
+    "Windows 10 / Chrome 129 (corporate desktop)",
+    "macOS 14 / Safari 17 (corporate laptop)",
+]
 
 
 def _local_to_utc(day: datetime, hour: float) -> datetime:
@@ -55,6 +60,7 @@ def _local_to_utc(day: datetime, hour: float) -> datetime:
 
 def _seed_history(db: Session, employee: Employee, perms: dict[str, str], rng: random.Random) -> None:
     today = utcnow().astimezone(get_settings().tz)
+    device = DEVICES[employee.id % len(DEVICES)]
     resources = list(perms)
     travel_day = rng.randint(2, HISTORY_DAYS - 1) if employee.username in TRAVEL_IPS else None
     typo_day = rng.randint(2, HISTORY_DAYS - 1) if employee.role == "employee" else None
@@ -70,11 +76,11 @@ def _seed_history(db: Session, employee: Employee, perms: dict[str, str], rng: r
 
         if days_ago == typo_day:
             record_event(db, employee, "login_failed", source_ip=ip, outcome="failure", details={"reason": "bad_password"},
-                         occurred_at=login_at - timedelta(minutes=1), evaluate_alerts=False, commit=False)
+                         device_info=device, occurred_at=login_at - timedelta(minutes=1), evaluate_alerts=False, commit=False)
 
         session = EmployeeSession(
             employee_id=employee.id, token_hash=hash_token(f"seed-{employee.id}-{days_ago}-{rng.random()}"),
-            ip_address=ip, created_at=login_at, expires_at=logout_at, revoked_at=logout_at,
+            ip_address=ip, device_info=device, created_at=login_at, expires_at=logout_at, revoked_at=logout_at,
         )
         db.add(session)
         db.flush()
@@ -89,9 +95,11 @@ def _seed_history(db: Session, employee: Employee, perms: dict[str, str], rng: r
             resource = rng.choice(resources)
             action = rng.choices(["view", "download"], weights=[8, 2])[0]
             event_type = "resource_access" if action == "view" else "file_download"
+            count = rng.randint(1, 60) if action == "download" else rng.randint(1, 20)
             record_event(
                 db, employee, event_type, source_ip=ip, resource=resource, session=session, occurred_at=moment,
-                details={"action": action, "record_count": rng.randint(1, 60) if action == "download" else 0},
+                details={"action": action}, device_info=device, records_accessed=count,
+                records_downloaded=count if action == "download" else 0,
                 evaluate_alerts=False, commit=False,
             )
         record_event(db, employee, "logout", source_ip=ip, session=session, occurred_at=logout_at,
@@ -122,6 +130,9 @@ def seed_database(db: Session, reset: bool = False) -> bool:
         employee.permissions = [AccessPermission(resource=r, access_level=lvl) for r, lvl in perms.items()]
         db.add(employee)
         created.append((employee, perms))
+    db.flush()
+    for employee, _ in created:
+        employee.employee_code = employee_code_for(employee.id, employee.role)
     db.flush()
 
     for employee, perms in created:

@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend import correlation_engine, detection_engine, investigation_service
-from backend.catalog import ACCESS_LEVEL_RANK, ACTION_REQUIRED_LEVEL, ACTION_TO_EVENT
+from backend.catalog import ACCESS_LEVEL_RANK, ACTION_REQUIRED_LEVEL, ACTION_TO_EVENT, is_self_service
 from backend.config import get_settings
 from backend.database import utcnow
 from backend.models import (
@@ -53,6 +53,8 @@ def write_audit(
 
 
 def has_access(db: Session, employee_id: int, resource: str, action: str) -> bool:
+    if is_self_service(resource):
+        return action in ("view", "download")
     permission = db.scalar(
         select(AccessPermission).where(
             AccessPermission.employee_id == employee_id, AccessPermission.resource == resource
@@ -73,10 +75,16 @@ def record_event(
     outcome: str = "success",
     details: dict | None = None,
     session: EmployeeSession | None = None,
+    device_info: str | None = None,
+    records_accessed: int = 0,
+    records_downloaded: int = 0,
+    is_synthetic: bool = False,
+    scenario: str | None = None,
     occurred_at: datetime | None = None,
     evaluate_alerts: bool = True,
     commit: bool = True,
 ) -> EventResult:
+    synthetic = is_synthetic or bool(session and session.is_synthetic)
     event = SecurityEvent(
         employee_id=employee.id,
         session_id=session.id if session else None,
@@ -84,7 +92,12 @@ def record_event(
         resource=resource,
         outcome=outcome,
         source_ip=source_ip,
-        details=details or {},
+        device_info=device_info or (session.device_info if session else None),
+        records_accessed=records_accessed,
+        records_downloaded=records_downloaded,
+        is_synthetic=synthetic,
+        scenario=scenario,
+        details={**(details or {}), **({"synthetic": True} if synthetic else {})},
         timestamp=occurred_at or utcnow(),
     )
     event.employee = employee
@@ -92,7 +105,19 @@ def record_event(
     db.flush()
 
     assessment = detection_engine.assess_event(db, employee, event)
-    alert = _maybe_raise_alert(db, employee, event, assessment) if evaluate_alerts else None
+    alert = None
+    if evaluate_alerts:
+        # Accounts created by another employee are attributed to their creator for alerting.
+        parent = db.get(Employee, employee.created_by_id) if employee.created_by_id else None
+        if parent is not None:
+            summary = detection_engine.current_risk(db, parent.id, event.timestamp)
+            assessment = RiskAssessment(
+                employee_id=parent.id, event_id=event.id, score=summary.score, level=summary.level,
+                factors=event.risk_flags, created_at=event.timestamp,
+            )
+            db.add(assessment)
+            db.flush()
+        alert = _maybe_raise_alert(db, parent or employee, event, assessment)
 
     if commit:
         db.commit()
@@ -109,10 +134,12 @@ def access_resource(
     session: EmployeeSession | None,
     record_count: int = 0,
     details: dict | None = None,
+    device_info: str | None = None,
+    is_synthetic: bool = False,
+    scenario: str | None = None,
 ) -> tuple[EventResult, bool]:
     """Authorise a resource action against the permission table and log the outcome."""
     permitted = has_access(db, employee.id, resource, action)
-    payload = {**(details or {}), "action": action, "record_count": record_count}
     result = record_event(
         db,
         employee,
@@ -120,8 +147,13 @@ def access_resource(
         source_ip=source_ip,
         resource=resource,
         outcome="success" if permitted else "denied",
-        details=payload,
+        details={**(details or {}), "action": action, "requested_records": record_count},
         session=session,
+        device_info=device_info,
+        records_accessed=record_count if permitted else 0,
+        records_downloaded=record_count if permitted and action in ("download", "export") else 0,
+        is_synthetic=is_synthetic,
+        scenario=scenario,
     )
     return result, permitted
 
@@ -135,7 +167,7 @@ def _maybe_raise_alert(
         return None
 
     severity = assessment.level if assessment.level in ("high", "critical") else "high"
-    investigation = investigation_service.upsert_investigation(db, employee, event.timestamp)
+    investigation = investigation_service.upsert_investigation(db, employee, event.timestamp, synthetic=event.is_synthetic)
 
     top = ", ".join(f["rule"] for f in assessment.factors) or "accumulated risk"
     stages = " -> ".join(corr.stage_names) if corr.stages else "none"
@@ -157,7 +189,8 @@ def _maybe_raise_alert(
     )
     created = alert is None
     if created:
-        alert = SecurityAlert(employee_id=employee.id, severity=severity, status="open", title=title, description=description)
+        alert = SecurityAlert(employee_id=employee.id, severity=severity, status="open", title=title,
+                              description=description, is_synthetic=event.is_synthetic)
         db.add(alert)
     else:
         if SEVERITY_RANK[severity] > SEVERITY_RANK[alert.severity]:

@@ -32,7 +32,9 @@ class Settings:
     display_timezone: str
     cors_origins: list[str]
     auto_seed: bool
-    allow_simulated_source_ip: bool
+    simulation_enabled: bool
+    map_loopback_to_workstation: bool
+    simulation_privileged_password: str
     password_hash_iterations: int
     demo_employee_password: str
     demo_admin_password: str
@@ -64,7 +66,9 @@ def get_settings() -> Settings:
         display_timezone=_str("DISPLAY_TIMEZONE", "Asia/Kolkata"),
         cors_origins=[o.strip() for o in _str("CORS_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501").split(",") if o.strip()],
         auto_seed=_bool("AUTO_SEED", True),
-        allow_simulated_source_ip=_bool("ALLOW_SIMULATED_SOURCE_IP", True),
+        simulation_enabled=_bool("SIMULATION_ENABLED", True),
+        map_loopback_to_workstation=_bool("MAP_LOOPBACK_TO_WORKSTATION", True),
+        simulation_privileged_password=_str("SIMULATION_PRIVILEGED_PASSWORD", "Synthetic#Priv2026"),
         password_hash_iterations=_int("PASSWORD_HASH_ITERATIONS", 260_000),
         demo_employee_password=_str("DEMO_EMPLOYEE_PASSWORD", "Employee#Demo2026"),
         demo_admin_password=_str("DEMO_ADMIN_PASSWORD", "SocAdmin#Demo2026"),

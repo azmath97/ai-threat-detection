@@ -32,7 +32,7 @@ def _revoke_sessions(db: Session, employee_id: int) -> int:
     return len(sessions)
 
 
-def _restore(db: Session, target: Employee) -> dict:
+def restore_employee(db: Session, target: Employee) -> dict:
     previous = db.scalars(
         select(ContainmentAction)
         .where(ContainmentAction.employee_id == target.id, ContainmentAction.action_type == "restrict_access")
@@ -93,7 +93,7 @@ def apply_action(
         for p in sensitive:
             db.delete(p)
     else:
-        details = _restore(db, target)
+        details = restore_employee(db, target)
 
     action = ContainmentAction(
         investigation_id=investigation_id,

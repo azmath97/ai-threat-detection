@@ -1,15 +1,20 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base, UTCDateTime, utcnow
+
+
+def employee_code_for(employee_id: int, role: str) -> str:
+    return f"SEC-{9000 + employee_id}" if role == "security_admin" else f"EMP-{1000 + employee_id}"
 
 
 class Employee(Base):
     __tablename__ = "employees"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    employee_code: Mapped[str | None] = mapped_column(String(16), unique=True, index=True, nullable=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     full_name: Mapped[str] = mapped_column(String(128))
     email: Mapped[str] = mapped_column(String(160), unique=True)
@@ -19,6 +24,8 @@ class Employee(Base):
     status: Mapped[str] = mapped_column(String(16), default="active")  # active | locked
     password_hash: Mapped[str] = mapped_column(String(255))
     known_ips: Mapped[list] = mapped_column(JSON, default=list)
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
@@ -34,6 +41,8 @@ class EmployeeSession(Base):
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"), index=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     ip_address: Mapped[str] = mapped_column(String(45))
+    device_info: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
@@ -68,6 +77,11 @@ class SecurityEvent(Base):
     resource: Mapped[str | None] = mapped_column(String(64), nullable=True)
     outcome: Mapped[str] = mapped_column(String(16), default="success")  # success | failure | denied
     source_ip: Mapped[str] = mapped_column(String(45))
+    device_info: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    records_accessed: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    records_downloaded: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    scenario: Mapped[str | None] = mapped_column(String(64), nullable=True)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     risk_points: Mapped[int] = mapped_column(Integer, default=0)
     risk_flags: Mapped[list] = mapped_column(JSON, default=list)
@@ -106,6 +120,7 @@ class AttackInvestigation(Base):
     timeline: Mapped[list] = mapped_column(JSON, default=list)
     indicators: Mapped[list] = mapped_column(JSON, default=list)
     recommended_actions: Mapped[list] = mapped_column(JSON, default=list)
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
     closed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
@@ -131,6 +146,7 @@ class SecurityAlert(Base):
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text)
     risk_score: Mapped[int] = mapped_column(Integer, default=0)
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 

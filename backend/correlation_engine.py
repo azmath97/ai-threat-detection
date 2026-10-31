@@ -18,6 +18,8 @@ RULE_STAGE = {
     "rapid_enumeration": "discovery",
     "restricted_denied": "privilege_escalation",
     "permission_change_attempt": "privilege_escalation",
+    "privileged_account_created": "privilege_escalation",
+    "new_account_login": "privilege_escalation",
     "sensitive_access": "collection",
     "bulk_download": "collection",
     "data_export": "exfiltration",

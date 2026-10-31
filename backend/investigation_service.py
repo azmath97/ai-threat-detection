@@ -25,6 +25,8 @@ def _timeline(events: list[SecurityEvent], corr: CorrelationResult) -> list[dict
             "resource": e.resource,
             "outcome": e.outcome,
             "source_ip": e.source_ip,
+            "account": e.employee.username,
+            "records_downloaded": e.records_downloaded,
             "risk_points": e.risk_points,
             "stages": corr.stages_for_event(e.id),
         }
@@ -39,19 +41,18 @@ def _indicators(employee: Employee, events: list[SecurityEvent]) -> list[str]:
     rules = Counter(f["rule"] for e in events for f in (e.risk_flags or []))
     for rule, count in rules.most_common():
         indicators.append(f"{detection_engine.RULE_DESCRIPTIONS[rule]} (x{count})")
-    unfamiliar = sorted({e.source_ip for e in events if e.source_ip not in (employee.known_ips or [])})
+    unfamiliar = sorted({e.source_ip for e in events if e.source_ip not in (e.employee.known_ips or [])})
     if unfamiliar:
         indicators.append(f"Unfamiliar source IPs: {', '.join(unfamiliar)}")
     touched = sorted({e.resource for e in events if e.resource and e.risk_points > 0})
     if touched:
         indicators.append(f"Resources involved in suspicious activity: {', '.join(touched)}")
-    records = sum(
-        int((e.details or {}).get("record_count", 0))
-        for e in events
-        if e.event_type in ("file_download", "data_export") and e.outcome == "success"
-    )
+    records = sum(e.records_downloaded for e in events if e.outcome == "success")
     if records:
-        indicators.append(f"Total records downloaded or exported: {records}")
+        indicators.append(f"Total records downloaded, exported or transferred: {records}")
+    accounts = sorted({e.employee.username for e in events if e.employee_id != employee.id})
+    if accounts:
+        indicators.append(f"Activity from accounts created by this employee: {', '.join(accounts)}")
     return indicators
 
 
@@ -102,7 +103,9 @@ def build_report(db: Session, employee: Employee, as_of: datetime | None = None)
     }
 
 
-def upsert_investigation(db: Session, employee: Employee, as_of: datetime | None = None) -> AttackInvestigation:
+def upsert_investigation(
+    db: Session, employee: Employee, as_of: datetime | None = None, synthetic: bool = False
+) -> AttackInvestigation:
     report = build_report(db, employee, as_of)
     investigation = db.scalar(
         select(AttackInvestigation)
@@ -110,7 +113,7 @@ def upsert_investigation(db: Session, employee: Employee, as_of: datetime | None
         .order_by(AttackInvestigation.id.desc())
     )
     if investigation is None:
-        investigation = AttackInvestigation(employee_id=employee.id, status="open")
+        investigation = AttackInvestigation(employee_id=employee.id, status="open", is_synthetic=synthetic)
         db.add(investigation)
     for key, value in report.items():
         setattr(investigation, key, value)

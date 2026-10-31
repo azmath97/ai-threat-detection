@@ -1,11 +1,10 @@
-import ipaddress
 import json
 from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
-from backend.catalog import EVENT_TYPES, RESOURCE_EVENT_TYPES, RESOURCES
+from backend.catalog import CLIENT_EVENT_TYPES, RESOURCE_EVENT_TYPES, RESOURCES
 from backend.config import to_local
 from backend.response_service import ACTION_TYPES
 
@@ -25,52 +24,41 @@ class APIModel(BaseModel):
         return data
 
 
-def _validate_ip(value: str | None) -> str | None:
-    if value is None or value == "":
-        return None
-    try:
-        return str(ipaddress.ip_address(value.strip()))
-    except ValueError as exc:
-        raise ValueError("must be a valid IPv4 or IPv6 address") from exc
-
-
 # ----- requests -----
 class LoginRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=64)
+    employee_id: str | None = Field(default=None, min_length=3, max_length=64, description="e.g. EMP-1001")
+    username: str | None = Field(default=None, min_length=3, max_length=64)
     password: str = Field(min_length=1, max_length=128)
-    source_ip: str | None = Field(default=None, description="Simulation only: IP to attribute the login to")
 
-    _ip = field_validator("source_ip")(_validate_ip)
+    @model_validator(mode="after")
+    def _one_identifier(self):
+        if not (self.employee_id or self.username):
+            raise ValueError("employee_id is required")
+        return self
 
-    @field_validator("username")
-    @classmethod
-    def _lower(cls, v: str) -> str:
-        return v.strip().lower()
+    @property
+    def identifier(self) -> str:
+        return (self.employee_id or self.username or "").strip()
 
 
 class ResourceAccessRequest(BaseModel):
     action: Literal["view", "download", "export"] = "view"
     record_count: int = Field(default=0, ge=0, le=10_000_000)
-    source_ip: str | None = None
-
-    _ip = field_validator("source_ip")(_validate_ip)
 
 
 class EventCreate(BaseModel):
-    employee_id: int | None = Field(default=None, gt=0, description="Admins only: log on behalf of another employee")
+    """Client telemetry for the authenticated employee. Identity, IP and device are set by the backend."""
+
     event_type: str
     resource: str | None = None
     record_count: int = Field(default=0, ge=0, le=10_000_000)
-    source_ip: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
-
-    _ip = field_validator("source_ip")(_validate_ip)
 
     @field_validator("event_type")
     @classmethod
     def _event_type(cls, v: str) -> str:
-        if v not in EVENT_TYPES:
-            raise ValueError(f"must be one of: {', '.join(EVENT_TYPES)}")
+        if v not in CLIENT_EVENT_TYPES:
+            raise ValueError(f"must be one of: {', '.join(CLIENT_EVENT_TYPES)}")
         return v
 
     @field_validator("details")
@@ -122,6 +110,7 @@ class ContainmentRequest(BaseModel):
 # ----- responses -----
 class EmployeeOut(APIModel):
     id: int
+    employee_code: str | None
     username: str
     full_name: str
     email: str
@@ -143,6 +132,7 @@ class PermissionOut(BaseModel):
 class ProfileOut(EmployeeOut):
     known_ips: list[str]
     permissions: list[PermissionOut]
+    previous_login_at: datetime | None = None
 
 
 class LoginResponse(BaseModel):
@@ -170,18 +160,26 @@ class ResourceAccessOut(BaseModel):
 
 
 class EventPublic(APIModel):
+    """What an employee may see about an event: no source/device internals, metadata or risk data."""
+
     id: int
     event_type: str
     resource: str | None
     outcome: str
-    source_ip: str
-    details: dict[str, Any]
+    records_accessed: int
+    records_downloaded: int
     timestamp: datetime
 
 
 class EventOut(EventPublic):
     employee_id: int
     employee_username: str
+    session_id: int | None
+    source_ip: str
+    device_info: str | None
+    details: dict[str, Any]
+    is_synthetic: bool
+    scenario: str | None
     risk_points: int
     risk_flags: list[dict[str, Any]]
 

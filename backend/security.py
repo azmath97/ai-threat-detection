@@ -46,12 +46,16 @@ def hash_token(token: str) -> str:
     return hmac.new(get_settings().secret_key.encode(), token.encode(), hashlib.sha256).hexdigest()
 
 
-def create_session(db: Session, employee: Employee, ip: str) -> tuple[str, EmployeeSession]:
+def create_session(
+    db: Session, employee: Employee, ip: str, device_info: str | None = None, synthetic: bool = False
+) -> tuple[str, EmployeeSession]:
     token = generate_token()
     session = EmployeeSession(
         employee_id=employee.id,
         token_hash=hash_token(token),
         ip_address=ip,
+        device_info=device_info,
+        is_synthetic=synthetic,
         expires_at=utcnow() + timedelta(minutes=get_settings().session_ttl_minutes),
     )
     db.add(session)
@@ -68,12 +72,24 @@ def normalize_ip(value: str | None) -> str | None:
         return None
 
 
-def resolve_ip(request: Request, override: str | None = None) -> str:
-    """Client IP. A caller-supplied IP is honoured only when simulation is enabled (demo/testing)."""
-    if override and get_settings().allow_simulated_source_ip:
-        return override
-    host = request.client.host if request.client else None
-    return normalize_ip(host) or "0.0.0.0"
+def resolve_ip(request: Request, employee: Employee | None = None) -> str:
+    """Source IP as seen by the backend; clients cannot supply it.
+
+    Everything runs on one machine in the local demo, so loopback connections are attributed to the
+    employee's registered workstation address (MAP_LOOPBACK_TO_WORKSTATION=true). Any other peer
+    address is recorded as-is.
+    """
+    host = normalize_ip(request.client.host if request.client else None)
+    is_local = host is None or ipaddress.ip_address(host).is_loopback
+    if is_local and employee is not None and employee.known_ips and get_settings().map_loopback_to_workstation:
+        return employee.known_ips[0]
+    return host or "0.0.0.0"
+
+
+def device_info(request: Request) -> str:
+    """Descriptive device string from the client; informational only and sanitised."""
+    raw = request.headers.get("x-device-info") or request.headers.get("user-agent") or "unknown"
+    return "".join(ch for ch in raw if ch.isprintable())[:200] or "unknown"
 
 
 @dataclass

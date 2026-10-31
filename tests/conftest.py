@@ -29,21 +29,20 @@ def db_path():
     return Path(_tmp, "test.db")
 
 
-def login(client, username, password=None, ip=None):
+def login(client, identifier, password=None, headers=None):
+    """`identifier` is an employee ID (EMP-1001) or a username."""
     s = get_settings()
-    password = password or (s.demo_admin_password if username == "soc.admin" else s.demo_employee_password)
-    body = {"username": username, "password": password}
-    if ip:
-        body["source_ip"] = ip
-    return client.post("/api/auth/login", json=body)
+    is_admin = identifier in ("soc.admin", "SEC-9011")
+    password = password or (s.demo_admin_password if is_admin else s.demo_employee_password)
+    return client.post("/api/auth/login", json={"employee_id": identifier, "password": password}, headers=headers or {})
 
 
-def auth_header(client, username, ip=None):
-    response = login(client, username, ip=ip)
+def auth_header(client, identifier):
+    response = login(client, identifier)
     assert response.status_code == 200, response.text
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
 @pytest.fixture(scope="session")
 def admin(client):
-    return auth_header(client, "soc.admin")
+    return auth_header(client, "SEC-9011")

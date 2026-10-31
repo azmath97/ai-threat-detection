@@ -29,6 +29,8 @@ RULE_DESCRIPTIONS = {
     "data_export": "Data export operation",
     "external_transfer": "Transfer of data to an external destination",
     "permission_change_attempt": "Attempt to change access permissions (privilege escalation)",
+    "privileged_account_created": "New privileged account created",
+    "new_account_login": "Login by an account created within the last 24 hours by another user",
 }
 
 
@@ -73,6 +75,21 @@ def _count(db: Session, employee_id: int, event_type: str, since: datetime, even
     ) or 0
 
 
+def _flagged_recently(db: Session, employee: Employee, event: SecurityEvent, rule: str, *,
+                      resource: str | None = None, same_ip: bool = False) -> bool:
+    """True if an earlier event inside the risk window already carries this rule (so it is not re-scored)."""
+    for other in window_events(db, employee.id, event.timestamp, get_settings().risk_window_minutes):
+        if other.id == event.id:
+            continue
+        if resource is not None and other.resource != resource:
+            continue
+        if same_ip and other.source_ip != event.source_ip:
+            continue
+        if any(flag["rule"] == rule for flag in (other.risk_flags or [])):
+            return True
+    return False
+
+
 def evaluate_event(db: Session, employee: Employee, event: SecurityEvent) -> list[Factor]:
     s = get_settings()
     et = event.event_type
@@ -82,12 +99,17 @@ def evaluate_event(db: Session, employee: Employee, event: SecurityEvent) -> lis
     factors: list[Factor] = []
     is_login = et in ("login", "login_failed")
 
+    # Contextual signals describe the situation, so they score once per window rather than once per click.
     if event.source_ip not in (employee.known_ips or []):
-        factors.append(_factor("unfamiliar_ip", 20 if is_login else 8))
+        if is_login:
+            factors.append(_factor("unfamiliar_ip", 20))
+        elif not _flagged_recently(db, employee, event, "unfamiliar_ip", same_ip=True):
+            factors.append(_factor("unfamiliar_ip", 8))
 
     local = to_local(event.timestamp)
     if local.weekday() >= 5 or not (s.business_hours_start <= local.hour < s.business_hours_end):
-        factors.append(_factor("off_hours", 12 if is_login else 5))
+        if not _flagged_recently(db, employee, event, "off_hours"):
+            factors.append(_factor("off_hours", 12 if is_login else 5))
 
     if et == "login_failed":
         factors.append(_factor("failed_login", 10))
@@ -107,9 +129,11 @@ def evaluate_event(db: Session, employee: Employee, event: SecurityEvent) -> lis
             factors.append(_factor("restricted_denied", 10))
 
     if et in RESOURCE_EVENT_TYPES:
-        if event.outcome == "success" and sensitivity >= 3:
+        if event.outcome == "success" and sensitivity >= 3 and not _flagged_recently(
+                db, employee, event, "sensitive_access", resource=event.resource):
             factors.append(_factor("sensitive_access", 8))
 
+        # Self-service pages (profile, payslips, directory...) are ignored: only classified data counts.
         since = event.timestamp - timedelta(minutes=10)
         seen = set(
             db.scalars(
@@ -122,11 +146,12 @@ def evaluate_event(db: Session, employee: Employee, event: SecurityEvent) -> lis
                 )
             )
         )
-        if event.resource not in seen and len(seen) + 1 >= 5:
+        classified = {r for r in seen if sensitivity_of(r) >= 2}
+        if sensitivity >= 2 and event.resource not in classified and len(classified) + 1 >= 5:
             factors.append(_factor("rapid_enumeration", 20))
 
-    if et in ("file_download", "data_export") and event.outcome == "success":
-        if int((event.details or {}).get("record_count", 0)) >= s.bulk_record_threshold:
+    if et in ("file_download", "data_export", "external_transfer") and event.outcome == "success":
+        if event.records_downloaded >= s.bulk_record_threshold:
             factors.append(_factor("bulk_download", 30))
     if et == "data_export" and event.outcome == "success":
         factors.append(_factor("data_export", 15))
@@ -134,8 +159,23 @@ def evaluate_event(db: Session, employee: Employee, event: SecurityEvent) -> lis
         factors.append(_factor("external_transfer", 20))
     if et == "permission_change_attempt":
         factors.append(_factor("permission_change_attempt", 30))
+    if et == "administrative_action":
+        if event.outcome == "denied":
+            factors.append(_factor("permission_change_attempt", 30))
+        elif (event.details or {}).get("action") == "create_privileged_account":
+            factors.append(_factor("privileged_account_created", 35))
+
+    if et == "login" and employee.created_by_id and employee.created_at:
+        if event.timestamp - employee.created_at < timedelta(hours=24):
+            factors.append(_factor("new_account_login", 15))
 
     return factors
+
+
+def linked_employee_ids(db: Session, employee_id: int) -> list[int]:
+    """The employee plus any accounts they created; activity of those accounts counts towards them."""
+    children = db.scalars(select(Employee.id).where(Employee.created_by_id == employee_id))
+    return [employee_id, *children]
 
 
 def window_events(db: Session, employee_id: int, as_of: datetime, minutes: int) -> list[SecurityEvent]:
@@ -143,7 +183,7 @@ def window_events(db: Session, employee_id: int, as_of: datetime, minutes: int) 
         db.scalars(
             select(SecurityEvent)
             .where(
-                SecurityEvent.employee_id == employee_id,
+                SecurityEvent.employee_id.in_(linked_employee_ids(db, employee_id)),
                 SecurityEvent.timestamp >= as_of - timedelta(minutes=minutes),
                 SecurityEvent.timestamp <= as_of,
             )
@@ -207,4 +247,8 @@ def all_current_scores(db: Session) -> dict[int, int]:
         .where(SecurityEvent.timestamp >= since)
         .group_by(SecurityEvent.employee_id)
     )
-    return {emp_id: min(100, int(total or 0)) for emp_id, total in rows}
+    raw = {emp_id: int(total or 0) for emp_id, total in rows}
+    scores = dict(raw)
+    for child_id, parent_id in db.execute(select(Employee.id, Employee.created_by_id).where(Employee.created_by_id.is_not(None))):
+        scores[parent_id] = scores.get(parent_id, 0) + raw.get(child_id, 0)
+    return {emp_id: min(100, total) for emp_id, total in scores.items()}

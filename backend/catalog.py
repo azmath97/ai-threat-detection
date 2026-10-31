@@ -14,6 +14,11 @@ RESOURCES: dict[str, dict] = {
     "payroll-records": {"name": "Payroll Records", "sensitivity": 3, "department": "Finance"},
     "hr-records": {"name": "HR Records", "sensitivity": 3, "department": "HR"},
     "it-admin-console": {"name": "IT Admin Console", "sensitivity": 3, "department": "IT"},
+    # Self-service resources: available to every authenticated employee (read only), still logged.
+    "my-profile": {"name": "My Profile", "sensitivity": 1, "department": "All", "self_service": True},
+    "my-payslips": {"name": "My Payslips", "sensitivity": 1, "department": "All", "self_service": True},
+    "employee-directory": {"name": "Employee Directory", "sensitivity": 1, "department": "All", "self_service": True},
+    "document-library": {"name": "Document Library", "sensitivity": 1, "department": "All", "self_service": True},
 }
 
 EVENT_TYPES = (
@@ -23,11 +28,15 @@ EVENT_TYPES = (
     "resource_access",
     "file_download",
     "data_export",
+    "directory_search",
+    "administrative_action",
     "external_transfer",
     "permission_change_attempt",
 )
 AUTH_EVENT_TYPES = ("login", "login_failed", "logout")
 RESOURCE_EVENT_TYPES = ("resource_access", "file_download", "data_export")
+# Event types whose outcome is decided by the backend permission check
+CLIENT_EVENT_TYPES = RESOURCE_EVENT_TYPES + ("external_transfer", "permission_change_attempt")
 
 EVENT_TO_ACTION = {"resource_access": "view", "file_download": "download", "data_export": "export"}
 ACTION_TO_EVENT = {v: k for k, v in EVENT_TO_ACTION.items()}
@@ -41,3 +50,12 @@ def sensitivity_of(resource: str | None) -> int:
     if resource and resource in RESOURCES:
         return RESOURCES[resource]["sensitivity"]
     return 0
+
+
+def is_self_service(resource: str | None) -> bool:
+    return bool(resource and RESOURCES.get(resource, {}).get("self_service"))
+
+
+def managed_resources() -> list[str]:
+    """Resources that require an explicit permission grant."""
+    return [rid for rid in RESOURCES if not is_self_service(rid)]

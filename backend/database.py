@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import DateTime, create_engine, event
+from sqlalchemy import DateTime, create_engine, event, inspect
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.types import TypeDecorator
@@ -59,6 +59,34 @@ def init_db() -> None:
     from backend import models  # noqa: F401  (register tables)
 
     Base.metadata.create_all(bind=engine)
+    _add_missing_columns()
+    _backfill_employee_codes()
+
+
+def _add_missing_columns() -> None:
+    """Lightweight in-place upgrade so databases created by earlier versions keep working."""
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing:
+                    continue
+                ddl = f"ALTER TABLE {table.name} ADD COLUMN {column.name} {column.type.compile(engine.dialect)}"
+                if column.server_default is not None:
+                    ddl += f" DEFAULT {column.server_default.arg}"
+                conn.exec_driver_sql(ddl)
+
+
+def _backfill_employee_codes() -> None:
+    from backend.models import Employee, employee_code_for
+
+    with SessionLocal() as db:
+        missing = db.query(Employee).filter(Employee.employee_code.is_(None)).all()
+        for employee in missing:
+            employee.employee_code = employee_code_for(employee.id, employee.role)
+        if missing:
+            db.commit()
 
 
 def get_db():

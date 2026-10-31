@@ -8,14 +8,23 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from backend import correlation_engine, detection_engine, event_service, investigation_service, response_service
+from backend import (
+    correlation_engine,
+    detection_engine,
+    event_service,
+    investigation_service,
+    portal_routes,
+    response_service,
+    simulation_routes,
+)
+from backend.auth_service import authenticate, find_employee
 from backend.catalog import (
-    AUTH_EVENT_TYPES,
     EVENT_TO_ACTION,
     EVENT_TYPES,
     RESOURCE_EVENT_TYPES,
     RESOURCES,
     SENSITIVITY_LABELS,
+    is_self_service,
 )
 from backend.config import get_settings
 from backend.database import SessionLocal, get_db, init_db, utcnow
@@ -59,10 +68,9 @@ from backend.schemas import (
     RiskAssessRequest,
     RiskDetailOut,
 )
-from backend.security import AuthContext, create_session, get_auth, require_admin, resolve_ip, verify_password
+from backend.security import AuthContext, device_info, get_auth, require_admin, resolve_ip
 
 logger = logging.getLogger("insider_threat")
-_DUMMY_HASH = "pbkdf2_sha256$1000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 
 @asynccontextmanager
@@ -91,6 +99,10 @@ app.add_middleware(
 )
 
 
+app.include_router(portal_routes.router)
+app.include_router(simulation_routes.router)
+
+
 @app.exception_handler(ServiceError)
 async def service_error_handler(_request: Request, exc: ServiceError):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.message})
@@ -103,7 +115,8 @@ def _get_employee_or_404(db: Session, employee_id: int) -> Employee:
     return employee
 
 
-def _profile(employee: Employee) -> ProfileOut:
+def _profile(db: Session, employee: Employee, internal: bool = False) -> ProfileOut:
+    """`internal` adds security-team-only fields (known IPs); employees never receive them."""
     permissions = [
         PermissionOut(
             resource=p.resource,
@@ -114,13 +127,18 @@ def _profile(employee: Employee) -> ProfileOut:
         for p in sorted(employee.permissions, key=lambda p: p.resource)
         if p.resource in RESOURCES
     ]
+    previous_login = db.scalars(
+        select(SecurityEvent.timestamp)
+        .where(SecurityEvent.employee_id == employee.id, SecurityEvent.event_type == "login")
+        .order_by(SecurityEvent.timestamp.desc(), SecurityEvent.id.desc())
+        .offset(1)
+        .limit(1)
+    ).first()
     base = {name: getattr(employee, name) for name in EmployeeOut.model_fields}
-    return ProfileOut(**base, known_ips=list(employee.known_ips or []), permissions=permissions)
-
-
-def _pick_ip(override: str | None, default: str) -> str:
-    """Simulated source IPs are honoured only when ALLOW_SIMULATED_SOURCE_IP is enabled."""
-    return override if override and get_settings().allow_simulated_source_ip else default
+    return ProfileOut(
+        **base, known_ips=list(employee.known_ips or []) if internal else [], permissions=permissions,
+        previous_login_at=previous_login,
+    )
 
 
 # ---------------------------------------------------------------- health
@@ -133,46 +151,27 @@ def health(db: Session = Depends(get_db)):
 # ---------------------------------------------------------------- auth
 @app.post("/api/auth/login", response_model=LoginResponse, tags=["auth"])
 def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
-    ip = resolve_ip(request, body.source_ip)
-    employee = db.scalar(select(Employee).where(Employee.username == body.username))
-
-    if employee is None:
-        verify_password(body.password, _DUMMY_HASH)  # equalise timing for unknown users
-        write_audit(db, "login_unknown_user", ip=ip, details={"username": body.username[:64]})
-        db.commit()
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid username or password")
-
-    if not verify_password(body.password, employee.password_hash):
-        event_service.record_event(db, employee, "login_failed", source_ip=ip, outcome="failure",
-                                   details={"reason": "bad_password"})
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid username or password")
-
-    if employee.status != "active":
-        event_service.record_event(db, employee, "login_failed", source_ip=ip, outcome="denied",
-                                   details={"reason": "account_locked"})
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Account is locked. Contact the security team.")
-
-    token, session = create_session(db, employee, ip)
-    employee.last_login_at = utcnow()
-    event_service.record_event(db, employee, "login", source_ip=ip, session=session, commit=False)
-    write_audit(db, "login_success", actor_id=employee.id, target_type="session", target_id=session.id, ip=ip)
-    db.commit()
-    return LoginResponse(access_token=token, expires_at=session.expires_at, employee=EmployeeOut.model_validate(employee))
+    ip = resolve_ip(request, find_employee(db, body.identifier))
+    result = authenticate(db, body.identifier, body.password, ip=ip, device_info=device_info(request))
+    return LoginResponse(
+        access_token=result.token, expires_at=result.session.expires_at,
+        employee=EmployeeOut.model_validate(result.employee),
+    )
 
 
 @app.post("/api/auth/logout", status_code=status.HTTP_204_NO_CONTENT, tags=["auth"])
 def logout(request: Request, auth: AuthContext = Depends(get_auth), db: Session = Depends(get_db)):
     auth.session.revoked_at = utcnow()
-    event_service.record_event(db, auth.employee, "logout", source_ip=auth.session.ip_address,
-                               session=auth.session, commit=False)
+    event_service.record_event(db, auth.employee, "logout", source_ip=resolve_ip(request, auth.employee),
+                               session=auth.session, device_info=device_info(request), commit=False)
     write_audit(db, "logout", actor_id=auth.employee.id, target_type="session", target_id=auth.session.id)
     db.commit()
 
 
 # ---------------------------------------------------------------- employees
 @app.get("/api/employees/me", response_model=ProfileOut, tags=["employees"])
-def my_profile(auth: AuthContext = Depends(get_auth)):
-    return _profile(auth.employee)
+def my_profile(auth: AuthContext = Depends(get_auth), db: Session = Depends(get_db)):
+    return _profile(db, auth.employee)
 
 
 @app.get("/api/employees", response_model=list[EmployeeOut], tags=["employees"])
@@ -184,7 +183,7 @@ def list_employees(_: AuthContext = Depends(require_admin), db: Session = Depend
 def get_employee(employee_id: int, auth: AuthContext = Depends(get_auth), db: Session = Depends(get_db)):
     if employee_id != auth.employee.id and not auth.is_admin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own profile")
-    return _profile(_get_employee_or_404(db, employee_id))
+    return _profile(db, _get_employee_or_404(db, employee_id), internal=auth.is_admin)
 
 
 # ---------------------------------------------------------------- resources
@@ -197,7 +196,7 @@ def list_resources(auth: AuthContext = Depends(get_auth)):
             name=meta["name"],
             sensitivity=SENSITIVITY_LABELS[meta["sensitivity"]],
             department=meta["department"],
-            access_level=levels.get(rid),
+            access_level="read" if is_self_service(rid) else levels.get(rid),
         )
         for rid, meta in RESOURCES.items()
     ]
@@ -214,10 +213,9 @@ def access_resource(
     meta = RESOURCES.get(resource_id)
     if meta is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Resource not found")
-    ip = _pick_ip(body.source_ip, auth.session.ip_address)
     result, permitted = event_service.access_resource(
-        db, auth.employee, resource_id, body.action,
-        source_ip=ip, session=auth.session, record_count=body.record_count,
+        db, auth.employee, resource_id, body.action, source_ip=resolve_ip(request, auth.employee),
+        session=auth.session, record_count=body.record_count, device_info=device_info(request),
     )
     if not permitted:
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"You do not have permission to {body.action} {meta['name']}")
@@ -238,34 +236,20 @@ def access_resource(
 def create_event(
     body: EventCreate, request: Request, auth: AuthContext = Depends(get_auth), db: Session = Depends(get_db)
 ):
-    target = auth.employee
-    if body.employee_id is not None and body.employee_id != auth.employee.id:
-        if not auth.is_admin:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only log events for your own account")
-        target = _get_employee_or_404(db, body.employee_id)
-    if body.event_type in AUTH_EVENT_TYPES and not auth.is_admin:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Authentication events are generated by the login endpoints")
-
-    on_behalf = target.id != auth.employee.id
-    session = None if on_behalf else auth.session
-    ip = _pick_ip(body.source_ip, resolve_ip(request) if on_behalf else auth.session.ip_address)
-
+    """Telemetry for the authenticated employee only; identity, IP and device are derived by the backend."""
+    ip, device = resolve_ip(request, auth.employee), device_info(request)
     if body.event_type in RESOURCE_EVENT_TYPES:
         result, _ = event_service.access_resource(
-            db, target, body.resource, EVENT_TO_ACTION[body.event_type],
-            source_ip=ip, session=session, record_count=body.record_count, details=body.details,
+            db, auth.employee, body.resource, EVENT_TO_ACTION[body.event_type], source_ip=ip, session=auth.session,
+            record_count=body.record_count, details=body.details, device_info=device,
         )
     else:
-        outcome = {"login_failed": "failure", "permission_change_attempt": "denied"}.get(body.event_type, "success")
-        details = {**body.details, "record_count": body.record_count} if body.record_count else body.details
+        outcome = "denied" if body.event_type == "permission_change_attempt" else "success"
         result = event_service.record_event(
-            db, target, body.event_type, source_ip=ip, resource=body.resource,
-            outcome=outcome, details=details, session=session,
+            db, auth.employee, body.event_type, source_ip=ip, resource=body.resource, outcome=outcome,
+            details=body.details, session=auth.session, device_info=device,
+            records_accessed=body.record_count, records_downloaded=body.record_count if outcome == "success" else 0,
         )
-    if on_behalf:
-        write_audit(db, "event_injected", actor_id=auth.employee.id, target_type="event",
-                    target_id=result.event.id, details={"employee_id": target.id, "event_type": body.event_type})
-        db.commit()
 
     if auth.is_admin:
         return EventCreated(event=EventPublic.model_validate(result.event), risk_score=result.assessment.score,
@@ -291,12 +275,15 @@ def list_events(
     since: str | None = Query(None, description="ISO-8601 timestamp (UTC if no offset)"),
     until: str | None = Query(None),
     min_risk_points: int = Query(0, ge=0),
+    synthetic: bool | None = Query(None, description="Filter simulation-generated events"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
     if event_type is not None and event_type not in EVENT_TYPES:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"event_type must be one of {', '.join(EVENT_TYPES)}")
     conditions = [SecurityEvent.risk_points >= min_risk_points]
+    if synthetic is not None:
+        conditions.append(SecurityEvent.is_synthetic.is_(synthetic))
     if employee_id:
         conditions.append(SecurityEvent.employee_id == employee_id)
     if event_type:

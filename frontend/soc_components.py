@@ -27,6 +27,9 @@ _CSS = """
   .kpi .k-label { color: var(--muted); font-size: .68rem; text-transform: uppercase; letter-spacing: .02em; word-break: normal; overflow-wrap: normal; }
   .kpi .k-value { color: var(--navy); font-size: 1.4rem; font-weight: 600; line-height: 1.3; word-break: normal; }
   .kpi .k-sub { color: var(--muted); font-size: .72rem; }
+  .kpi .k-value.long { font-size: 1.02rem; line-height: 1.9; }
+  section[data-testid="stSidebar"] .stButton > button:focus:not(:active):not([kind="primary"]) { background: transparent; box-shadow: none; }
+  section[data-testid="stSidebar"] .stButton > button:hover:not([kind="primary"]) { background: #E7ECF2; }
   .kpi.alert .k-value { color: var(--red); }
   .kpi.warn .k-value { color: #9A4A00; }
 
@@ -74,8 +77,9 @@ def severity_badge(level: str) -> str:
 
 
 def kpi(label: str, value, sub: str = "", tone: str = "") -> str:
+    size = " long" if len(str(value)) > 14 else ""
     return (f'<div class="kpi {tone}"><div class="k-label">{html.escape(label)}</div>'
-            f'<div class="k-value">{html.escape(str(value))}</div><div class="k-sub">{html.escape(sub)}</div></div>')
+            f'<div class="k-value{size}">{html.escape(str(value))}</div><div class="k-sub">{html.escape(sub)}</div></div>')
 
 
 def kpi_grid(tiles: list[tuple]) -> None:

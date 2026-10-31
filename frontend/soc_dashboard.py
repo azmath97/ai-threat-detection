@@ -28,6 +28,8 @@ TIME_RANGES = {"Last 15 minutes": 15, "Last hour": 60, "Last 6 hours": 360, "Las
 SEVERITIES = {"All severities": None, "Normal": "normal", "Suspicious": "suspicious", "High Risk": "high_risk", "Critical": "critical"}
 EVENT_TYPES = ["All event types", "login", "login_failed", "logout", "resource_access", "file_download", "data_export",
                "directory_search", "administrative_action", "external_transfer", "permission_change_attempt"]
+COMPONENT_LABELS = {"ml": "ML anomaly score", "rules": "Rule severity", "correlation": "Correlated evidence",
+                    "baseline": "Behavioural baseline", "stage": "Attack stage"}
 EXPOSURE_ROWS = [("sensitive_records_accessed", "Sensitive records accessed"), ("records_exported", "Records exported"),
                  ("records_potentially_exposed", "Records potentially exposed"),
                  ("records_in_external_transfers", "Records in external transfers")]
@@ -350,7 +352,7 @@ def render_investigation(inv_id: int) -> None:
         live_data = d["live"]
         if live_data:
             comps = live_data["components"]
-            ui.table([{"component": name.title(), "value": f"{comps[name]['value']:.2f}", "weight": f"{comps[name]['weight']:.2f}",
+            ui.table([{"component": COMPONENT_LABELS[name], "value": f"{comps[name]['value']:.2f}", "weight": f"{comps[name]['weight']:.2f}",
                        "contribution": f"{comps[name]['contribution']:.1f}"} for name in ("ml", "rules", "correlation", "baseline", "stage")],
                      {"component": "Component", "value": "Value (0-1)", "weight": "Weight", "contribution": "Points"})
             st.caption(f"Current live confidence {live_data['confidence']:.1f} ({live_data['independent_stages']} independent stages; "
@@ -361,11 +363,11 @@ def render_investigation(inv_id: int) -> None:
     if alert:
         st.caption(f"Alert #{alert['id']} - first suspicious event #{alert['first_event_id']}, triggering event #{alert['trigger_event_id']}, "
                    f"detected {short(alert['detected_at']['local'])}")
-        ui.table([{"time": short(ev["timestamp"]), "event": f"#{ev['event_id']}", "account": ev["account"],
+        ui.table([{"time": short(ev["timestamp"]["local"]), "event": f"#{ev['event_id']}", "account": ev["account"],
                    "type": ev["event_type"].replace("_", " "), "resource": ev["resource"] or "-", "rule": ev["rule"].replace("_", " "),
                    "stages": ", ".join(s.replace("_", " ") for s in ev["stages"]) or "-", "links": ", ".join(ev["relations"]) or "-"}
                   for ev in alert["evidence"]],
-                 {"time": "Time (UTC)", "event": "Event", "account": "Account", "type": "Event type", "resource": "Resource",
+                 {"time": "Time", "event": "Event", "account": "Account", "type": "Event type", "resource": "Resource",
                   "rule": "Strongest rule", "stages": "Stages supported", "links": "Linked by"})
     else:
         st.caption("No alert has been raised for this investigation; showing the investigation timeline instead.")
@@ -555,11 +557,11 @@ def page_response() -> None:
         for t in data["threats"]:
             st.markdown(f"**{t['employee_id']}** &nbsp; {sc.severity_badge(t['level'])} &nbsp; confidence {t['confidence']:.1f} "
                         f"&nbsp; stage: {t['stage_label']} &nbsp; exposure: {t['exposure_label']}", unsafe_allow_html=True)
-            head = st.columns([1, 2.2, 1.6, 4.6, 1, 1.2])
+            head = st.columns([1.3, 2.4, 2.0, 3.8, 1.3, 1.5])
             for col, title in zip(head, ["Priority", "Action", "Target", "Reason", "Status", ""]):
                 col.markdown(f"<span style='color:#5F6B7A;font-size:.78rem'>{title}</span>", unsafe_allow_html=True)
             for i, a in enumerate(t["actions"]):
-                row = st.columns([1, 2.2, 1.6, 4.6, 1, 1.2], vertical_alignment="center")
+                row = st.columns([1.3, 2.4, 2.0, 3.8, 1.3, 1.5], vertical_alignment="center")
                 label = options.get(a["action"], {}).get("label", a["action"].replace("_", " ").title())
                 row[0].write(a["priority"])
                 row[1].write(label)

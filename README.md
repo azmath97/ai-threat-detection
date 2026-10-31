@@ -9,12 +9,12 @@ front end. All data is synthetic; no real credentials, personal or banking data 
 | Backend, database, event pipeline, API | done |
 | Employee Workspace Portal (Streamlit) + admin simulation console | done |
 | **AI-powered detection and attack correlation engine** | done |
-| SOC Dashboard | next |
+| **Security Operations Centre (SOC) dashboard** | done |
 
 ## How it works
 
 ```
-Employee Portal  --HTTP-->  FastAPI backend  --> SQLite (shared)  <-- SOC Dashboard (next phase)
+Employee Portal  --HTTP-->  FastAPI backend  --> SQLite (shared)  <-- SOC Dashboard (/api/soc/*)
 Simulation Console --HTTP-->      |
                                   +-- every action -> security event -> risk scoring -> correlation -> alert/investigation
 ```
@@ -29,7 +29,7 @@ Simulation Console --HTTP-->      |
 
 ```
 ai-threat-detection/
-├── app.py                          # launcher: backend | portal | simulation | all
+├── app.py                          # launcher: backend | portal | simulation | soc | all
 ├── backend/
 │   ├── main.py                     # FastAPI app, auth/events/risk/alerts/containment/dashboard endpoints
 │   ├── threat_engine.py            # hybrid confidence score, assessment storage, recommended actions
@@ -37,7 +37,8 @@ ai-threat-detection/
 │   ├── correlation_engine.py  data_exposure.py  baseline.py
 │   ├── event_service.py            # event pipeline: persist -> rules -> ML/correlation -> alert
 │   ├── portal_routes.py  simulation_routes.py  auth_service.py  simulation_service.py  portal_data.py
-│   ├── investigation_service.py  response_service.py
+│   ├── investigation_service.py  response_service.py  controls.py   # reports, containment, IP blocks / isolation
+│   ├── soc_service.py  soc_routes.py                                # SOC read models and /api/soc/* endpoints
 │   ├── models.py  database.py  schemas.py  security.py  catalog.py  config.py  errors.py
 ├── ml/
 │   ├── features.py                 # one feature pipeline for training and live scoring
@@ -46,10 +47,11 @@ ai-threat-detection/
 ├── frontend/
 │   ├── employee_portal.py          # Employee Workspace Portal
 │   ├── simulation_console.py       # separate, administrator-only simulation control panel
-│   ├── components.py  api_client.py
+│   ├── soc_dashboard.py            # Security Operations Centre dashboard (8 pages)
+│   ├── components.py  soc_components.py  api_client.py
 ├── .streamlit/config.toml          # enterprise light theme
 ├── data/seed_data.py               # synthetic employees + 14 days of history
-├── tests/                          # pytest suite (32 tests: API, portal, ML, detection scenarios)
+├── tests/                          # pytest suite (44 tests: API, portal, ML, detection, SOC)
 └── requirements.txt  .env.example  README.md
 ```
 
@@ -59,10 +61,11 @@ ai-threat-detection/
 python -m venv .venv; .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-python app.py all          # backend :8000, Employee Portal :8501, Simulation Console :8502
+python app.py all          # backend :8000, Employee Portal :8501, Simulation Console :8502, SOC Dashboard :8503
 ```
 
-Or run the parts separately: `python app.py` (backend), `python app.py portal`, `python app.py simulation`.
+Or run the parts separately: `python app.py` (backend), `python app.py portal`, `python app.py simulation`,
+`python app.py soc`.
 If port 8000 is busy: `$env:API_PORT="8010"; python app.py all`. The SQLite database
 (`data/insider_threat.db`) is created and seeded on first start (`python -m data.seed_data --reset` rebuilds it;
 databases from earlier versions are upgraded in place).
@@ -134,6 +137,31 @@ for risk, correlation and alerting. **Reset simulation** removes all synthetic d
 the affected employees and restores their last-login time. Run the simulation on accounts that are not in active
 use: genuine activity during a run is scored in the same window.
 
+## SOC Dashboard (http://127.0.0.1:8503, security administrators only)
+
+Sign in as `SEC-9011`. Every figure comes from the backend (`/api/soc/*`); nothing is hardcoded. Live panels poll a
+cheap `/api/soc/version` token every 3 seconds and refetch only when new events, alerts or responses exist, so filters
+and navigation are not reset. Employees are shown by ID, department and role only; names are not used as risk signals.
+
+| Page | Content |
+|---|---|
+| Security Overview | KPIs (events, active investigations, critical alerts, high-risk employees, sensitive records accessed, confirmed external transfers), live attack-confidence meter, active threats |
+| Live Event Feed | events with anomaly score, risk contribution and attack stage; filters for employee, IP, event type, severity, time range |
+| Attack Investigations | active and historical investigations; selecting one opens the full investigation (evidence, score breakdown, exposure, actions) |
+| Employee Risk Monitor | employees ranked by risk from behavioural and rule evidence only |
+| Attack Timeline | the eight kill-chain stages built from correlated events, current stage highlighted |
+| Attack Graph | accounts, IPs, sessions, systems, privileged accounts and external destinations built from stored events |
+| Response Centre | recommended containment, active controls, history, manual response |
+| Audit Logs | alerts, investigation updates, containment, administrator actions, failed responses |
+
+Response actions (all audited, failures included): `revoke_sessions`, `lock_account`, `restrict_access`,
+`remove_privileges`, `block_ip`, `isolate_system`, `restore_account`, `unblock_ip`, `release_system`. Disruptive
+actions (everything except the last three) require `confirm: true`; this is enforced by the backend, and the dashboard
+asks for explicit confirmation with a recorded reason. A blocked IP is rejected at login and on every request, and an
+isolated system denies access without scoring the denial against the employee.
+
+To see it live: open the dashboard, then run the steps in the Simulation Console (or `POST /api/simulation/steps`).
+
 ## Detection engine
 
 Every event goes through one pipeline in `backend/event_service.py`; dashboards only read what it stores.
@@ -193,7 +221,8 @@ Auth is `Authorization: Bearer <token>`. "Admin" = `security_admin` role. Intera
 | GET | `/api/risk/employees[/{id}]`, POST `/api/risk/assess` | admin | risk scores, factors, attack stages |
 | GET / PATCH | `/api/alerts[/{id}]` | admin | alerts |
 | GET / POST / PATCH | `/api/investigations[/{id}]` | admin | investigation reports |
-| GET / POST | `/api/containment` | admin | `revoke_sessions`, `lock_account`, `restrict_access`, `restore_account` |
+| GET / POST | `/api/containment` | admin | `revoke_sessions`, `lock_account`, `restrict_access`, `remove_privileges`, `block_ip`, `isolate_system`, `restore_account`, `unblock_ip`, `release_system` (`confirm` required for disruptive ones) |
+| GET | `/api/soc/version`, `/overview`, `/confidence-history`, `/events`, `/employees`, `/investigations[/{id}]`, `/scopes`, `/timeline`, `/graph`, `/response`, `/audit` | admin | SOC dashboard read models |
 | GET | `/api/dashboard/stats`, `/api/audit-logs` | admin | KPIs, audit trail |
 | GET / POST | `/api/detection/status`, `/reload`, `/retrain` | admin | model mode + metrics, thresholds, rules; reload config; retrain |
 | GET / POST | `/api/simulation/scenarios`, `/status`, `/steps`, `/run`, `/reset` | admin + simulation enabled | attack simulation |

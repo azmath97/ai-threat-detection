@@ -41,11 +41,11 @@ def build_report(db: Session, employee: Employee, as_of: datetime | None = None,
 
     if threat.correlation and threat.correlation.stages:
         chain = " -> ".join(STAGE_LABELS[s] for s in threat.correlation.stage_history)
-        summary = (f"{employee.full_name} ({employee.job_role}, {employee.department}): attack confidence {threat.score}/100 "
+        summary = (f"{employee.employee_code} ({employee.job_role}, {employee.department}): attack confidence {threat.score}/100 "
                    f"({SEVERITY_LABELS[threat.level]}). Current stage: {threat.stage_label}. Observed stages: {chain}. "
                    f"{threat.exposure['statement']}")
     else:
-        summary = (f"No correlated attack evidence for {employee.full_name}. Attack confidence {threat.score}/100 "
+        summary = (f"No correlated attack evidence for {employee.employee_code}. Attack confidence {threat.score}/100 "
                    f"({SEVERITY_LABELS[threat.level]}).")
     return {
         "attack_stage": threat.stage,

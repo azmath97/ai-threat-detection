@@ -68,7 +68,7 @@ def get_settings() -> Settings:
         secret_key=_str("SECRET_KEY", "dev-only-secret-change-me"),
         session_ttl_minutes=_int("SESSION_TTL_MINUTES", 480),
         display_timezone=_str("DISPLAY_TIMEZONE", "Asia/Kolkata"),
-        cors_origins=[o.strip() for o in _str("CORS_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501").split(",") if o.strip()],
+        cors_origins=[o.strip() for o in _str("CORS_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501,http://localhost:8503,http://127.0.0.1:8503").split(",") if o.strip()],
         auto_seed=_bool("AUTO_SEED", True),
         simulation_enabled=_bool("SIMULATION_ENABLED", True),
         map_loopback_to_workstation=_bool("MAP_LOOPBACK_TO_WORKSTATION", True),

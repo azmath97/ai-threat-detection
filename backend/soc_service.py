@@ -247,11 +247,17 @@ def _timeline_edge(items: list[dict]) -> tuple[dict | None, dict | None]:
     return (brief(flagged[0]) if flagged else None, brief(items[-1]) if items else None)
 
 
-def _with_local(item: dict | None) -> dict | None:
+def _codes_by_username(db: Session) -> dict[str, str]:
+    return {e.username: e.employee_code for e in _employees(db).values()}
+
+
+def _with_local(item: dict | None, codes: dict[str, str] | None = None) -> dict | None:
     if item is None:
         return None
     ts = datetime.fromisoformat(item["timestamp"])
-    return {**item, "timestamp": {"utc": ts.isoformat(), "local": to_local(ts).isoformat()}}
+    account = item.get("account")
+    extra = {"account": codes.get(account, account)} if codes and account else {}
+    return {**item, **extra, "timestamp": {"utc": ts.isoformat(), "local": to_local(ts).isoformat()}}
 
 
 def investigation_row(inv: AttackInvestigation, alert: SecurityAlert | None) -> dict:
@@ -291,15 +297,17 @@ def investigation_detail(db: Session, investigation_id: int) -> dict:
     actions = db.scalars(select(ContainmentAction).where(ContainmentAction.investigation_id == inv.id)
                          .order_by(ContainmentAction.id.desc())).all()
     items = sorted(inv.timeline or [], key=lambda i: (i["timestamp"], i["event_id"]))
+    by_name = _codes_by_username(db)
+    evidence = [_with_local(ev, by_name) for ev in (alert.evidence or [])] if alert else []
     return {
         **investigation_row(inv, alert),
         "summary": inv.summary, "indicators": inv.indicators, "exposure": inv.exposure,
         "recommended_actions": (alert.recommended_actions if alert and alert.recommended_actions else inv.recommended_actions),
-        "timeline": [_with_local(i) for i in items],
+        "timeline": [_with_local(i, by_name) for i in items],
         "alert": None if alert is None else {
             "id": alert.id, "severity": alert.severity, "status": alert.status, "title": alert.title,
             "detected_at": iso(alert.detected_at), "trigger_event_id": alert.event_id, "first_event_id": alert.first_event_id,
-            "attack_confidence": alert.attack_confidence, "evidence": alert.evidence or [],
+            "attack_confidence": alert.attack_confidence, "evidence": evidence,
         },
         "live": None if live is None else {
             "confidence": live.confidence, "level": live.level, "stage": live.stage, "stage_label": live.stage_label,
@@ -342,6 +350,7 @@ def timeline(db: Session, investigation_id: int | None, employee_id: int | None)
                   "risk_points": round(ev.severity * 100), "stages": ev.stages, "rules": ev.rules} for ev in evidence]
         current, confidence, source = t.stage, t.score, "Live correlation window"
     lanes = []
+    by_name = _codes_by_username(db)
     for stage in STAGES:
         evs = [i for i in items if stage in i.get("stages", [])]
         lanes.append({"stage": stage, "label": STAGE_LABELS[stage], "reached": bool(evs), "current": stage == current,
@@ -350,7 +359,7 @@ def timeline(db: Session, investigation_id: int | None, employee_id: int | None)
                       "rules": sorted({r for i in evs for r in i.get("rules", [])})})
     return {"source": source, "employee_pk": employee.id, "employee_id": employee.employee_code,
             "current_stage": current, "current_stage_label": STAGE_LABELS.get(current, current), "confidence": confidence,
-            "level": level_for(confidence), "stages": lanes, "events": [_with_local(i) for i in items]}
+            "level": level_for(confidence), "stages": lanes, "events": [_with_local(i, by_name) for i in items]}
 
 
 # ---------------------------------------------------------------- attack graph

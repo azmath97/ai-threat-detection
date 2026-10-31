@@ -192,7 +192,7 @@ def _maybe_raise_alert(
     investigation = investigation_service.upsert_investigation(db, employee, event.timestamp, synthetic=event.is_synthetic,
                                                                threat=threat)
     chain = " -> ".join(STAGE_LABELS[s] for s in corr.stage_history) or "none"
-    title = f"{SEVERITY_LABELS[threat.level]}: possible insider threat, {employee.full_name} ({threat.stage_label})"
+    title = f"{SEVERITY_LABELS[threat.level]}: possible insider threat, {employee.employee_code} ({threat.stage_label})"
     description = (f"Attack confidence {threat.score}/100 ({SEVERITY_LABELS[threat.level]}). Current stage: {threat.stage_label}. "
                    f"Observed: {chain}. {threat.exposure['statement']}")
     actions = threat_engine.recommend_actions(threat)

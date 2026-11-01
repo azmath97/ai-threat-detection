@@ -117,6 +117,12 @@ async def service_error_handler(_request: Request, exc: ServiceError):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.message})
 
 
+@app.exception_handler(OverflowError)
+async def overflow_handler(_request: Request, _exc: OverflowError):
+    """An integer too large for SQLite (for example a huge ID in the URL) is a client error, not a server fault."""
+    return JSONResponse(status_code=422, content={"detail": "A numeric value is out of range"})
+
+
 def _get_employee_or_404(db: Session, employee_id: int) -> Employee:
     employee = db.get(Employee, employee_id)
     if employee is None:
@@ -275,7 +281,7 @@ def _parse_ts(raw: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Invalid timestamp '{raw}'")
+        raise HTTPException(422, f"Invalid timestamp '{raw}'")
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
@@ -294,7 +300,7 @@ def list_events(
     offset: int = Query(0, ge=0),
 ):
     if event_type is not None and event_type not in EVENT_TYPES:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"event_type must be one of {', '.join(EVENT_TYPES)}")
+        raise HTTPException(422, f"event_type must be one of {', '.join(EVENT_TYPES)}")
     conditions = [SecurityEvent.risk_points >= min_risk_points]
     if synthetic is not None:
         conditions.append(SecurityEvent.is_synthetic.is_(synthetic))

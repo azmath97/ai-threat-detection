@@ -47,3 +47,23 @@ def auth_header(client, identifier):
 @pytest.fixture(scope="session")
 def admin(client):
     return auth_header(client, "SEC-9011")
+
+
+@pytest.fixture(autouse=True)
+def restore_state(request):
+    """Reset the simulation and delete the real rows a test created, so every test starts from the seeded baseline."""
+    if "client" not in request.fixturenames and "admin" not in request.fixturenames:
+        yield                                                       # pure unit tests never touch the application database
+        return
+    import sqlite3
+
+    client, admin, db_path = (request.getfixturevalue(n) for n in ("client", "admin", "db_path"))
+    tables = ("security_events", "risk_assessments", "security_alerts", "attack_investigations")
+    with sqlite3.connect(db_path) as con:
+        marks = {t: con.execute(f"select coalesce(max(id), 0) from {t}").fetchone()[0] for t in tables}
+    yield
+    client.post("/api/simulation/reset", headers=admin)
+    with sqlite3.connect(db_path) as con:
+        con.execute("delete from investigation_evidence where investigation_id > ?", (marks["attack_investigations"],))
+        for table in ("security_alerts", "attack_investigations", "risk_assessments", "security_events"):
+            con.execute(f"delete from {table} where id > ?", (marks[table],))

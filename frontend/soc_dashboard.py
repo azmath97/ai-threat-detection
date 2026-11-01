@@ -118,10 +118,6 @@ def ptext(label, key, *, placeholder="", container=st):
     return container.text_input(label, value=store.get(key, ""), key=f"w_{key}", on_change=save, placeholder=placeholder)
 
 
-def store_get(key, default=None):
-    return st.session_state.get("store", {}).get(key, default)
-
-
 def go(page: str, investigation: int | None = None) -> None:
     st.session_state.page = page
     if investigation is not None:

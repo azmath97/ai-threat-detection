@@ -33,7 +33,6 @@ EVENT_TYPES = (
     "external_transfer",
     "permission_change_attempt",
 )
-AUTH_EVENT_TYPES = ("login", "login_failed", "logout")
 RESOURCE_EVENT_TYPES = ("resource_access", "file_download", "data_export")
 # Event types whose outcome is decided by the backend permission check
 CLIENT_EVENT_TYPES = RESOURCE_EVENT_TYPES + ("external_transfer", "permission_change_attempt")

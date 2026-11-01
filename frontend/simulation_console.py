@@ -120,6 +120,8 @@ def console() -> None:
                                      key=f"target_{scenario['id']}")]
     st.caption(scenario["description"])
     source_ip = st.text_input("Source IP address of the simulated attacker", value=config["default_source_ip"])
+    records = int(st.number_input("Records in the simulated export and external transfer", min_value=1, max_value=1_000_000,
+                                  value=config["default_records"], step=1000))
     ip_valid = True
     try:
         ipaddress.ip_address(source_ip.strip())
@@ -132,7 +134,7 @@ def console() -> None:
     ui.section("Run")
     run_col, reset_col = st.columns([1, 1])
     if run_col.button(f"Run complete scenario ({len(scenario['steps'])} steps)", type="primary", disabled=not ip_valid):
-        run_and_log(lambda: api().sim_run(target["id"], source_ip.strip(), scenario["id"]))
+        run_and_log(lambda: api().sim_run(target["id"], source_ip.strip(), scenario["id"], records))
         st.rerun()
     confirm = reset_col.checkbox("Confirm reset: removes all synthetic data and undoes containment on affected accounts")
     if reset_col.button("Reset simulation", disabled=not confirm):
@@ -156,7 +158,7 @@ def console() -> None:
         a.markdown(f"**{step['label']}**" + ("  \n:grey[executed]" if step_id in status["steps_executed"] else ""))
         b.caption(step["description"])
         if c.button("Run step", key=f"step_{step_id}", disabled=not ip_valid, width="stretch"):
-            run_and_log(lambda s=step_id: api().sim_step(target["id"], s, source_ip.strip(), scenario["id"]))
+            run_and_log(lambda s=step_id: api().sim_step(target["id"], s, source_ip.strip(), scenario["id"], records))
             st.rerun()
 
     ui.section("Execution log")

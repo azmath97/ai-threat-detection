@@ -37,7 +37,7 @@ STEPS = [
     {"id": "restricted_access", "label": "Access restricted resources",
      "description": "Probes HR, payroll, IT admin, audit and lending data; the backend permission check decides each result."},
     {"id": "large_export", "label": "Large record export",
-     "description": f"Exports or downloads {EXPORT_RECORDS:,} records from the most sensitive resource the account can reach."},
+     "description": "Exports or downloads the chosen number of records (default 25,000) from the most sensitive resource the account can reach."},
     {"id": "admin_login_failures", "label": "Failed administrator logins",
      "description": "Five failed attempts to authenticate to the administrator console."},
     {"id": "create_privileged_account", "label": "Privileged account creation",
@@ -62,8 +62,8 @@ SCENARIO_IDS = {s["id"] for s in SCENARIOS}
 
 
 class _Sim:
-    def __init__(self, db: Session, admin: Employee, target: Employee, ip: str, scenario: str):
-        self.db, self.admin, self.target, self.ip, self.scenario = db, admin, target, ip, scenario
+    def __init__(self, db: Session, admin: Employee, target: Employee, ip: str, scenario: str, records: int = EXPORT_RECORDS):
+        self.db, self.admin, self.target, self.ip, self.scenario, self.records = db, admin, target, ip, scenario, records
 
     def meta(self, step: str) -> dict:
         return {"sim_step": step, "scenario": self.scenario, "simulated_by": self.admin.username}
@@ -132,11 +132,11 @@ def _step_large_export(sim: _Sim) -> dict:
     session = _need_session(sim, sim.target)
     resource, action = _best_resource(sim.target)
     _, permitted = access_resource(
-        sim.db, sim.target, resource, action, source_ip=sim.ip, session=session, record_count=EXPORT_RECORDS,
+        sim.db, sim.target, resource, action, source_ip=sim.ip, session=session, record_count=sim.records,
         details=sim.meta("large_export"), device_info=SIM_DEVICE, is_synthetic=True, scenario=sim.scenario,
     )
     return {"status": "completed" if permitted else "denied",
-            "detail": f"{action} of {EXPORT_RECORDS:,} records from {resource}: {'granted' if permitted else 'denied'}"}
+            "detail": f"{action} of {sim.records:,} records from {resource}: {'granted' if permitted else 'denied'}"}
 
 
 def _step_admin_login_failures(sim: _Sim) -> dict:
@@ -191,11 +191,11 @@ def _step_external_transfer(sim: _Sim) -> dict:
         sim.db, actor, "external_transfer", source_ip=sim.ip, resource=resource, outcome="success",
         details={**sim.meta("external_transfer"), "destination": EXFIL_DESTINATION, "protocol": "https",
                  "transfer_status": "confirmed"},
-        session=session, device_info=SIM_DEVICE, records_accessed=EXPORT_RECORDS, records_downloaded=EXPORT_RECORDS,
+        session=session, device_info=SIM_DEVICE, records_accessed=sim.records, records_downloaded=sim.records,
         is_synthetic=True, scenario=sim.scenario,
     )
     return {"status": "completed",
-            "detail": f"{EXPORT_RECORDS:,} records from {resource} sent to {EXFIL_DESTINATION} as {actor.username}"}
+            "detail": f"{sim.records:,} records from {resource} sent to {EXFIL_DESTINATION} as {actor.username}"}
 
 
 _HANDLERS = {
@@ -209,11 +209,12 @@ _HANDLERS = {
 }
 
 
-def run_step(db: Session, admin: Employee, target: Employee, step: str, ip: str, scenario: str) -> dict:
+def run_step(db: Session, admin: Employee, target: Employee, step: str, ip: str, scenario: str,
+             records: int = EXPORT_RECORDS) -> dict:
     if step not in _HANDLERS:
         raise ServiceError(422, f"Unknown simulation step '{step}'")
     before = db.scalar(select(func.max(SecurityEvent.id))) or 0
-    sim = _Sim(db, admin, target, ip, scenario)
+    sim = _Sim(db, admin, target, ip, scenario, records)
     try:
         outcome = _HANDLERS[step](sim)
     except ServiceError as exc:
@@ -226,9 +227,9 @@ def run_step(db: Session, admin: Employee, target: Employee, step: str, ip: str,
     return {"step": step, **outcome, "event_ids": events}
 
 
-def run_scenario(db: Session, admin: Employee, target: Employee, ip: str, scenario: str) -> list[dict]:
+def run_scenario(db: Session, admin: Employee, target: Employee, ip: str, scenario: str, records: int = EXPORT_RECORDS) -> list[dict]:
     steps = next(s["steps"] for s in SCENARIOS if s["id"] == scenario)
-    return [run_step(db, admin, target, step, ip, scenario) for step in steps]
+    return [run_step(db, admin, target, step, ip, scenario, records) for step in steps]
 
 
 def status(db: Session) -> dict:

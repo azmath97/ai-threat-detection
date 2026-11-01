@@ -207,13 +207,6 @@ class EventCreated(BaseModel):
     duplicate: bool = False
 
 
-class RiskFactorOut(BaseModel):
-    rule: str
-    points: int
-    count: int | None = None
-    description: str
-
-
 class EmployeeRiskOut(BaseModel):
     employee_id: int
     username: str

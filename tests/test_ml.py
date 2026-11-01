@@ -8,7 +8,7 @@ import pytest
 from backend import detection_engine, rules
 from backend.config import get_settings
 from ml.anomaly_detector import AnomalyDetector, heuristic_score
-from ml.features import FEATURE_NAMES, Baseline, EventRecord, extract_features
+from ml.features import FEATURE_NAMES, Baseline, extract_features
 from ml.synthetic_data import ATTACK_KINDS, generate_dataset, window_features
 from ml.train_model import train
 

@@ -1,12 +1,11 @@
 """Detection pipeline tests. Events go through the real application pipeline (record_event / authenticate /
 simulation endpoints); nothing here computes scores independently of the backend."""
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time, timezone
 
 import pytest
 from conftest import auth_header
 from sqlalchemy import select
 
-from backend import threat_engine
 from backend.auth_service import authenticate
 from backend.config import get_settings
 from backend.database import SessionLocal

@@ -1,16 +1,17 @@
+# Runtime
 fastapi>=0.110,<1.0
 uvicorn[standard]>=0.29
 sqlalchemy>=2.0,<3.0
 pydantic>=2.6,<3.0
 python-dotenv>=1.0
-tzdata>=2024.1
-httpx>=0.27
-pytest>=8.0
-# Frontend / analytics stack (used by the dashboards and ML phase)
-streamlit>=1.33
-pandas>=2.2
+tzdata>=2024.1            # time zone database for Windows
+requests>=2.31            # dashboards -> backend
+streamlit>=1.50           # Employee Portal, Simulation Console, SOC Dashboard (pulls in pandas itself)
+plotly>=5.20
 numpy>=1.26
 scikit-learn>=1.4
 joblib>=1.3
-plotly>=5.20
-requests>=2.31
+
+# Tests
+pytest>=8.0
+httpx>=0.27               # required by FastAPI's TestClient

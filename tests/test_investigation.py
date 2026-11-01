@@ -18,20 +18,6 @@ STEPS = ["unfamiliar_login", "restricted_access", "large_export", "admin_login_f
          "create_privileged_account", "privileged_login", "external_transfer"]
 
 
-@pytest.fixture(autouse=True)
-def clean(client, admin, db_path):
-    """Reset the simulation, and drop the real (non-simulated) rows these tests create so other suites start clean."""
-    tables = ("security_events", "risk_assessments", "security_alerts", "attack_investigations")
-    with sqlite3.connect(db_path) as con:
-        marks = {t: con.execute(f"select coalesce(max(id), 0) from {t}").fetchone()[0] for t in tables}
-    yield
-    client.post("/api/simulation/reset", headers=admin)
-    with sqlite3.connect(db_path) as con:
-        con.execute("delete from investigation_evidence where investigation_id > ?", (marks["attack_investigations"],))
-        for table in ("security_alerts", "attack_investigations", "risk_assessments", "security_events"):
-            con.execute(f"delete from {table} where id > ?", (marks[table],))
-
-
 def pk_of(client, admin, username):
     return next(e["id"] for e in client.get("/api/employees", headers=admin).json() if e["username"] == username)
 

@@ -100,13 +100,17 @@ class ApiClient:
     def sim_status(self) -> dict:
         return self._json("GET", "/api/simulation/status")
 
-    def sim_step(self, target_employee_id: int, step: str, source_ip: str, scenario: str) -> dict:
-        return self._json("POST", "/api/simulation/steps", json={
-            "target_employee_id": target_employee_id, "step": step, "source_ip": source_ip, "scenario": scenario})
+    def sim_step(self, target_employee_id: int, step: str, source_ip: str, scenario: str, records: int | None = None) -> dict:
+        body = {"target_employee_id": target_employee_id, "step": step, "source_ip": source_ip, "scenario": scenario}
+        if records:
+            body["records"] = records
+        return self._json("POST", "/api/simulation/steps", json=body)
 
-    def sim_run(self, target_employee_id: int, source_ip: str, scenario: str) -> dict:
-        return self._json("POST", "/api/simulation/run", json={
-            "target_employee_id": target_employee_id, "source_ip": source_ip, "scenario": scenario})
+    def sim_run(self, target_employee_id: int, source_ip: str, scenario: str, records: int | None = None) -> dict:
+        body = {"target_employee_id": target_employee_id, "source_ip": source_ip, "scenario": scenario}
+        if records:
+            body["records"] = records
+        return self._json("POST", "/api/simulation/run", json=body)
 
     def sim_reset(self) -> dict:
         return self._json("POST", "/api/simulation/reset")

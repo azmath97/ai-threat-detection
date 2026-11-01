@@ -52,7 +52,8 @@ class ThreatAssessment:
 
     @property
     def score(self) -> int:
-        return round(self.confidence)
+        """Whole-number score. Floored (never rounded up) so it always falls in the same severity band as `level`."""
+        return int(self.confidence)
 
     @property
     def stage_names(self) -> list[str]:

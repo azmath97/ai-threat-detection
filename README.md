@@ -1,277 +1,362 @@
 # AI-Based Insider Threat Detection System
 
-Cybersecurity case study: a simulated financial organisation ("Meridian Trust Bank") where an employee account may
-be compromised or misused. One **FastAPI backend + SQLite database** is the single source of truth for every
-front end. All data is synthetic; no real credentials, personal or banking data is used.
+A cybersecurity case study. A fictional financial organisation, **Meridian Trust Bank**, runs an Employee Workspace
+Portal. A security team watches it through a Security Operations Centre (SOC) dashboard. An employee account can be
+compromised or misused, and the system must notice that **while it is happening** and before data leaves the bank.
 
-| Phase | Status |
+* **All data is synthetic.** There are no real credentials, personal data or banking data anywhere in the project.
+* **One FastAPI backend and one SQLite database are the single source of truth.** The portal, the SOC dashboard and
+  the simulation console only call the backend; none of them has its own data, scores or event system.
+* **Detection is hybrid:** an Isolation Forest anomaly model, configurable rules, event correlation, a bounded
+  0-100 attack-confidence score, a separate data-exposure assessment and attack-stage classification.
+* **Containment is real inside the simulation:** disabling an account stops logins, blocking an IP stops sessions from
+  it, removing privileges removes permissions. It never touches a real network.
+
+## Contents
+
+1. [Architecture](#architecture) · 2. [Technology stack](#technology-stack) · 3. [Install and run](#install-and-run)
+· 4. [Environment setup](#environment-setup) · 5. [Database initialisation](#database-initialisation)
+· 6. [Demo credentials](#demo-credentials) · 7. [Launching](#launching-the-application)
+· 8. [Simulate an attack](#how-to-simulate-an-attack) · 9. [Reset the simulation](#how-to-reset-the-simulation)
+· 10. [Employee Portal](#employee-workspace-portal) · 11. [SOC dashboard](#soc-dashboard)
+· 12. [Detection engine](#detection-engine) · 13. [Investigation and response](#investigation-and-incident-response)
+· 14. [API](#api) · 15. [Tests](#tests) · 16. [Known limitations](#known-limitations)
+
+## Architecture
+
+```
+ Employee Portal  (Streamlit :8501) --\
+ Simulation Console (Streamlit :8502) ---HTTP/JSON-->  FastAPI backend (:8000)  -->  SQLite  data/insider_threat.db
+ SOC Dashboard    (Streamlit :8503) --/                      |
+                                                            +-- ml/  Isolation Forest (ml/artifacts/*.joblib)
+ every action -> security event -> rules -> ML score -> correlation -> confidence -> alert -> investigation
+```
+
+**Event pipeline** (`backend/event_service.py`). Every employee action is turned into a `security_events` row by the
+backend, then flows through the same steps for real employees and for the simulation:
+
+1. persist the event (identity, session, IP and device come from the authenticated session, never from the client);
+2. apply the configurable rules against the employee's role, permissions, 30-day baseline and session context;
+3. score the behaviour with the Isolation Forest (or the heuristic fallback);
+4. correlate related events (same employee, session, unfamiliar IP, or an account created by that employee);
+5. compute the bounded attack confidence, the attack stage and the data exposure;
+6. at the **critical** threshold raise an alert and create/update an investigation with preserved evidence.
+
+The dashboards only read what the backend stored. The portal never shows scores, alerts or investigations.
+
+| Area | Files |
 |---|---|
-| Backend, database, event pipeline, API | done |
-| Employee Workspace Portal (Streamlit) + admin simulation console | done |
-| **AI-powered detection and attack correlation engine** | done |
-| **Security Operations Centre (SOC) dashboard** | done |
+| API and auth | `backend/main.py`, `auth_service.py`, `security.py`, `portal_routes.py`, `schemas.py` |
+| Database | `backend/models.py`, `database.py`, `data/seed_data.py` (9 tables plus `response_controls` and `investigation_evidence`) |
+| Detection | `detection_engine.py`, `detection_rules.json`, `rules.py`, `baseline.py`, `correlation_engine.py`, `threat_engine.py`, `data_exposure.py`, `ml/` |
+| Investigation and response | `investigation_service.py`, `investigation_explainer.py`, `investigation_export.py`, `investigation_routes.py`, `response_service.py`, `controls.py` |
+| SOC read models | `soc_service.py`, `soc_routes.py` |
+| Simulation | `simulation_service.py`, `simulation_routes.py` |
+| Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `api_client.py` |
+| Tests | `tests/` (134 tests) |
 
-## How it works
+## Technology stack
 
-```
-Employee Portal  --HTTP-->  FastAPI backend  --> SQLite (shared)  <-- SOC Dashboard (/api/soc/*)
-Simulation Console --HTTP-->      |
-                                  +-- every action -> security event -> risk scoring -> correlation -> alert/investigation
-```
+| Layer | Technology |
+|---|---|
+| Backend | Python 3.12, FastAPI, Uvicorn, Pydantic 2 |
+| Database | SQLite through SQLAlchemy 2 (timestamps stored in UTC, shown in `DISPLAY_TIMEZONE`) |
+| Machine learning | scikit-learn `IsolationForest`, NumPy, joblib (model saved locally and reused) |
+| Dashboards | Streamlit and Plotly (charts and the attack graph) |
+| Security | PBKDF2-SHA256 salted password hashes, random session tokens stored as HMAC digests |
+| Tests | pytest, FastAPI TestClient, Streamlit `AppTest` |
 
-* The portal holds only a session token. **The backend decides identity, permissions, source IP and session.**
-  The browser cannot set an employee ID or a source IP on any request.
-* The portal never shows risk scores, attack confidence, investigations or alerts.
-* Kill-chain stages: Initial Access, Credential Misuse, Sensitive Resource Access, Collection, Privilege Escalation,
-  Persistence, Lateral Movement, Exfiltration (see "Detection engine" below).
-
-## File structure
-
-```
-ai-threat-detection/
-├── app.py                          # launcher: backend | portal | simulation | soc | all
-├── backend/
-│   ├── main.py                     # FastAPI app, auth/events/risk/alerts/containment/dashboard endpoints
-│   ├── threat_engine.py            # hybrid confidence score, assessment storage, recommended actions
-│   ├── detection_engine.py  detection_rules.json  rules.py   # configurable rule layer
-│   ├── correlation_engine.py  data_exposure.py  baseline.py
-│   ├── event_service.py            # event pipeline: persist -> rules -> ML/correlation -> alert
-│   ├── portal_routes.py  simulation_routes.py  auth_service.py  simulation_service.py  portal_data.py
-│   ├── investigation_service.py  response_service.py  controls.py   # investigations + preserved evidence, containment, IP blocks / isolation
-│   ├── investigation_explainer.py  investigation_export.py  investigation_routes.py   # explanation, evidence export, resolve
-│   ├── soc_service.py  soc_routes.py                                # SOC read models and /api/soc/* endpoints
-│   ├── models.py  database.py  schemas.py  security.py  catalog.py  config.py  errors.py
-├── ml/
-│   ├── features.py                 # one feature pipeline for training and live scoring
-│   ├── synthetic_data.py           # synthetic normal + suspicious behaviour
-│   ├── train_model.py  anomaly_detector.py   # Isolation Forest training, loading, fallback
-├── frontend/
-│   ├── employee_portal.py          # Employee Workspace Portal
-│   ├── simulation_console.py       # separate, administrator-only simulation control panel
-│   ├── soc_dashboard.py            # Security Operations Centre dashboard (8 pages)
-│   ├── components.py  soc_components.py  api_client.py
-├── .streamlit/config.toml          # enterprise light theme
-├── data/seed_data.py               # synthetic employees + 14 days of history
-├── tests/                          # pytest suite (54 tests: API, portal, ML, detection, SOC, investigation workflow)
-└── requirements.txt  .env.example  README.md
-```
+Pandas is not imported by the project itself; it is installed because Streamlit depends on it.
 
 ## Install and run
 
-```powershell
-python -m venv .venv; .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+Windows PowerShell (Python 3.12 recommended):
 
-python app.py all          # backend :8000, Employee Portal :8501, Simulation Console :8502, SOC Dashboard :8503
+```powershell
+git clone https://github.com/azmath97/ai-threat-detection.git
+cd ai-threat-detection
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python app.py all
 ```
 
-Or run the parts separately: `python app.py` (backend), `python app.py portal`, `python app.py simulation`,
-`python app.py soc`.
-If port 8000 is busy: `$env:API_PORT="8010"; python app.py all`. The SQLite database
-(`data/insider_threat.db`) is created and seeded on first start (`python -m data.seed_data --reset` rebuilds it;
-databases from earlier versions are upgraded in place).
+macOS / Linux:
 
-## Demo credentials (local demonstration only; synthetic accounts)
+```bash
+git clone https://github.com/azmath97/ai-threat-detection.git && cd ai-threat-detection
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python app.py all
+```
 
-Sign in with the **Employee ID** and password.
+That starts the backend and all three dashboards:
+
+| Service | URL |
+|---|---|
+| Backend API and interactive docs | http://127.0.0.1:8000 and http://127.0.0.1:8000/docs |
+| Employee Workspace Portal | http://127.0.0.1:8501 |
+| Simulation Console (administrators) | http://127.0.0.1:8502 |
+| SOC Dashboard (administrators) | http://127.0.0.1:8503 |
+
+On first start the backend creates and seeds the database and trains the anomaly model (a few seconds). If port 8000
+is already used, set `API_PORT` first: `$env:API_PORT="8010"; python app.py all` (bash: `API_PORT=8010 python app.py all`).
+The dashboards are told where the backend is automatically.
+
+## Environment setup
+
+Everything works with defaults and no `.env` file. To change settings, copy `.env.example` to `.env`:
+
+```powershell
+Copy-Item .env.example .env        # bash: cp .env.example .env
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DATABASE_URL` | `sqlite:///./data/insider_threat.db` | database location |
+| `SECRET_KEY` | demo value | keys the session-token HMAC; **change it for anything but a local demo** |
+| `SESSION_TTL_MINUTES` | `480` | session lifetime |
+| `DISPLAY_TIMEZONE` | `Asia/Kolkata` | zone used for `*_local` timestamps and "after hours" |
+| `CORS_ORIGINS` | portal and SOC origins | allowed browser origins |
+| `AUTO_SEED` | `true` | seed the synthetic data when the database is empty |
+| `SIMULATION_ENABLED` | `true` | set `false` for "normal" mode; the simulation API then returns 403 to everyone |
+| `MAP_LOOPBACK_TO_WORKSTATION` | `true` | local demo: attribute loopback connections to the employee's registered workstation IP |
+| `API_HOST`, `API_PORT`, `API_BASE_URL` | `127.0.0.1`, `8000`, `http://127.0.0.1:8000` | where the backend listens and where dashboards find it |
+| `CORRELATION_WINDOW_MINUTES` | `240` | correlation window |
+| `THREAT_SUSPICIOUS_THRESHOLD`, `THREAT_HIGH_THRESHOLD`, `THREAT_CRITICAL_THRESHOLD` | `25`, `50`, `80` | severity bands |
+| `ALERT_MIN_SEVERITY` | `critical` | lowest severity that raises an alert |
+| `ML_MODEL_PATH`, `ML_AUTO_TRAIN` | `ml/artifacts/isolation_forest.joblib`, `true` | model file and train-on-first-start |
+
+Rule severities, scoring weights and parameters live in `backend/detection_rules.json` (reload with
+`POST /api/detection/reload`).
+
+## Database initialisation
+
+Nothing to run manually: the backend creates all tables and seeds the data on first start (`AUTO_SEED=true`), and
+adds columns missing from databases created by earlier versions. To rebuild from scratch:
+
+```powershell
+python -m data.seed_data --reset     # drops and re-creates the demo database
+python -m ml.train_model --export    # optional: retrain the model; --export also writes ml/artifacts/*.csv
+```
+
+Seeded data: 10 employees in Finance, HR, IT, Trading, Customer Service, Compliance, Engineering, Lending and Marketing
+plus a security administrator; different roles and permissions; 14 days of normal activity including historical logins,
+known workstation IPs, occasional unfamiliar travel/home IPs and a few after-hours sessions. Data persists across
+restarts (SQLite file).
+
+## Demo credentials
+
+For local demonstration only; all accounts are synthetic. Sign in with the **Employee ID**.
 
 | Account | Employee ID | Password | Notes |
 |---|---|---|---|
 | Demo employee (Finance analyst) | `EMP-1001` | `Employee#Demo2026` | own payslips, permitted documents |
+| Payroll specialist | `EMP-1002` | `Employee#Demo2026` | payroll register and CSV export |
 | HR manager | `EMP-1003` | `Employee#Demo2026` | HR records, payroll register (read only) |
-| Payroll specialist | `EMP-1002` | `Employee#Demo2026` | payroll register + CSV export |
-| IT administrator | `EMP-1004` | `Employee#Demo2026` | can create privileged accounts |
-| Security administrator | `SEC-9011` | `SocAdmin#Demo2026` | SOC / simulation console |
+| IT administrator | `EMP-1004` | `Employee#Demo2026` | can create privileged accounts; default attack target |
+| Other employees | `EMP-1005` to `EMP-1010` | `Employee#Demo2026` | Trading, Customer Service, Lending, Compliance, Engineering |
+| Security administrator | `SEC-9011` | `SocAdmin#Demo2026` | SOC dashboard and simulation console |
 
-`EMP-1005` ... `EMP-1010` (Emma Wilson, Frank Osei, Grace Lee, Henry Novak, Isla Murphy, Jack Silva) use the same
-employee password. Passwords are stored only as salted PBKDF2-SHA256 hashes; session tokens are random, stored as
-HMAC hashes, expire and can be revoked.
+Passwords are stored only as salted PBKDF2-SHA256 hashes. Change `DEMO_EMPLOYEE_PASSWORD` / `DEMO_ADMIN_PASSWORD`
+in `.env` before seeding if you prefer other values.
 
-## Employee Workspace Portal (http://127.0.0.1:8501)
+## Launching the application
 
-Sidebar: Dashboard, HR Records, Payroll, Documents, Employee Directory, My Profile, Logout.
+```powershell
+python app.py all           # backend + portal + simulation console + SOC dashboard
+python app.py               # backend only
+python app.py portal        # one dashboard (needs the backend running): portal | simulation | soc
+```
+
+Stop with Ctrl+C. All state stays in `data/insider_threat.db`.
+
+## How to simulate an attack
+
+The simulation runs through the **same** authentication, permission checks, event collection and detection engine as a
+normal employee. It is only available to the security administrator and clearly marked as synthetic.
+
+**With the dashboards** (best for a demo)
+
+1. Open the SOC Dashboard (http://127.0.0.1:8503), sign in as `SEC-9011` and stay on *Security Overview*.
+2. Open the Simulation Console (http://127.0.0.1:8502), sign in as `SEC-9011`.
+3. Choose the scenario and account (default: `EMP-1004`), the attacker's source IP and the number of records, then press
+   **Run complete scenario**, or run the steps one at a time.
+4. Watch the SOC dashboard: the confidence meter rises, a **Critical** alert and an investigation appear, and the
+   timeline, graph and Response Centre fill in. The alert comes at the large-export step, before the external transfer.
+
+**With the API**
+
+```powershell
+$base = "http://127.0.0.1:8000"
+$login = '{"employee_id":"SEC-9011","password":"SocAdmin#Demo2026"}'
+$tok = (Invoke-RestMethod "$base/api/auth/login" -Method Post -ContentType application/json -Body $login).access_token
+$h = @{ Authorization = "Bearer $tok" }
+$employees = Invoke-RestMethod "$base/api/employees" -Headers $h
+$david = ($employees | Where-Object username -eq "david.kumar").id
+$body = @{ target_employee_id = $david; source_ip = "185.220.101.45"; records = 8000 } | ConvertTo-Json
+Invoke-RestMethod "$base/api/simulation/run" -Method Post -Headers $h -ContentType application/json -Body $body
+```
+
+The steps are: (1) login from an unfamiliar IP, (2) probe restricted resources (HR, payroll, IT administrator portal,
+audit, lending), (3) export `records` records, (4) five failed administrator logins, (5) create a privileged account,
+(6) log in with it, (7) transfer the records to an external destination. Run one step with
+`POST /api/simulation/steps` (`{"target_employee_id": .., "step": "large_export", "records": 8000}`).
+Run it on an account nobody is using: genuine activity during the run is scored in the same window.
+
+## How to reset the simulation
+
+* Simulation Console: tick *Confirm reset*, press **Reset simulation**.
+* API: `POST /api/simulation/reset` (administrator).
+
+Reset removes every synthetic event, session, alert, investigation (with its evidence), assessment, privileged account
+and response control, undoes containment applied to the affected employees and restores their last-login time. Real
+(non-synthetic) data is never touched. The reset is recorded in the audit log.
+
+## Employee Workspace Portal
+
+http://127.0.0.1:8501. Sidebar: Dashboard, HR Records, Payroll, Documents, Employee Directory, My Profile, Logout.
+Sign in with an employee ID and password; the backend decides identity and permissions, and the browser cannot choose
+an employee ID or source IP.
 
 | Page | What you can do | Backend rule |
 |---|---|---|
-| Dashboard | name, employee ID, department, role, last login, available resources, recent activity | own data only |
-| HR Records | search records, open an employee record | needs `hr-records` access (HR) |
-| Payroll | view own payslips; payroll register; export CSV | register needs `payroll-records` read, export needs write |
-| Documents | list permitted documents, request a download | per-document resource permission |
-| Employee Directory | search by name / role / department | all employees |
-| My Profile | personal and employment information | own data only |
+| Dashboard | name, employee ID, department, role, last login, available resources, recent activity | own data |
+| HR Records | search and open records | needs `hr-records` access |
+| Payroll | own payslips; payroll register; CSV export | register needs `payroll-records` read, export needs write |
+| Documents | list and download permitted documents | per-document resource permission |
+| Employee Directory | search by name, role or department | all employees |
+| My Profile | personal and employment information | own data |
 
-Pages for resources outside your role show an "access restricted" notice, and the backend refuses (403) and records
-the attempt if the endpoint is called anyway.
+Every meaningful action is stored as a security event with: event ID, employee ID, session ID, UTC timestamp, event type
+(`login`, `login_failed`, `logout`, `resource_access`, `file_download`, `data_export`, `directory_search`,
+`administrative_action`, `external_transfer`, `permission_change_attempt`), resource, source IP, device, outcome
+(`success`, `failure`, `denied`), records accessed and downloaded, metadata, and the synthetic flag.
 
-### Events collected (table `security_events`)
+## SOC dashboard
 
-Every meaningful action is a row: event ID, employee ID (from the session), session ID, UTC timestamp, event type,
-resource, source IP (derived by the backend), device information, outcome (`success` / `failure` / `denied`),
-`records_accessed`, `records_downloaded`, JSON metadata, `is_synthetic`, `scenario`.
-Types: `login`, `login_failed`, `logout`, `resource_access` (incl. denied), `file_download`, `data_export`
-(payroll export), `directory_search`, `administrative_action`, `external_transfer`, `permission_change_attempt`.
-
-Local demo note: the browser, portal and backend all run on one machine, so the backend sees loopback connections.
-With `MAP_LOOPBACK_TO_WORKSTATION=true` (default) these are attributed to the employee's registered workstation IP;
-any non-loopback peer address is stored as seen.
-
-## Simulation Console (http://127.0.0.1:8502, security administrators only)
-
-A separate control panel, clearly labelled **SIMULATION ENVIRONMENT - SYNTHETIC DATA ONLY**. Employees are rejected,
-and the `/api/simulation/*` endpoints return 403 for non-administrators (or for everyone when
-`SIMULATION_ENABLED=false`). Select a scenario, the compromised employee account and the attacker's source IP, then
-run steps one by one or the whole chain:
-
-1. Login from an unfamiliar IP (real authentication flow, stolen-credential login)
-2. Access to restricted resources (real permission checks: granted or denied per role)
-3. Large record export (25,000 records)
-4. Five failed administrator-console logins
-5. Privileged account creation (needs IT admin-console write access, otherwise denied and logged)
-6. Login with the newly created privileged account
-7. External data transfer to a non-routable synthetic destination
-
-Steps run through the same authentication, permission, event-collection and detection code as normal employee
-traffic (there is no separate fake attack dashboard); the console only controls them. Everything created is
-flagged `is_synthetic` (events, sessions, alerts, investigations, accounts) with the scenario name and a
-`"synthetic": true` marker in the event metadata. Accounts created by an employee are attributed to their creator
-for risk, correlation and alerting. **Reset simulation** removes all synthetic data, undoes containment applied to
-the affected employees and restores their last-login time. Run the simulation on accounts that are not in active
-use: genuine activity during a run is scored in the same window.
-
-## SOC Dashboard (http://127.0.0.1:8503, security administrators only)
-
-Sign in as `SEC-9011`. Every figure comes from the backend (`/api/soc/*`); nothing is hardcoded. Live panels poll a
-cheap `/api/soc/version` token every 3 seconds and refetch only when new events, alerts or responses exist, so filters
-and navigation are not reset. Employees are shown by ID, department and role only; names are not used as risk signals.
+http://127.0.0.1:8503, administrators only (employees are refused at sign-in and by every `/api/soc/*` endpoint). Every
+figure comes from the backend. Live panels poll a small change token every 3 seconds and only reload when something
+changed, so filters and navigation are kept.
 
 | Page | Content |
 |---|---|
-| Security Overview | KPIs (events, active investigations, critical alerts, high-risk employees, sensitive records accessed, confirmed external transfers), live attack-confidence meter, active threats |
-| Live Event Feed | events with anomaly score, risk contribution and attack stage; filters for employee, IP, event type, severity, time range |
-| Attack Investigations | active and historical investigations; selecting one opens the full investigation (evidence, score breakdown, exposure, actions) |
-| Employee Risk Monitor | employees ranked by risk from behavioural and rule evidence only |
-| Attack Timeline | the eight kill-chain stages built from correlated events, current stage highlighted |
-| Attack Graph | accounts, IPs, sessions, systems, privileged accounts and external destinations built from stored events |
+| Security Overview | KPIs, live attack-confidence meter, active threats |
+| Live Event Feed | events with anomaly score, risk contribution and stage; filters for employee, IP, event type, severity, time range |
+| Attack Investigations | list; selecting one opens the investigation (findings, case file, containment, export, resolve) |
+| Employee Risk Monitor | employees ranked by behavioural and rule evidence only (no names or demographics) |
+| Attack Timeline | the eight stages built from correlated events, current stage highlighted |
+| Attack Graph | accounts, IPs, sessions, systems, privileged accounts and external destinations from stored events |
 | Response Centre | recommended containment, active controls, history, manual response |
 | Audit Logs | alerts, investigation updates, containment, administrator actions, failed responses |
 
-Response actions (all audited, failures included): `revoke_sessions`, `lock_account`, `restrict_access` (all
-confidential/restricted access, or one resource via `target`), `remove_privileges`, `block_ip`, `isolate_system`,
-`resolve_investigation`, plus `restore_account`, `unblock_ip`, `release_system`. Everything except those last three needs
-`confirm: true`; this is enforced by the backend, and the dashboard asks for explicit confirmation with a recorded reason.
-A blocked IP is rejected at login and on every request, a locked account cannot log in, and an isolated system denies
-access without scoring the denial against the employee.
+## Detection engine
 
-To see it live: open the dashboard, then run the steps in the Simulation Console (or `POST /api/simulation/steps`).
+```
+event -> rules -> baseline -> ML anomaly score -> correlation -> attack confidence (0-100) -> data exposure -> stage -> alert
+```
+
+| Part | What it does |
+|---|---|
+| Anomaly detection (`ml/`) | Isolation Forest on 10 behavioural features (login hour, unfamiliar IP, failed logins, resources and departments accessed, download volume, restricted attempts, privilege escalation, external transfer volume, denied accesses). Trained only on **normal** synthetic sessions, saved to `ml/artifacts/`, loaded at start. A heuristic **fallback** on the same features is used if the model is missing or unusable. |
+| Rules (`detection_rules.json`) | 18 configurable rules judged against the employee's role, permissions, history and session. An unfamiliar IP or an after-hours login is a weak signal on its own, not an attack. |
+| Correlation | Links events by employee, session, unfamiliar IP and related (created) accounts inside a configurable window. Stages come from evidence in any order; each event counts for one stage and repeated evidence is discounted, so nothing is counted twice. |
+| Attack confidence | `100 x (0.20 ML + 0.30 rules + 0.25 correlation + 0.10 baseline + 0.15 stage)`. Each component is 0-1 and the weights sum to 1, so the score is bounded. Fewer than 2 independent stages cannot exceed High Risk, fewer than 3 cannot be Critical. The whole-number score is floored so it always matches its severity band. |
+| Severity | 0-24 Normal, 25-49 Suspicious, 50-79 High Risk, 80-100 Critical (configurable). |
+| Data exposure | Separate from the score: sensitive records accessed, exported, potentially exposed, in external transfers, and whether a transfer was **confirmed**. A large export alone never claims exfiltration. |
+| Stages | Initial Access, Credential Misuse, Sensitive Resource Access, Collection, Privilege Escalation, Persistence, Lateral Movement, Exfiltration (needs a confirmed external transfer). |
+
+A new IP address plus access to a permitted resource is recognised (`unfamiliar_ip`) but stays at Suspicious or below.
+Duplicate requests (same `request_id` / `Idempotency-Key`) are stored and scored once. On the synthetic held-out set the
+model reaches ROC-AUC 0.98 with about 2% false positives on normal sessions; this says nothing about real data.
 
 ## Investigation and incident response
 
-A critical alert automatically creates one investigation per employee (`attack_investigations`); it is updated by every
-later related event, even when a new event alone would not reach the alert threshold.
+A critical alert creates one investigation per employee, and every later related event updates it.
 
-* **Case file**: affected employee, associated sessions, suspicious IPs (with blocked state), related privileged accounts,
-  first and latest suspicious event, current confidence and stage, sensitive resources accessed, records exported,
-  potentially exposed and confirmed external transfers.
-* **Evidence correlation**: related events are collected by employee, session, source IP, related (created) account,
-  resource and time. Each is copied once into the append-only `investigation_evidence` table with a SHA-256 of the original.
-  Nothing edits or deletes events; `GET /api/investigations/{id}/evidence` and every export compare each snapshot with the
-  live event and report `verified`, `modified` or `missing`. (The simulation reset is the only thing that removes events: it
-  tears down all synthetic data including investigations, and is audited with counts.)
-* **Explanation** (`backend/investigation_explainer.py`): deterministic and evidence-based, no LLM or network call, so it
-  always works. It produces the likely attack type, current stage, suspicious activities, supporting evidence, confidence
-  and its components, potential impact, recommended containment, missing evidence and alternative explanations. Every
-  statement cites real event IDs and timestamps. It never names the person behind an account.
-* **Attack classification**: each of possible insider misuse, compromised credentials, automated account exploitation,
-  privilege escalation, unauthorised data export and confirmed external data transfer is reported as supported or not
-  supported with its supporting events. A transfer is "confirmed" only when a confirmed transfer event exists.
-* **Containment**: disable account, revoke sessions, block IP, remove privileges, restrict one sensitive resource and
-  resolve the investigation. Each needs administrator authentication, `confirm`, a reason, and records the administrator,
-  time and an audit entry, and changes the simulated environment (login refused, session revoked, permission removed).
-  This is a local simulation; no real banking network is touched.
-* **Evidence export**: `GET /api/investigations/{id}/export?format=json|csv` downloads incident summary, attack
-  timeline, correlated events (with hashes and integrity state), risk-score history, data exposure, containment actions and
-  findings, containing only that investigation's evidence. CSV is the correlated-event table. Exports are audited.
-
-In the dashboard open **Attack Investigations**, select an investigation, and use the Investigation findings, Case file,
-Containment actions, Evidence export and Investigation status sections.
-
-## Detection engine
-
-Every event goes through one pipeline in `backend/event_service.py`; dashboards only read what it stores.
-
-```
-event -> rules (detection_engine) -> baseline -> ML anomaly score (ml/) -> correlation -> attack confidence 0-100
-      -> data exposure -> stage -> alert + investigation (when the configured severity is reached)
-```
-
-| Part | Module | What it does |
-|---|---|---|
-| Behavioural anomaly detection | `ml/` | Isolation Forest on 10 behavioural features (login hour, unfamiliar IP, failed logins, resources and departments accessed, download volume, restricted attempts, privilege escalation, external transfer volume, denied accesses). Trained **only on normal** synthetic sessions, saved to `ml/artifacts/isolation_forest.joblib`, loaded at start (trained automatically if the file is missing). **Fallback mode** (a bounded heuristic on the same features) is used if the model is missing, corrupt or incompatible. |
-| Rule detection | `backend/detection_engine.py`, `backend/detection_rules.json` | 18 configurable rules (severity, stages, enabled). Judged against the employee's role, permissions, 30-day baseline (known IPs, usual resources, after-hours habits, usual download size) and session context. An unfamiliar IP or after-hours login alone is a weak signal, not an attack; a missing privilege level in your own department is not "unauthorised access". |
-| Correlation | `backend/correlation_engine.py` | Links events by employee, session, unfamiliar IP and related (created) accounts inside `CORRELATION_WINDOW_MINUTES` (default 240). Stages come from evidence in any order; each event counts for one independent stage, and repeated identical evidence is discounted, so nothing is double-counted. |
-| Attack confidence | `backend/threat_engine.py` | `100 x (0.20 ML + 0.30 rules + 0.25 correlation + 0.10 baseline + 0.15 stage)`. Every component is 0-1 and the weights sum to 1, so the score is bounded by construction. Fewer than 2 independent stages cannot exceed High Risk, fewer than 3 cannot be Critical. |
-| Data exposure | `backend/data_exposure.py` | Separate indicator: sensitive records accessed, exported, potentially exposed, in external transfers, and whether a transfer was **confirmed**. Status is `suspicious_access`, `confirmed_export` or `confirmed_external_transfer`; a large export alone never claims exfiltration. |
-| Stages | `backend/catalog.py` | Initial Access, Credential Misuse, Sensitive Resource Access, Collection, Privilege Escalation, Persistence, Lateral Movement, Exfiltration. Exfiltration needs a confirmed external transfer. |
-
-Severity (configurable): 0-24 **Normal**, 25-49 **Suspicious**, 50-79 **High Risk**, 80-100 **Critical**
-(`THREAT_SUSPICIOUS_THRESHOLD`, `THREAT_HIGH_THRESHOLD`, `THREAT_CRITICAL_THRESHOLD`). An alert is raised at the
-critical threshold (`ALERT_MIN_SEVERITY`) and contains: alert ID, employee ID, attack confidence, severity, detection
-time, first suspicious event, triggering event, correlated evidence (with relations), current stage, data exposure
-and recommended containment actions (including accounts created during the incident).
-
-In the full simulated attack the alert is raised at the **large export** step, before the privileged account,
-privileged login and external transfer have happened. Duplicate requests (same `request_id` / `Idempotency-Key`) are
-stored and scored once.
-
-```powershell
-python -m ml.train_model --export   # retrain; --export also writes the synthetic datasets to ml/artifacts/*.csv
-```
-Held-out results of the shipped configuration on synthetic data: ROC-AUC 0.98, 2% false positives on normal
-sessions, about 6% on deliberately tricky normal sessions (after-hours, travel, heavy downloads, routine admin
-work), 84% of attack windows scored anomalous by the ML component alone (the rules and correlation cover the rest).
+* **Case file:** sessions, suspicious IPs, related privileged accounts, first and latest suspicious event, confidence,
+  stage, sensitive resources accessed, records exported, potentially exposed and confirmed external transfers.
+* **Preserved evidence:** related events are collected by employee, session, IP, created account, resource and time and
+  copied once into the append-only `investigation_evidence` table with a SHA-256 of the original. Nothing edits events;
+  the evidence view and every export compare each copy with the live event (`verified`, `modified`, `missing`).
+* **Explanation** (`investigation_explainer.py`): deterministic, no LLM or network call. It gives the likely attack type,
+  stage, suspicious activities, supporting evidence, confidence, impact, recommended containment, missing evidence and
+  alternative explanations, citing real event IDs and timestamps, and never names the person behind an account.
+* **Classification:** possible insider misuse, compromised credentials, automated account exploitation, privilege
+  escalation, unauthorised data export and confirmed external transfer, each reported as supported or not.
+* **Containment** (administrator, `confirm: true`, reason, audited): disable account, revoke sessions, block IP, remove
+  privileges, restrict a sensitive resource, isolate a system, resolve the investigation (plus restore, unblock, release).
+* **Evidence export:** `GET /api/investigations/{id}/export?format=json|csv` returns only that investigation's evidence.
 
 ## API
 
-Auth is `Authorization: Bearer <token>`. "Admin" = `security_admin` role. Interactive docs: `/docs`.
+Interactive documentation: `/docs`. Send `Authorization: Bearer <token>` from `POST /api/auth/login`. "Admin" means the
+`security_admin` role. Unauthenticated calls return 401, wrong role 403, invalid input 422/4xx; the server does not return
+stack traces.
 
 | Method | Path | Access | Purpose |
 |---|---|---|---|
-| POST | `/api/auth/login` | public | body `employee_id` + `password` (username also accepted) |
-| POST | `/api/auth/logout` | any | revoke session |
-| GET | `/api/employees/me` | any | profile, permissions, previous login |
-| GET | `/api/employees`, `/api/employees/{id}` | admin / self | directory (admin), profile |
-| GET | `/api/resources`, POST `/api/resources/{id}/access` | any | catalogue; view/download/export (403 if not permitted) |
-| GET | `/api/portal/profile` | any | own profile detail |
-| GET | `/api/portal/payslips`, `/api/portal/payslips/{period}` | any | own payslips |
-| GET / POST | `/api/portal/payroll/register`, `/api/portal/payroll/export` | payroll access | register / CSV export |
-| GET | `/api/portal/hr/records`, `/api/portal/hr/records/{employee_id}` | HR access | search / open record |
-| GET | `/api/portal/documents`, `/api/portal/documents/{id}/download` | per document | list / download |
-| GET | `/api/portal/directory`, `/api/portal/directory/departments` | any | search directory |
-| POST | `/api/admin/accounts` | IT admin console write | create privileged account |
-| POST | `/api/events` | any | telemetry for the caller only (identity/IP/device set by backend) |
-| GET | `/api/events` | admin | history; filters `employee_id,event_type,outcome,since,until,min_risk_points,synthetic,limit,offset` |
-| GET | `/api/events/me` | any | own activity (no risk data) |
-| GET | `/api/risk/employees[/{id}]`, POST `/api/risk/assess` | admin | risk scores, factors, attack stages |
+| GET | `/api/health` | public | liveness |
+| POST | `/api/auth/login` | public | body `employee_id` + `password` |
+| POST | `/api/auth/logout` | any | revoke the session |
+| GET | `/api/employees/me`; `/api/employees/{id}` | any; self or admin | profile and permissions |
+| GET | `/api/employees` | admin | directory |
+| GET / POST | `/api/resources`; `/api/resources/{id}/access` | any | catalogue; view, download or export (403 if not permitted) |
+| GET | `/api/portal/profile`, `/payslips`, `/payslips/{period}` | any | own data |
+| GET / POST | `/api/portal/payroll/register`, `/payroll/export` | payroll access | register, CSV export |
+| GET | `/api/portal/hr/records[/{employee_id}]` | HR access | search, open record |
+| GET | `/api/portal/documents[/{id}/download]`, `/directory`, `/directory/departments` | per resource / any | documents, directory |
+| POST | `/api/admin/accounts` | IT admin console write | create a privileged account |
+| POST / GET | `/api/events`; `/api/events/me` | any | events for the caller only (identity, IP, device set by the backend) |
+| GET | `/api/events` | admin | history with filters |
+| GET / POST | `/api/risk/employees[/{id}]`, `/api/risk/assess` | admin | risk, factors, stages, exposure |
 | GET / PATCH | `/api/alerts[/{id}]` | admin | alerts |
-| GET / POST / PATCH | `/api/investigations[/{id}]` | admin | investigation records (PATCH only reopens a resolved one) |
-| GET | `/api/investigations/{id}/explanation`, `/evidence` | admin | evidence-based explanation; preserved events with hashes and integrity check |
-| GET | `/api/investigations/{id}/export?format=json\|csv` | admin | downloadable evidence report (audited) |
-| POST | `/api/investigations/{id}/resolve` | admin | body `reason` + `confirm: true`; audited containment action |
-| GET / POST | `/api/containment` | admin | `revoke_sessions`, `lock_account`, `restrict_access`, `remove_privileges`, `block_ip`, `isolate_system`, `restore_account`, `unblock_ip`, `release_system` (`confirm` required for disruptive ones) |
-| GET | `/api/soc/version`, `/overview`, `/confidence-history`, `/events`, `/employees`, `/investigations[/{id}]`, `/scopes`, `/timeline`, `/graph`, `/response`, `/audit` | admin | SOC dashboard read models |
+| GET / POST / PATCH | `/api/investigations[/{id}]` | admin | investigations (PATCH only reopens a resolved one) |
+| GET | `/api/investigations/{id}/explanation`, `/evidence`, `/export` | admin | explanation, preserved evidence, report download |
+| POST | `/api/investigations/{id}/resolve` | admin | `reason` + `confirm: true` |
+| GET / POST | `/api/containment` | admin | `revoke_sessions`, `lock_account`, `restrict_access`, `remove_privileges`, `block_ip`, `isolate_system`, `restore_account`, `unblock_ip`, `release_system`, `resolve_investigation` (`confirm` for disruptive ones) |
+| GET | `/api/soc/version`, `/overview`, `/confidence-history`, `/events`, `/employees`, `/investigations[/{id}]`, `/scopes`, `/timeline`, `/graph`, `/response`, `/audit` | admin | SOC read models |
 | GET | `/api/dashboard/stats`, `/api/audit-logs` | admin | KPIs, audit trail |
-| GET / POST | `/api/detection/status`, `/reload`, `/retrain` | admin | model mode + metrics, thresholds, rules; reload config; retrain |
-| GET / POST | `/api/simulation/scenarios`, `/status`, `/steps`, `/run`, `/reset` | admin + simulation enabled | attack simulation |
+| GET / POST | `/api/detection/status`, `/reload`, `/retrain` | admin | model, thresholds, rules |
+| GET / POST | `/api/simulation/scenarios`, `/status`, `/steps`, `/run`, `/reset` | admin, simulation enabled | attack simulation (`records` sets the export size) |
 
-Timestamps are stored in UTC; responses carry both `timestamp` (UTC) and `timestamp_local` (`DISPLAY_TIMEZONE`,
-default `Asia/Kolkata`).
+Timestamps are stored in UTC and returned as `timestamp` (UTC) and `timestamp_local`.
 
 ## Tests
 
 ```powershell
-python -m pytest tests -q
+python -m pytest tests -q          # 134 tests, about one minute
 ```
-The suite uses a temporary SQLite database and covers seeding and hashing, employee-ID login, RBAC, that
-client-supplied employee IDs and IPs are ignored, portal flows per role, event fields persisted in SQLite, that
-ordinary working sessions never alert, the full simulated attack (detection, alert, investigation, containment,
-reset) and the simulation being unavailable to employees.
+
+The suite uses a temporary database and a separate backend process. It covers:
+
+* **Integration:** a normal employee's session is recorded and scored low; a compromised account (unfamiliar IP, restricted
+  payroll access, an 8,000-record export, failed administrator logins, IT portal probe, privileged account and login,
+  external transfer) is detected with rising confidence, correlated, alerted **before the external transfer**, shown on
+  the timeline and graph, investigated, and contained; a new-IP login to a permitted resource is **not** critical.
+* **Security and reliability:** hashed passwords and session tokens; every endpoint requires authentication except health
+  and login; admin endpoints reject employees; employees cannot read other employees' restricted records; invalid
+  paths, queries and bodies never produce a 5xx; audit entries; UTC timestamps; bounded scores that match the severity bands.
+* **Runtime:** data, sessions and the model survive a backend restart; the three Streamlit apps run against a live backend,
+  employees are refused by the SOC dashboard, and the apps stay usable when the backend is unreachable.
+* **Detection, ML, SOC and investigation workflow:** every scenario in the specification, duplicates, false positives,
+  evidence preservation and tamper detection, containment enforcement and report export.
+
+## Known limitations
+
+* **Local demonstration only.** It is not hardened for production: HTTP only, no MFA, no password reset, no login rate
+  limiting or account throttling, and the default `SECRET_KEY` must be changed.
+* **Synthetic data.** The model is trained on generated sessions; its metrics, the rule severities and the scoring weights
+  are hand-tuned for the case study and would need real data and tuning before any real use.
+* **Simulated containment.** Blocking, isolating, locking and privilege removal change application state only; there is no
+  firewall, directory or endpoint integration.
+* **Source IPs:** the backend trusts only the TCP peer. On one machine every client is loopback, so
+  `MAP_LOOPBACK_TO_WORKSTATION` attributes it to the employee's registered workstation IP; `X-Forwarded-For` is ignored.
+* **SQLite and polling.** One local database file and 3-second polling suit a demo, not concurrent multi-site use.
+* **One active investigation per employee.** Once resolved, a later critical alert opens a new one.
+* **Explanations are rule-based.** They state only what the stored events show; an LLM is not used.
+* **Evidence retention.** Nothing deletes real events, but *Reset simulation* deletes synthetic events and investigations,
+  by design.
+* **Genuine activity during a run** is scored in the same correlation window as the simulated attack.
+* **Tables are static HTML** (no client-side sorting or export); charts are Plotly.
+* Times use `DISPLAY_TIMEZONE` (default `Asia/Kolkata`); business hours are 07:00-19:00 in that zone.

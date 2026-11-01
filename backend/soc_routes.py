@@ -1,5 +1,5 @@
 """SOC dashboard endpoints (security administrators only). Thin wrappers over soc_service."""
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from backend import soc_service
@@ -39,9 +39,9 @@ def events(
     db: Session = Depends(get_db),
 ):
     if event_type and event_type not in EVENT_TYPES:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"event_type must be one of {', '.join(EVENT_TYPES)}")
+        raise HTTPException(422, f"event_type must be one of {', '.join(EVENT_TYPES)}")
     if severity and severity not in SEVERITY_LEVELS:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"severity must be one of {', '.join(SEVERITY_LEVELS)}")
+        raise HTTPException(422, f"severity must be one of {', '.join(SEVERITY_LEVELS)}")
     return soc_service.event_feed(db, employee=employee, ip=ip, event_type=event_type, severity=severity,
                                   minutes=minutes, limit=limit)
 
@@ -72,7 +72,7 @@ def scopes(_: AuthContext = Depends(require_admin), db: Session = Depends(get_db
 def timeline(investigation_id: int | None = Query(None, gt=0), employee_id: int | None = Query(None, gt=0),
              _: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
     if not (investigation_id or employee_id):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "investigation_id or employee_id is required")
+        raise HTTPException(422, "investigation_id or employee_id is required")
     return soc_service.timeline(db, investigation_id, employee_id)
 
 
@@ -81,7 +81,7 @@ def graph(investigation_id: int | None = Query(None, gt=0), employee_id: int | N
           minutes: int | None = Query(None, ge=5, le=1440),
           _: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
     if not (investigation_id or employee_id):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "investigation_id or employee_id is required")
+        raise HTTPException(422, "investigation_id or employee_id is required")
     return soc_service.graph(db, investigation_id, employee_id, minutes)
 
 

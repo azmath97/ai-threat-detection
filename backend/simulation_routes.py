@@ -25,6 +25,7 @@ class _Target(BaseModel):
     target_employee_id: int = Field(gt=0)
     source_ip: str = Field(default=sim.DEFAULT_SOURCE_IP, description="Simulated attacker address")
     scenario: str = "it_admin_full_chain"
+    records: int = Field(default=sim.EXPORT_RECORDS, ge=1, le=1_000_000, description="Records in the simulated export and transfer")
 
     @field_validator("source_ip")
     @classmethod
@@ -64,6 +65,7 @@ def scenarios(_: AuthContext = Depends(require_simulation), db: Session = Depend
         "scenarios": sim.SCENARIOS,
         "steps": sim.STEPS,
         "default_source_ip": sim.DEFAULT_SOURCE_IP,
+        "default_records": sim.EXPORT_RECORDS,
         "targets": [
             {"id": t.id, "employee_id": t.employee_code, "username": t.username, "full_name": t.full_name,
              "department": t.department, "job_role": t.job_role, "known_ips": t.known_ips}
@@ -80,13 +82,14 @@ def simulation_status(_: AuthContext = Depends(require_simulation), db: Session 
 @router.post("/steps")
 def run_step(body: StepRequest, auth: AuthContext = Depends(require_simulation), db: Session = Depends(get_db)):
     if body.step not in sim.STEP_IDS:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"step must be one of: {', '.join(sim.STEP_IDS)}")
-    return sim.run_step(db, auth.employee, _target(db, body.target_employee_id), body.step, body.source_ip, body.scenario)
+        raise HTTPException(422, f"step must be one of: {', '.join(sim.STEP_IDS)}")
+    return sim.run_step(db, auth.employee, _target(db, body.target_employee_id), body.step, body.source_ip, body.scenario,
+                        body.records)
 
 
 @router.post("/run")
 def run_scenario(body: _Target, auth: AuthContext = Depends(require_simulation), db: Session = Depends(get_db)):
-    results = sim.run_scenario(db, auth.employee, _target(db, body.target_employee_id), body.source_ip, body.scenario)
+    results = sim.run_scenario(db, auth.employee, _target(db, body.target_employee_id), body.source_ip, body.scenario, body.records)
     return {"scenario": body.scenario, "results": results}
 
 

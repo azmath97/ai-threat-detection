@@ -16,7 +16,7 @@ from frontend import components as ui  # noqa: E402
 from frontend import soc_components as sc  # noqa: E402
 from frontend.api_client import ApiClient, ApiError  # noqa: E402
 
-st.set_page_config(page_title="Meridian Trust Bank - Security Operations Centre", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title=f"{ui.ORG_NAME} - Security Operations", layout="wide", initial_sidebar_state="expanded")
 sc.inject()
 
 PAGES = ["Security Overview", "Live Event Feed", "Attack Investigations", "Employee Risk Monitor", "Attack Timeline",
@@ -150,8 +150,7 @@ def login_page() -> None:
     _, centre, _ = st.columns([1, 1.15, 1])
     with centre:
         st.markdown("<div style='height:3rem'></div>", unsafe_allow_html=True)
-        st.markdown(f'<div class="login-title">{ui.ORG_NAME}</div><div class="login-sub">Security Operations Centre - sign in</div>',
-                    unsafe_allow_html=True)
+        ui.login_header("Security Operations - sign in")
         flash = st.session_state.pop("flash", None)
         if flash:
             ui.notice("info", flash)
@@ -189,18 +188,31 @@ def render_overview() -> None:
         return
     sc.live_note(f"Live - updated {short(ov['generated_at']['local'])} (every {LIVE_SECONDS} s when data changes)")
     k = ov["kpis"]
+    threats = ov["threats"]
+    if threats:
+        top = threats[0]
+        ui.hero("Threat posture", f"{len(threats)} active threat{'s' if len(threats) != 1 else ''} under watch",
+                f"{top['employee_id']} is at {top['level_label']} ({top['confidence']:.1f}/100), currently at the "
+                f"{top['stage_label']} stage. {top['exposure_label']}.",
+                [f"{k['active_investigations']} active investigation{'s' if k['active_investigations'] != 1 else ''}",
+                 f"{k['events_24h']:,} events in 24 h", f"Last event {short(top['last_event_at']['local'])}"],
+                tone="alert" if top["level"] == "critical" else "")
+    else:
+        ui.hero("Threat posture", "All clear", "No employee is above the Normal threshold. Detection is running on every new event.",
+                [f"{k['total_events']:,} events monitored", f"{k['events_24h']:,} in the last 24 h"])
     tiles = [
-        ("Total security events", f"{k['total_events']:,}", f"{k['events_24h']:,} in the last 24 h", ""),
-        ("Active investigations", k["active_investigations"], "open or contained", "warn" if k["active_investigations"] else ""),
-        ("Critical alerts", k["critical_alerts"], "active", "alert" if k["critical_alerts"] else ""),
-        ("High-risk employees", k["high_risk_employees"], "High Risk or Critical", "warn" if k["high_risk_employees"] else ""),
-        ("Sensitive records accessed", f"{k['sensitive_records_accessed']:,}", f"{k['sensitive_records_24h']:,} in the last 24 h", ""),
-        ("Confirmed external transfers", k["confirmed_external_transfers"], "transfer confirmed", "alert" if k["confirmed_external_transfers"] else ""),
+        ("Total security events", f"{k['total_events']:,}", f"{k['events_24h']:,} in the last 24 h", "", "activity",
+         [b["count"] for b in ov["events_per_hour"]]),
+        ("Active investigations", k["active_investigations"], "open or contained", "warn" if k["active_investigations"] else "", "briefcase"),
+        ("Critical alerts", k["critical_alerts"], "active", "alert" if k["critical_alerts"] else "", "alert"),
+        ("High-risk employees", k["high_risk_employees"], "High Risk or Critical", "warn" if k["high_risk_employees"] else "", "users"),
+        ("Sensitive records accessed", f"{k['sensitive_records_accessed']:,}", f"{k['sensitive_records_24h']:,} in the last 24 h", "", "database"),
+        ("Confirmed external transfers", k["confirmed_external_transfers"], "transfer confirmed",
+         "alert" if k["confirmed_external_transfers"] else "", "send"),
     ]
     sc.kpi_grid(tiles)
 
     ui.section("Live attack confidence")
-    threats = ov["threats"]
     if threats:
         ids = [t["employee_id"] for t in threats]
         chosen = pselect("Monitored employee", ids, "meter_emp",
@@ -809,14 +821,25 @@ PAGE_FUNCTIONS = {
 }
 
 
+NAV_GROUPS = [("Overview", ["Security Overview", "Live Event Feed"]),
+              ("Investigate", ["Attack Investigations", "Employee Risk Monitor", "Attack Timeline", "Attack Graph"]),
+              ("Respond", ["Response Centre", "Audit Logs"])]
+NAV_ICONS = {"Security Overview": "dashboard", "Live Event Feed": "monitoring", "Attack Investigations": "manage_search",
+             "Employee Risk Monitor": "group", "Attack Timeline": "timeline", "Attack Graph": "hub",
+             "Response Centre": "shield", "Audit Logs": "receipt_long"}
+
+
 def dashboard() -> None:
     page = st.session_state.get("page", PAGES[0])
     with st.sidebar:
-        st.markdown(f'<div class="org-name">{ui.ORG_NAME}</div><div class="org-sub">Security Operations Centre</div>', unsafe_allow_html=True)
-        for name in PAGES:
-            st.button(name, key=f"nav_{name}", width="stretch", on_click=nav, args=(name,),
-                      type="primary" if name == page else "secondary")
-        st.button("Logout", key="nav_logout", width="stretch", on_click=sign_out)
+        ui.brand("Security Operations")
+        for group, names in NAV_GROUPS:
+            ui.nav_caption(group)
+            for name in names:
+                st.button(name, key=f"nav_{name}", width="stretch", on_click=nav, args=(name,), icon=f":material/{NAV_ICONS[name]}:",
+                          type="primary" if name == page else "secondary")
+        ui.nav_caption("Account")
+        st.button("Logout", key="nav_logout", width="stretch", on_click=sign_out, icon=":material/logout:")
         st.markdown(f'<div class="whoami">Signed in as<br><b>{st.session_state.get("admin_id", "")}</b><br>'
                     f'Live refresh: {LIVE_SECONDS} s</div>', unsafe_allow_html=True)
     PAGE_FUNCTIONS[page]()

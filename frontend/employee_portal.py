@@ -87,8 +87,7 @@ def login_page() -> None:
     _, centre, _ = st.columns([1, 1.15, 1])
     with centre:
         st.markdown("<div style='height:3rem'></div>", unsafe_allow_html=True)
-        st.markdown(f'<div class="login-title">{ui.ORG_NAME}</div><div class="login-sub">Employee Portal - sign in</div>',
-                    unsafe_allow_html=True)
+        ui.login_header("Employee Portal - sign in")
         flash = st.session_state.pop("flash", None)
         if flash:
             ui.notice("info", flash)
@@ -122,10 +121,13 @@ def page_dashboard() -> None:
     if error:
         show_error(error)
         return
-    ui.page_header("Dashboard", f"Welcome, {profile['full_name']}")
+    ui.page_header("Dashboard", "Your workspace at a glance")
+    last = ui.fmt_ts(profile.get("previous_login_at_local")) if profile.get("previous_login_at") else "First sign-in"
+    ui.hero("Employee workspace", f"Welcome back, {profile['full_name'].split()[0]}",
+            f"{profile['job_role']} in {profile['department']}. Use the menu to open your payslips, documents, the directory and your profile.",
+            [profile["employee_code"], f"Last sign-in {last}"])
 
     ui.section("Your details")
-    last = ui.fmt_ts(profile.get("previous_login_at_local")) if profile.get("previous_login_at") else "First sign-in"
     ui.kv_table([
         ("Name", profile["full_name"]),
         ("Employee ID", profile["employee_code"]),
@@ -358,15 +360,22 @@ PAGE_FUNCTIONS = {
 }
 
 
+NAV_ICONS = {"Dashboard": "dashboard", "HR Records": "badge", "Payroll": "payments", "Documents": "description",
+             "Employee Directory": "contacts", "My Profile": "account_circle"}
+
+
 def portal() -> None:
     page = st.session_state.get("page", "Dashboard")
     profile, _ = load("me", api().me)
     with st.sidebar:
-        st.markdown(f'<div class="org-name">{ui.ORG_NAME}</div><div class="org-sub">Employee Portal</div>', unsafe_allow_html=True)
+        ui.brand("Employee Portal")
+        ui.nav_caption("Workspace")
         for name in PAGES:
-            st.button(name, key=f"nav_{name}", width="stretch", on_click=go, args=(name,),
+            if name == "My Profile":
+                ui.nav_caption("Account")
+            st.button(name, key=f"nav_{name}", width="stretch", on_click=go, args=(name,), icon=f":material/{NAV_ICONS[name]}:",
                       type="primary" if name == page else "secondary")
-        st.button("Logout", key="nav_logout", width="stretch", on_click=sign_out)
+        st.button("Logout", key="nav_logout", width="stretch", on_click=sign_out, icon=":material/logout:")
         if profile:
             st.markdown(f'<div class="whoami">Signed in as<br><b>{profile["full_name"]}</b><br>{profile["employee_code"]}</div>',
                         unsafe_allow_html=True)

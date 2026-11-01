@@ -1,6 +1,6 @@
 # AI-Based Insider Threat Detection System
 
-A cybersecurity case study. A fictional financial organisation, **Meridian Trust Bank**, runs an Employee Workspace
+A cybersecurity case study. A fictional financial organisation, **Arden Bank**, runs an Employee Workspace
 Portal. A security team watches it through a Security Operations Centre (SOC) dashboard. An employee account can be
 compromised or misused, and the system must notice that **while it is happening** and before data leaves the bank.
 

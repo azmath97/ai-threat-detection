@@ -39,8 +39,7 @@ def login_page() -> None:
     _, centre, _ = st.columns([1, 1.15, 1])
     with centre:
         st.markdown("<div style='height:3rem'></div>", unsafe_allow_html=True)
-        st.markdown('<div class="login-title">Simulation Console</div><div class="login-sub">Security administrators only</div>',
-                    unsafe_allow_html=True)
+        ui.login_header("Simulation Console - administrators only")
         flash = st.session_state.pop("flash", None)
         if flash:
             ui.notice("info", flash)
@@ -102,9 +101,9 @@ def console() -> None:
         return
 
     with st.sidebar:
-        st.markdown('<div class="org-name">Simulation Console</div><div class="org-sub">Security administration</div>', unsafe_allow_html=True)
+        ui.brand("Simulation Console")
         st.markdown(f'<div class="whoami">Signed in as<br><b>{st.session_state.admin_name}</b></div>', unsafe_allow_html=True)
-        st.button("Logout", on_click=sign_out, width="stretch")
+        st.button("Logout", on_click=sign_out, width="stretch", icon=":material/logout:")
 
     st.markdown('<div class="sim-banner">SIMULATION ENVIRONMENT - SYNTHETIC DATA ONLY. Actions run through the live backend '
                 "and are stored in the shared database flagged as synthetic.</div>", unsafe_allow_html=True)

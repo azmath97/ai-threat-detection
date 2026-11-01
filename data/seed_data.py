@@ -14,6 +14,7 @@ from backend.database import Base, SessionLocal, engine, init_db, utcnow
 from backend.event_service import record_event, write_audit
 from backend.models import AccessPermission, Employee, EmployeeSession, employee_code_for
 from backend.security import hash_password, hash_token
+from data.demo_accounts import DEMO_PASSWORDS
 
 HISTORY_DAYS = 14
 
@@ -114,17 +115,14 @@ def seed_database(db: Session, reset: bool = False) -> bool:
     if db.scalar(select(Employee.id).limit(1)) is not None:
         return False
 
-    settings = get_settings()
     rng = random.Random(20260101)
 
     created: list[tuple[Employee, dict[str, str]]] = []
     for username, full_name, department, job_role, role, ips, perms in EMPLOYEES:
         employee = Employee(
-            username=username, full_name=full_name, email=f"{username}@example-bank.test",
+            username=username, full_name=full_name, email=f"{username}@westbridgebank.test",
             department=department, job_role=job_role, role=role, status="active",
-            password_hash=hash_password(
-                settings.demo_admin_password if role == "security_admin" else settings.demo_employee_password
-            ),
+            password_hash=hash_password(DEMO_PASSWORDS[username]),
             known_ips=ips, created_at=utcnow() - timedelta(days=HISTORY_DAYS + 30),
         )
         employee.permissions = [AccessPermission(resource=r, access_level=lvl) for r, lvl in perms.items()]

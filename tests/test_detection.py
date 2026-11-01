@@ -12,6 +12,7 @@ from backend.database import SessionLocal
 from backend.errors import ServiceError
 from backend.event_service import access_resource, record_event
 from backend.models import Employee, SecurityEvent
+from data.demo_accounts import demo_password
 
 ATTACKER_IP = "185.220.101.45"
 STEPS = ["unfamiliar_login", "restricted_access", "large_export", "admin_login_failures",
@@ -76,7 +77,7 @@ def test_normal_employee_activity_keeps_low_risk(client, admin):
 # ---------------------------------------------------------------- 2. unfamiliar IP
 def test_unfamiliar_ip_login_is_not_an_attack_by_itself(client, admin):
     with SessionLocal() as db:
-        authenticate(db, "EMP-1009", get_settings().demo_employee_password, ip="203.0.113.9", synthetic=True,
+        authenticate(db, "EMP-1009", demo_password("EMP-1009"), ip="203.0.113.9", synthetic=True,
                      scenario="detection_test")
     data = risk(client, admin, "isla.murphy")
     assert "unfamiliar_ip" in rules_seen(data)
@@ -130,7 +131,7 @@ def test_multiple_failed_logins_are_credential_misuse(client, admin):
     assert data["current_stage"] == "credential_misuse"
     assert data["level"] != "critical" and alerts_for(client, admin, "grace.lee") == []
     with SessionLocal() as db:  # eventually the right password: compromise indicator
-        authenticate(db, "EMP-1007", get_settings().demo_employee_password, ip="10.20.6.71", synthetic=True,
+        authenticate(db, "EMP-1007", demo_password("EMP-1007"), ip="10.20.6.71", synthetic=True,
                      scenario="detection_test")
     assert "login_after_failures" in rules_seen(risk(client, admin, "grace.lee"))
 
@@ -139,7 +140,7 @@ def test_multiple_failed_logins_are_credential_misuse(client, admin):
 def test_privileged_account_creation_is_persistence(client, admin):
     with SessionLocal() as db:
         david = employee(db, "david.kumar")
-        authenticate(db, "EMP-1004", get_settings().demo_employee_password, ip=ATTACKER_IP, synthetic=True,
+        authenticate(db, "EMP-1004", demo_password("EMP-1004"), ip=ATTACKER_IP, synthetic=True,
                      scenario="detection_test")
         steps = client.post("/api/simulation/steps", headers=admin, json={
             "target_employee_id": david.id, "step": "create_privileged_account", "source_ip": ATTACKER_IP})
@@ -219,7 +220,7 @@ def test_attack_stages_follow_evidence_not_a_fixed_order(client, admin):
         for resource in ("hr-records", "payroll-records", "it-admin-console"):
             access_resource(db, grace, resource, "view", source_ip=ATTACKER_IP, session=None, record_count=5,
                             is_synthetic=True, scenario="detection_test")
-        authenticate(db, "EMP-1007", get_settings().demo_employee_password, ip=ATTACKER_IP, synthetic=True,
+        authenticate(db, "EMP-1007", demo_password("EMP-1007"), ip=ATTACKER_IP, synthetic=True,
                      scenario="detection_test")
     data = risk(client, admin, "grace.lee")
     assert {"collection", "sensitive_resource_access", "initial_access"} <= set(data["attack_stages"])

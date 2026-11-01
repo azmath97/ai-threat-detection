@@ -13,7 +13,7 @@ import streamlit as st  # noqa: E402
 from frontend import components as ui  # noqa: E402
 from frontend.api_client import ApiClient, ApiError  # noqa: E402
 
-st.set_page_config(page_title=f"{ui.ORG_NAME} - Employee Portal", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title=f"{ui.ORG_NAME} - Employee Portal", layout="wide", initial_sidebar_state="auto")
 ui.inject_css()
 
 PAGES = ["Dashboard", "HR Records", "Payroll", "Documents", "Employee Directory", "My Profile"]
@@ -155,9 +155,10 @@ def page_dashboard() -> None:
     elif not events:
         st.caption("No recent activity.")
     else:
-        ui.table(ui.activity_rows(events, resource_names()),
-                 {"time": "Time", "activity": "Activity", "resource": "Resource", "records": "Records", "result": "Result"},
-                 result_column="result")
+        names = resource_names()
+        ui.feed([{"title": ui.ACTIVITY_LABELS.get(e["event_type"], e["event_type"]) + (f" - {names.get(e['resource'], e['resource'])}" if e["resource"] else ""),
+                  "sub": ui.RESULT_LABELS.get(e["outcome"], e["outcome"]) + (f" - {e['records_accessed']} records" if e["records_accessed"] else ""),
+                  "time": ui.fmt_ts(e["timestamp_local"]), "tone": "bad" if e["outcome"] in ("denied", "failure") else ""} for e in events])
 
 
 def page_hr_records() -> None:
@@ -377,8 +378,7 @@ def portal() -> None:
                       type="primary" if name == page else "secondary")
         st.button("Logout", key="nav_logout", width="stretch", on_click=sign_out, icon=":material/logout:")
         if profile:
-            st.markdown(f'<div class="whoami">Signed in as<br><b>{profile["full_name"]}</b><br>{profile["employee_code"]}</div>',
-                        unsafe_allow_html=True)
+            ui.user_card(profile["full_name"], f'{profile["employee_code"]} - {profile["job_role"]}')
     PAGE_FUNCTIONS[page]()
 
 

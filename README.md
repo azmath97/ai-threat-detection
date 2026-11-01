@@ -1,6 +1,6 @@
 # AI-Based Insider Threat Detection System
 
-A cybersecurity case study. A fictional financial organisation, **Arden Bank**, runs an Employee Workspace
+A cybersecurity case study. A fictional financial organisation, **Westbridge Bank**, runs an Employee Workspace
 Portal. A security team watches it through a Security Operations Centre (SOC) dashboard. An employee account can be
 compromised or misused, and the system must notice that **while it is happening** and before data leaves the bank.
 
@@ -62,7 +62,7 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | Backend | Python 3.12, FastAPI, Uvicorn, Pydantic 2 |
 | Database | SQLite through SQLAlchemy 2 (timestamps stored in UTC, shown in `DISPLAY_TIMEZONE`) |
 | Machine learning | scikit-learn `IsolationForest`, NumPy, joblib (model saved locally and reused) |
-| Dashboards | Streamlit and Plotly (charts and the attack graph) |
+| Dashboards | Streamlit and Plotly (charts and the attack graph); custom CSS theme in `frontend/theme.py` (responsive down to phone width, no external fonts or assets) |
 | Security | PBKDF2-SHA256 salted password hashes, random session tokens stored as HMAC digests |
 | Tests | pytest, FastAPI TestClient, Streamlit `AppTest` |
 
@@ -147,19 +147,27 @@ restarts (SQLite file).
 
 ## Demo credentials
 
-For local demonstration only; all accounts are synthetic. Sign in with the **Employee ID**.
+For local demonstration only; every account is synthetic and has its own password. Sign in with the **Employee ID**
+(the username also works). Emails are `<username>@westbridgebank.test`. The passwords live in `data/demo_accounts.py` and
+are stored in the database only as salted PBKDF2-SHA256 hashes.
 
-| Account | Employee ID | Password | Notes |
-|---|---|---|---|
-| Demo employee (Finance analyst) | `EMP-1001` | `Employee#Demo2026` | own payslips, permitted documents |
-| Payroll specialist | `EMP-1002` | `Employee#Demo2026` | payroll register and CSV export |
-| HR manager | `EMP-1003` | `Employee#Demo2026` | HR records, payroll register (read only) |
-| IT administrator | `EMP-1004` | `Employee#Demo2026` | can create privileged accounts; default attack target |
-| Other employees | `EMP-1005` to `EMP-1010` | `Employee#Demo2026` | Trading, Customer Service, Lending, Compliance, Engineering |
-| Security administrator | `SEC-9011` | `SocAdmin#Demo2026` | SOC dashboard and simulation console |
+| Employee ID | Name | Department / job role | Password | Access (resource: level) | Registered IP(s) |
+|---|---|---|---|---|---|
+| `EMP-1001` | Alice Morgan | Finance / Financial Analyst | `Cedar#Harbor47` | Financial Reports rw, Customer Accounts r, Wiki r | 10.20.1.11, 10.20.1.12 |
+| `EMP-1002` | Bob Chen | Finance / Payroll Specialist | `Quill&Meadow82` | Payroll Records rw, Financial Reports r, Wiki r | 10.20.1.21 |
+| `EMP-1003` | Carol Diaz | HR / HR Manager | `Birch!Lantern26` | HR Records rw, Payroll Records r, Wiki r | 10.20.2.31, 10.20.2.32 |
+| `EMP-1004` | David Kumar | IT / Systems Administrator | `Falcon$Ridge63` | IT Admin Console rw, Source Code r, Wiki rw | 10.20.3.41 |
+| `EMP-1005` | Emma Wilson | Trading / Risk Analyst | `Willow#Summit19` | Trading Reports rw, Financial Reports r, Wiki r | 10.20.4.51 |
+| `EMP-1006` | Frank Osei | Customer Service / Account Manager | `Amber%Compass74` | Customer Accounts rw, Wiki r | 10.20.5.61, 10.20.5.62 |
+| `EMP-1007` | Grace Lee | Compliance / Compliance Officer | `Juniper!Atlas58` | Audit Reports rw, Financial Reports r, Customer Accounts r, Wiki r | 10.20.6.71 |
+| `EMP-1008` | Henry Novak | Engineering / Software Engineer | `Granite#Voyage31` | Source Code rw, Wiki rw | 10.20.7.81 |
+| `EMP-1009` | Isla Murphy | Lending / Loan Officer | `Coral&Beacon95` | Loan Applications rw, Customer Accounts r, Wiki r | 10.20.8.91 |
+| `EMP-1010` | Jack Silva | Marketing / Marketing Coordinator | `Cobalt!Meadow68` | Marketing Assets rw, Wiki r | 10.20.9.101 |
+| `SEC-9011` | Sam Okafor | Security / SOC Analyst (**security administrator**) | `Sentinel#Vault2026` | Audit Reports r, Wiki r; SOC dashboard and simulation console | 10.20.10.5 |
 
-Passwords are stored only as salted PBKDF2-SHA256 hashes. Change `DEMO_EMPLOYEE_PASSWORD` / `DEMO_ADMIN_PASSWORD`
-in `.env` before seeding if you prefer other values.
+Every employee can also reach the self-service pages (own profile and payslips, directory, document library). The HR
+manager sees HR records, the payroll specialist the payroll register and export, and the IT administrator can create
+privileged accounts; the security administrator is the only role that can open the SOC dashboard or the simulation.
 
 ## Launching the application
 
@@ -189,7 +197,7 @@ normal employee. It is only available to the security administrator and clearly 
 
 ```powershell
 $base = "http://127.0.0.1:8000"
-$login = '{"employee_id":"SEC-9011","password":"SocAdmin#Demo2026"}'
+$login = '{"employee_id":"SEC-9011","password":"Sentinel#Vault2026"}'
 $tok = (Invoke-RestMethod "$base/api/auth/login" -Method Post -ContentType application/json -Body $login).access_token
 $h = @{ Authorization = "Bearer $tok" }
 $employees = Invoke-RestMethod "$base/api/employees" -Headers $h

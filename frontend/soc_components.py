@@ -1,4 +1,4 @@
-"""SOC dashboard presentation: KPI cards, confidence meter, stage strip and Plotly charts.
+"""SOC dashboard presentation: KPI cards, confidence gauge, stage strip and Plotly charts.
 
 Every function here only renders data handed to it by the backend; nothing is computed or hardcoded for display.
 """
@@ -8,73 +8,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from frontend import components as ui
+from frontend.theme import SANS, SERIF, SOC_CSS
 
-INK, ACCENT, GREY, LINE = "#1C252E", "#00A76F", "#919EAB", "#DFE3E8"
-SEVERITY_COLOURS = {"normal": "#00A76F", "suspicious": "#FFAB00", "high_risk": "#FF7A29", "critical": "#FF5630"}
+INK, ACCENT, GREY = "#17212B", "#1E6F5C", "#8B969E"
+SEVERITY_COLOURS = {"normal": "#2F8466", "suspicious": "#D4A02D", "high_risk": "#D9742A", "critical": "#C2403A"}
 SEVERITY_LABELS = {"normal": "Normal", "suspicious": "Suspicious", "high_risk": "High Risk", "critical": "Critical"}
-FONT = "Public Sans, Inter, Segoe UI, system-ui, sans-serif"
-
-_CSS = """
-<style>
-  .block-container { max-width: 1480px; padding-top: 1.4rem; }
-  section[data-testid="stSidebar"] { width: 260px !important; min-width: 260px !important; }
-  section[data-testid="stSidebar"] .stButton { position: relative; z-index: 3; }
-  section[data-testid="stSidebar"] > div { padding-top: .6rem; }
-  section[data-testid="stSidebar"] .stButton > button:focus:not(:active):not([kind="primary"]) { background: transparent; box-shadow: none; }
-
-  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 1rem; margin: .3rem 0 1rem 0; }
-  .kpi { display: flex; justify-content: space-between; align-items: center; gap: .6rem; background: var(--card); border-radius: var(--radius);
-      box-shadow: var(--shadow); padding: 1.15rem 1.3rem; min-height: 112px; }
-  .kpi .k-text { min-width: 0; }
-  .kpi .k-label { color: var(--text); font-size: .85rem; font-weight: 600; }
-  .kpi .k-value { color: var(--text); font-size: 1.9rem; font-weight: 700; line-height: 1.25; margin: .15rem 0 .1rem 0; word-break: normal; }
-  .kpi .k-value.long { font-size: 1.1rem; line-height: 1.8; }
-  .kpi .k-sub { color: var(--muted); font-size: .76rem; }
-  .kpi .k-visual { flex: none; }
-  .kpi .k-icon { width: 46px; height: 46px; border-radius: 14px; display: flex; align-items: center; justify-content: center;
-      background: var(--green-bg); color: var(--green-d); }
-  .kpi .k-icon svg { width: 24px; height: 24px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-  .kpi .spark { width: 96px; height: 44px; }
-  .kpi.warn .k-icon { background: var(--amber-bg); color: var(--amber); }
-  .kpi.alert .k-icon { background: var(--red-bg); color: var(--red); }
-  .kpi.alert .k-value { color: var(--red); }
-  .kpi.warn .k-value { color: var(--orange); }
-
-  .meter { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); padding: 1.3rem 1.5rem; }
-  .meter .m-head { display: flex; align-items: baseline; gap: .8rem; margin-bottom: .9rem; }
-  .meter .m-score { font-size: 2.6rem; font-weight: 800; color: var(--text); line-height: 1; }
-  .meter .m-of { color: var(--muted); font-size: .85rem; }
-  .sev { font-size: .74rem; font-weight: 700; padding: .18rem .65rem; border-radius: 999px; }
-  .sev-normal { color: var(--green-d); background: var(--green-bg); }
-  .sev-suspicious { color: var(--amber); background: var(--amber-bg); }
-  .sev-high_risk { color: var(--orange); background: var(--orange-bg); }
-  .sev-critical { color: var(--red); background: var(--red-bg); }
-  .m-bar { position: relative; display: flex; height: 12px; border-radius: 999px; }
-  .m-bar .band { height: 100%; border-right: 2px solid #fff; box-sizing: border-box; }
-  .m-bar .band:first-child { border-radius: 999px 0 0 999px; }
-  .m-bar .band:nth-last-child(2) { border-radius: 0 999px 999px 0; border-right: none; }
-  .m-bar .marker { position: absolute; top: -6px; width: 6px; height: 24px; border-radius: 3px; background: var(--text); border: 2px solid #fff; box-sizing: content-box; }
-  .m-scale { position: relative; height: 22px; font-size: .72rem; color: var(--muted); margin-top: .5rem; }
-  .m-scale span { position: absolute; transform: translateX(-50%); }
-  .m-legend { font-size: .74rem; color: var(--muted); margin-top: .2rem; }
-
-  .stages { display: flex; background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); margin: .3rem 0 1rem 0; overflow: hidden; }
-  .stages .st { flex: 1; padding: .85rem .8rem; border-right: 1px dashed var(--line-2); min-width: 0; }
-  .stages .st:last-child { border-right: none; }
-  .stages .st .s-name { font-size: .78rem; color: var(--muted); font-weight: 700; }
-  .stages .st .s-info { font-size: .72rem; color: var(--muted); margin-top: .25rem; min-height: 1.9em; }
-  .stages .st.reached { background: var(--green-bg); }
-  .stages .st.reached .s-name { color: var(--green-d); }
-  .stages .st.current { background: var(--red-bg); box-shadow: inset 0 -3px 0 #FF5630; }
-  .stages .st.current .s-name { color: var(--red); }
-
-  .live-note { color: var(--muted); font-size: .76rem; margin-bottom: .6rem; }
-  .live-dot { display: inline-block; width: 8px; height: 8px; background: var(--green); border-radius: 50%; margin-right: 6px; box-shadow: 0 0 0 3px rgba(0,167,111,.18); }
-  .tag { font-size: .7rem; background: #F4F6F8; padding: .1rem .5rem; color: var(--muted); border-radius: 999px; }
-  div[data-testid="stPlotlyChart"] { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; padding: .4rem; }
-</style>
-"""
-
+FONT = SANS.replace('"', "")
 
 ICONS = {   # 24x24 stroke icons (Lucide-style paths)
     "activity": "M22 12h-4l-3 9L9 3l-3 9H2",
@@ -89,7 +28,7 @@ ICONS = {   # 24x24 stroke icons (Lucide-style paths)
 
 def inject() -> None:
     ui.inject_css()
-    st.markdown(_CSS, unsafe_allow_html=True)
+    st.markdown(SOC_CSS, unsafe_allow_html=True)
 
 
 def severity_badge(level: str) -> str:
@@ -127,15 +66,21 @@ def kpi_grid(tiles: list[tuple]) -> None:
 
 
 def meter(confidence: float, level: str, thresholds: dict) -> str:
-    """Flat segmented bar: band widths come from the backend's configured thresholds."""
+    """Ring gauge plus a segmented bar; band widths come from the backend's configured thresholds."""
     s, h, c = thresholds["suspicious"], thresholds["high_risk"], thresholds["critical"]
     bands = [("normal", 0, s), ("suspicious", s, h), ("high_risk", h, c), ("critical", c, 100)]
     segments = "".join(f'<div class="band" style="width:{hi - lo}%;background:{SEVERITY_COLOURS[name]}"></div>' for name, lo, hi in bands)
     marks = "".join(f'<span style="left:{v}%">{v}</span>' for v in (0, s, h, c, 100))
-    return (f'<div class="meter"><div class="m-head"><span class="m-score">{confidence:.1f}</span><span class="m-of">/ 100</span>'
+    circumference = 2 * 3.14159265 * 56
+    offset = circumference * (1 - min(max(confidence, 0), 100) / 100)
+    ring = (f'<div class="m-ring"><svg viewBox="0 0 140 140"><circle class="track" cx="70" cy="70" r="56" fill="none" stroke-width="12"/>'
+            f'<circle class="arc" cx="70" cy="70" r="56" fill="none" stroke-width="12" stroke-linecap="round" stroke="{SEVERITY_COLOURS[level]}" '
+            f'stroke-dasharray="{circumference:.1f}" stroke-dashoffset="{offset:.1f}"/></svg>'
+            f'<div class="m-score"><b>{confidence:.1f}</b><span class="m-of">of 100</span></div></div>')
+    return (f'<div class="meter">{ring}<div class="m-body"><div class="m-head"><span class="m-title">Attack confidence</span>'
             f'{severity_badge(level)}</div><div class="m-bar">{segments}<div class="marker" style="left:calc({min(confidence, 100)}% - 1px)"></div></div>'
             f'<div class="m-scale">{marks}</div>'
-            f'<div class="m-legend">Normal &lt; {s} &lt;= Suspicious &lt; {h} &lt;= High Risk &lt; {c} &lt;= Critical</div></div>')
+            f'<div class="m-legend">Normal &lt; {s} &lt;= Suspicious &lt; {h} &lt;= High Risk &lt; {c} &lt;= Critical</div></div></div>')
 
 
 def stage_strip(stages: list[dict]) -> str:
@@ -159,19 +104,19 @@ def _layout(fig: go.Figure, height: int, **kwargs) -> go.Figure:
     options = dict(
         height=height, margin=dict(l=44, r=18, t=46, b=34), paper_bgcolor="white", plot_bgcolor="white",
         font=dict(family=FONT, size=11, color=INK), showlegend=False,
-        title=dict(font=dict(size=14, color=INK), x=0.02, y=0.96),
+        title=dict(font=dict(size=15, color=INK, family=SERIF.replace('"', "")), x=0.02, y=0.96),
     )
     options.update(kwargs)
     fig.update_layout(**options)
-    fig.update_xaxes(showline=False, gridcolor="#F0F2F4", zeroline=False, tickfont=dict(color="#637381"))
-    fig.update_yaxes(showline=False, gridcolor="#F0F2F4", zeroline=False, tickfont=dict(color="#637381"))
+    fig.update_xaxes(showline=False, gridcolor="#F0EDE5", zeroline=False, tickfont=dict(color="#5E6B75"))
+    fig.update_yaxes(showline=False, gridcolor="#F0EDE5", zeroline=False, tickfont=dict(color="#5E6B75"))
     return fig
 
 
 def events_per_hour_chart(buckets: list[dict]) -> go.Figure:
     fig = go.Figure(go.Scatter(x=[b["hour"] for b in buckets], y=[b["count"] for b in buckets], mode="lines",
                                line=dict(color=ACCENT, width=3, shape="spline", smoothing=0.8),
-                               fill="tozeroy", fillcolor="rgba(0,167,111,0.10)",
+                               fill="tozeroy", fillcolor="rgba(30,111,92,0.10)",
                                hovertemplate="%{x|%d %b %H:00}<br>%{y} events<extra></extra>"))
     fig.update_layout(title=dict(text="Security events per hour (last 24 h, UTC)"))
     return _layout(fig, 300)
@@ -183,7 +128,7 @@ def severity_chart(counts: dict) -> go.Figure:
     fig = go.Figure(go.Pie(labels=[SEVERITY_LABELS[n] for n in names], values=[counts[n] for n in names], hole=0.7, sort=False,
                            marker=dict(colors=[SEVERITY_COLOURS[n] for n in names], line=dict(color="white", width=3)),
                            textinfo="none", hovertemplate="%{label}: %{value} employees<extra></extra>"))
-    fig.add_annotation(text=f"<b style='font-size:26px'>{total}</b><br><span style='color:#637381'>employees</span>", showarrow=False)
+    fig.add_annotation(text=f"<b style='font-size:26px'>{total}</b><br><span style='color:#5E6B75'>employees</span>", showarrow=False)
     fig.update_layout(title=dict(text="Employees by current severity"))
     return _layout(fig, 300, showlegend=True, legend=dict(orientation="h", y=-0.02, x=0.5, xanchor="center", font=dict(size=11)),
                    margin=dict(l=20, r=20, t=46, b=20))
@@ -192,7 +137,7 @@ def severity_chart(counts: dict) -> go.Figure:
 def confidence_chart(points: list[dict], thresholds: dict) -> go.Figure:
     fig = go.Figure(go.Scatter(x=[p["time"]["local"] for p in points], y=[p["score"] for p in points], mode="lines+markers",
                                line=dict(color=ACCENT, width=3, shape="hv"), marker=dict(size=7, color="white", line=dict(color=ACCENT, width=2)),
-                               fill="tozeroy", fillcolor="rgba(0,167,111,0.08)", text=[p["stage"] or "none" for p in points],
+                               fill="tozeroy", fillcolor="rgba(30,111,92,0.08)", text=[p["stage"] or "none" for p in points],
                                hovertemplate="%{x}<br>confidence %{y}<br>stage %{text}<extra></extra>"))
     for name in ("suspicious", "high_risk", "critical"):
         fig.add_hline(y=thresholds[name], line=dict(color=SEVERITY_COLOURS[name], width=1, dash="dot"),
@@ -218,7 +163,7 @@ def stage_lane_chart(stages: list[dict], events: list[dict]) -> go.Figure:
     current = next((s["label"] for s in stages if s["current"]), None)
     if current:
         fig.add_hrect(y0=[s["label"] for s in reversed(stages)].index(current) - 0.5,
-                      y1=[s["label"] for s in reversed(stages)].index(current) + 0.5, fillcolor="#FFE9E5", opacity=0.7, line_width=0)
+                      y1=[s["label"] for s in reversed(stages)].index(current) + 0.5, fillcolor="#F8E1DE", opacity=0.7, line_width=0)
     fig.update_layout(title=dict(text="Events by attack stage (current stage shaded)"))
     return _layout(fig, 360, margin=dict(l=160, r=18, t=46, b=34))
 
@@ -227,10 +172,10 @@ COLUMNS = [("ip", "Employee accounts and source IP addresses"), ("session", "Ses
            ("system", "Internal systems"), ("external", "External destinations")]
 _COL_OF = {"account": 0, "privileged_account": 0, "ip": 0, "session": 1, "system": 2, "external": 3}
 _STYLE = {
-    "ip": ("square", 13, "#919EAB"), "session": ("circle", 10, "#00B8D9"), "account": ("circle", 15, INK),
-    "privileged_account": ("diamond", 17, "#FF5630"), "system": ("square", 15, ACCENT), "external": ("triangle-up", 16, "#FF5630"),
+    "ip": ("square", 13, "#8B969E"), "session": ("circle", 10, "#2B5A78"), "account": ("circle", 15, INK),
+    "privileged_account": ("diamond", 17, "#C2403A"), "system": ("square", 15, ACCENT), "external": ("triangle-up", 16, "#C2403A"),
 }
-_EDGE_COLOURS = {"created": "#FF5630", "transfer": "#FF5630", "data_flow": "#FF5630"}
+_EDGE_COLOURS = {"created": "#C2403A", "transfer": "#C2403A", "data_flow": "#C2403A"}
 
 
 def attack_graph(graph: dict) -> go.Figure:
@@ -249,11 +194,11 @@ def attack_graph(graph: dict) -> go.Figure:
     for e in graph["edges"]:
         if e["source"] not in pos or e["target"] not in pos:
             continue
-        colour = _EDGE_COLOURS.get(e["kind"]) or ("#FF5630" if e["outcome"] in ("denied", "failure") else
-                                                  "#FFAB00" if e["suspicious"] else "#C4CDD5")
+        colour = _EDGE_COLOURS.get(e["kind"]) or ("#C2403A" if e["outcome"] in ("denied", "failure") else
+                                                  "#D4A02D" if e["suspicious"] else "#CFC9BB")
         dash = "dash" if e["outcome"] in ("denied", "failure") else "solid"
         groups.setdefault((colour, dash), []).append(e)
-    names = {"#FF5630": "Suspicious / denied / created", "#FFAB00": "Flagged activity", "#C4CDD5": "Normal activity"}
+    names = {"#C2403A": "Suspicious / denied / created", "#D4A02D": "Flagged activity", "#CFC9BB": "Normal activity"}
     shown = set()
     for (colour, dash), edges in groups.items():
         xs, ys = [], []
@@ -267,7 +212,7 @@ def attack_graph(graph: dict) -> go.Figure:
     mids = [e for e in graph["edges"] if e["label"] and e["source"] in pos and e["target"] in pos]
     for e in mids:
         fig.add_annotation(x=(pos[e["source"]][0] + pos[e["target"]][0]) / 2, y=(pos[e["source"]][1] + pos[e["target"]][1]) / 2,
-                           text=e["label"], showarrow=False, font=dict(size=9, color="#5F6B7A"), bgcolor="white",
+                           text=e["label"], showarrow=False, font=dict(size=9, color="#5E6B75"), bgcolor="white",
                            borderpad=1, opacity=0.95)
     kinds = {"ip": "IP address", "session": "Session", "account": "Employee account", "privileged_account": "Privileged account",
              "system": "Internal system", "external": "External destination"}
@@ -280,7 +225,7 @@ def attack_graph(graph: dict) -> go.Figure:
             x=[pos[n["id"]][0] for n in nodes], y=[pos[n["id"]][1] for n in nodes], mode="markers+text", name=label,
             text=[n["label"] for n in nodes], textposition="top center", textfont=dict(size=10, color=INK),
             marker=dict(symbol=symbol, size=size, color=colour,
-                        line=dict(color=["#FF5630" if n["suspicious"] else "white" for n in nodes],
+                        line=dict(color=["#C2403A" if n["suspicious"] else "white" for n in nodes],
                                   width=[3 if n["suspicious"] else 1 for n in nodes])),
             hovertext=[f"{n['label']}<br>{kinds[kind]}" + ("<br>flagged by detection" if n["suspicious"] else "") for n in nodes],
             hoverinfo="text"))

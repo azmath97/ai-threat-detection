@@ -102,7 +102,7 @@ def console() -> None:
 
     with st.sidebar:
         ui.brand("Simulation Console")
-        st.markdown(f'<div class="whoami">Signed in as<br><b>{st.session_state.admin_name}</b></div>', unsafe_allow_html=True)
+        ui.user_card(st.session_state.admin_name, "Security administrator")
         st.button("Logout", on_click=sign_out, width="stretch", icon=":material/logout:")
 
     st.markdown('<div class="sim-banner">SIMULATION ENVIRONMENT - SYNTHETIC DATA ONLY. Actions run through the live backend '

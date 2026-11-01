@@ -22,6 +22,7 @@ from backend.models import (
     SecurityAlert,
     SecurityEvent,
 )
+from data.demo_accounts import demo_password
 
 SIM_DEVICE = "SimulatedAttackerToolkit/1.0 (Linux x86_64; synthetic)"
 DEFAULT_SOURCE_IP = "185.220.101.45"  # documentation-style external address, not in any employee's known list
@@ -110,7 +111,7 @@ def _best_resource(employee: Employee) -> tuple[str, str]:
 
 def _step_unfamiliar_login(sim: _Sim) -> dict:
     result = authenticate(
-        sim.db, sim.target.employee_code, get_settings().demo_employee_password, ip=sim.ip, device_info=SIM_DEVICE,
+        sim.db, sim.target.employee_code, demo_password(sim.target.employee_code), ip=sim.ip, device_info=SIM_DEVICE,
         synthetic=True, scenario=sim.scenario, details=sim.meta("unfamiliar_login"),
     )
     return {"status": "completed", "detail": f"Signed in as {sim.target.username} from {sim.ip} (session {result.session.id})"}

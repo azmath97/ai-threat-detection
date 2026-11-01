@@ -98,7 +98,7 @@ def create_account(
         raise ServiceError(409, "Username already exists")
 
     account = Employee(
-        username=username, full_name=full_name, email=f"{username}@example-bank.test",
+        username=username, full_name=full_name, email=f"{username}@westbridgebank.test",
         department="IT", job_role="Privileged Service Account", role="employee", status="active",
         password_hash=hash_password(password), known_ips=[], is_synthetic=synthetic, created_by_id=creator.id,
     )

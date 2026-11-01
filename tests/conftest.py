@@ -15,8 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from backend.config import get_settings  # noqa: E402
 from backend.main import app  # noqa: E402
+from data.demo_accounts import demo_password  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -32,9 +32,7 @@ def db_path():
 
 def login(client, identifier, password=None, headers=None):
     """`identifier` is an employee ID (EMP-1001) or a username."""
-    s = get_settings()
-    is_admin = identifier in ("soc.admin", "SEC-9011")
-    password = password or (s.demo_admin_password if is_admin else s.demo_employee_password)
+    password = password or demo_password(identifier, default="No-Such-Account#1")
     return client.post("/api/auth/login", json={"employee_id": identifier, "password": password}, headers=headers or {})
 
 

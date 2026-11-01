@@ -16,7 +16,7 @@ from frontend import components as ui  # noqa: E402
 from frontend import soc_components as sc  # noqa: E402
 from frontend.api_client import ApiClient, ApiError  # noqa: E402
 
-st.set_page_config(page_title=f"{ui.ORG_NAME} - Security Operations", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title=f"{ui.ORG_NAME} - Security Operations", layout="wide", initial_sidebar_state="auto")
 sc.inject()
 
 PAGES = ["Security Overview", "Live Event Feed", "Attack Investigations", "Employee Risk Monitor", "Attack Timeline",
@@ -840,8 +840,8 @@ def dashboard() -> None:
                           type="primary" if name == page else "secondary")
         ui.nav_caption("Account")
         st.button("Logout", key="nav_logout", width="stretch", on_click=sign_out, icon=":material/logout:")
-        st.markdown(f'<div class="whoami">Signed in as<br><b>{st.session_state.get("admin_id", "")}</b><br>'
-                    f'Live refresh: {LIVE_SECONDS} s</div>', unsafe_allow_html=True)
+        ui.user_card(st.session_state.get("admin_id", ""), "Security administrator")
+        st.markdown(f'<div class="org-sub" style="margin:.8rem 0 0 .2rem">Live refresh: {LIVE_SECONDS} s</div>', unsafe_allow_html=True)
     PAGE_FUNCTIONS[page]()
 
 

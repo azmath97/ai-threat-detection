@@ -12,9 +12,10 @@ import requests
 from streamlit.testing.v1 import AppTest
 
 import frontend.api_client as api_client
+from data.demo_accounts import demo_password
 
 ROOT = Path(__file__).resolve().parent.parent
-EMPLOYEE_PASSWORD, ADMIN_PASSWORD = "Employee#Demo2026", "SocAdmin#Demo2026"
+EMPLOYEE_PASSWORD, ADMIN_PASSWORD = demo_password("EMP-1001"), demo_password("SEC-9011")
 
 
 def _free_port() -> int:
@@ -33,8 +34,7 @@ class Backend:
         self.process: subprocess.Popen | None = None
         self.env = {**os.environ, "DATABASE_URL": f"sqlite:///{(directory / 'runtime.db').as_posix()}",
                     "ML_MODEL_PATH": str(directory / "model.joblib"), "AUTO_SEED": "true", "PASSWORD_HASH_ITERATIONS": "1000",
-                    "SECRET_KEY": "runtime-test-secret", "DEMO_EMPLOYEE_PASSWORD": EMPLOYEE_PASSWORD,
-                    "DEMO_ADMIN_PASSWORD": ADMIN_PASSWORD}
+                    "SECRET_KEY": "runtime-test-secret"}
 
     def start(self) -> None:
         log = open(self.directory / "backend.log", "ab")

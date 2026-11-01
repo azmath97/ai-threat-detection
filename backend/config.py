@@ -36,8 +36,6 @@ class Settings:
     map_loopback_to_workstation: bool
     simulation_privileged_password: str
     password_hash_iterations: int
-    demo_employee_password: str
-    demo_admin_password: str
     correlation_window_minutes: int
     investigation_window_hours: int
     threat_suspicious_threshold: int
@@ -74,8 +72,6 @@ def get_settings() -> Settings:
         map_loopback_to_workstation=_bool("MAP_LOOPBACK_TO_WORKSTATION", True),
         simulation_privileged_password=_str("SIMULATION_PRIVILEGED_PASSWORD", "Synthetic#Priv2026"),
         password_hash_iterations=_int("PASSWORD_HASH_ITERATIONS", 260_000),
-        demo_employee_password=_str("DEMO_EMPLOYEE_PASSWORD", "Employee#Demo2026"),
-        demo_admin_password=_str("DEMO_ADMIN_PASSWORD", "SocAdmin#Demo2026"),
         correlation_window_minutes=_int("CORRELATION_WINDOW_MINUTES", 240),
         investigation_window_hours=_int("INVESTIGATION_WINDOW_HOURS", 24),
         threat_suspicious_threshold=_int("THREAT_SUSPICIOUS_THRESHOLD", 25),

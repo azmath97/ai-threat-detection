@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 
 from backend.models import Employee
 
-ORG_NAME = "Arden Bank"
+ORG_NAME = "Westbridge Bank"
 LOCATIONS = ["Head Office - London", "Operations Centre - Manchester", "Branch Support - Edinburgh"]
 RATINGS = ["Exceeds expectations", "Meets expectations", "Meets expectations", "Developing"]
 MANAGERS = ["Priya Raman", "Thomas Becker", "Naomi Clarke", "Luis Ortega"]

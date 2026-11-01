@@ -187,6 +187,7 @@ def _maybe_raise_alert(
     """Raise (or update) the employee's alert once attack confidence reaches ALERT_MIN_SEVERITY (critical by default)."""
     settings = get_settings()
     if SEVERITY_RANK[threat.level] < SEVERITY_RANK[settings.alert_min_severity]:
+        investigation_service.refresh_active(db, employee, event.timestamp, threat)
         return None
     corr = threat.correlation
     investigation = investigation_service.upsert_investigation(db, employee, event.timestamp, synthetic=event.is_synthetic,
@@ -206,7 +207,8 @@ def _maybe_raise_alert(
     )
     created = alert is None
     if created:
-        alert = SecurityAlert(employee_id=employee.id, severity=threat.level, status="open", is_synthetic=event.is_synthetic,
+        alert = SecurityAlert(employee_id=employee.id, severity=threat.level, status="open",
+                              is_synthetic=event.is_synthetic or investigation.is_synthetic,
                               event_id=event.id, detected_at=event.timestamp, title=title, description=description)
         db.add(alert)
     else:

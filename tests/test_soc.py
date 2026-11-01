@@ -98,7 +98,7 @@ def test_investigation_list_and_detail(client, admin):
     assert row["level"] == "critical" and row["stage"] == "exfiltration" and row["status"] == "open"
     assert row["first_event"]["timestamp"]["local"] and row["latest_event"]["event_id"] > row["first_event"]["event_id"]
     assert row["exposure_status"] == "confirmed_external_transfer" and row["records_exposed"] == 25_000
-    assert soc(client, admin, "investigations", status="closed") == []
+    assert soc(client, admin, "investigations", status="resolved") == []
     detail = soc(client, admin, f"investigations/{row['id']}")
     assert detail["alert"]["evidence"] and detail["alert"]["trigger_event_id"] < detail["latest_event"]["event_id"]
     assert detail["live"]["components"]["rules"]["weight"] > 0 and detail["timeline"] and detail["recommended_actions"]
@@ -242,7 +242,7 @@ def test_audit_trail_covers_alerts_investigations_containment_admin_and_failures
                                                          "confirm": True})
     client.post("/api/containment", headers=admin, json={"employee_id": pk, "action_type": "lock_account", "reason": "Again",
                                                          "confirm": True})
-    client.patch(f"/api/investigations/{row['id']}", headers=admin, json={"status": "closed"})
+    assert client.get(f"/api/investigations/{row['id']}/export", headers=admin).status_code == 200
 
     audit = soc(client, admin, "audit")
     cats = {r["category"] for r in audit["rows"]}
@@ -258,7 +258,7 @@ def test_audit_trail_covers_alerts_investigations_containment_admin_and_failures
     contained = soc(client, admin, "audit", category="containment")["rows"]
     assert contained[0]["action"] == "containment_lock_account" and contained[0]["actor"] == "SEC-9011"
     assert any(r["action"] == "alert_created" and r["actor"] == "SYSTEM" for r in soc(client, admin, "audit", category="alerts")["rows"])
-    assert any(r["action"] == "investigation_status_changed" for r in soc(client, admin, "audit", category="investigations")["rows"])
+    assert any(r["action"] == "investigation_exported" for r in soc(client, admin, "audit", category="investigations")["rows"])
     assert any(r["action"] == "simulation_step" for r in soc(client, admin, "audit", category="administrator")["rows"])
 
 

@@ -91,7 +91,12 @@ class InvestigationCreate(BaseModel):
 
 
 class InvestigationUpdate(BaseModel):
-    status: Literal["open", "closed"]
+    status: Literal["open"] = Field(description="Reopen a resolved investigation. Resolving needs POST /{id}/resolve (reason + confirmation).")
+
+
+class InvestigationResolve(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+    confirm: bool = Field(default=False, description="Must be true to resolve")
 
 
 class ContainmentRequest(BaseModel):
@@ -301,6 +306,7 @@ class InvestigationOut(APIModel):
     employee_username: str
     status: str
     attack_stage: str
+    attack_type: str
     confidence: float
     risk_score: int
     summary: str
@@ -308,6 +314,10 @@ class InvestigationOut(APIModel):
     indicators: list[str]
     recommended_actions: list[dict[str, Any]]
     exposure: dict[str, Any] | None
+    first_event_id: int | None
+    latest_event_id: int | None
+    case_file: dict[str, Any] | None
+    explanation: dict[str, Any] | None
     created_at: datetime
     updated_at: datetime
     closed_at: datetime | None

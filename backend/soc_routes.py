@@ -52,7 +52,7 @@ def employees(_: AuthContext = Depends(require_admin), db: Session = Depends(get
 
 
 @router.get("/investigations")
-def investigations(inv_status: str | None = Query(None, alias="status", pattern="^(active|open|contained|closed)$"),
+def investigations(inv_status: str | None = Query(None, alias="status", pattern="^(active|open|contained|resolved)$"),
                    _: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
     return soc_service.investigation_rows(db, inv_status)
 

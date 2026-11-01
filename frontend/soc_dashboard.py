@@ -30,6 +30,9 @@ EVENT_TYPES = ["All event types", "login", "login_failed", "logout", "resource_a
                "directory_search", "administrative_action", "external_transfer", "permission_change_attempt"]
 COMPONENT_LABELS = {"ml": "ML anomaly score", "rules": "Rule severity", "correlation": "Correlated evidence",
                     "baseline": "Behavioural baseline", "stage": "Attack stage"}
+ACTION_LABELS = {"revoke_sessions": "Revoke active sessions", "lock_account": "Disable account",
+                 "restrict_access": "Restrict sensitive access", "remove_privileges": "Remove unauthorised privileges",
+                 "block_ip": "Block IP address", "isolate_system": "Isolate system"}
 EXPOSURE_ROWS = [("sensitive_records_accessed", "Sensitive records accessed"), ("records_exported", "Records exported"),
                  ("records_potentially_exposed", "Records potentially exposed"),
                  ("records_in_external_transfers", "Records in external transfers")]
@@ -291,28 +294,35 @@ def page_feed() -> None:
 def page_investigations() -> None:
     selected = st.session_state.get("selected_investigation")
     if selected:
-        ui.page_header(f"Investigation {selected}", "Correlated evidence, data exposure and response status")
+        ui.page_header(f"Investigation {selected}", "Correlated evidence, explanation, containment and evidence export")
         st.button("Back to all investigations", key="inv_back", on_click=nav, args=("Attack Investigations",))
+        refresh_token()
+        flash_notice()
+        if st.session_state.get("pending"):
+            centre = cached("response", "/api/soc/response")
+            if centre:
+                confirmation_panel({o["action"]: o for o in centre["options"]})
         live(lambda: render_investigation(selected))
         return
     ui.page_header("Attack Investigations", "Active and historical investigations")
     refresh_token()
-    view = pselect("Show", ["Active", "All", "Closed"], "inv_view")
+    view = pselect("Show", ["Active", "All", "Resolved"], "inv_view")
     live(lambda: render_investigation_list(view))
 
 
 def render_investigation_list(view: str) -> None:
-    rows = cached("inv_list", "/api/soc/investigations", status={"Active": "active", "Closed": "closed"}.get(view))
+    rows = cached("inv_list", "/api/soc/investigations", status={"Active": "active", "Resolved": "resolved"}.get(view))
     if rows is None:
         return
     sc.live_note(f"Live - {len(rows)} investigation(s)")
     ui.table([{"id": r["id"], "employee": r["employee_id"], "confidence": f"{r['confidence']}", "severity": r["level_label"],
-               "stage": r["stage_label"], "first": fmt_event(r["first_event"]), "latest": fmt_event(r["latest_event"]),
+               "stage": r["stage_label"], "type": r["attack_type_label"], "first": fmt_event(r["first_event"]),
+               "latest": fmt_event(r["latest_event"]),
                "exposure": f"{r['exposure_label']} ({r['records_exposed']:,} records)" if r["records_exposed"] else r["exposure_label"],
                "status": r["status"].title()} for r in rows],
              {"id": "ID", "employee": "Affected employee", "confidence": "Attack confidence", "severity": "Severity",
-              "stage": "Current stage", "first": "First suspicious event", "latest": "Latest event", "exposure": "Data exposure",
-              "status": "Status"}, result_column="severity")
+              "stage": "Current stage", "type": "Likely attack type", "first": "First suspicious event", "latest": "Latest event",
+              "exposure": "Data exposure", "status": "Status"}, result_column="severity")
     if rows:
         a, b = st.columns([3, 1], vertical_alignment="bottom")
         choice = a.selectbox("Select an investigation", [r["id"] for r in rows], key="inv_pick",
@@ -330,7 +340,8 @@ def render_investigation(inv_id: int) -> None:
         return
     sc.live_note("Live - updates as new correlated events arrive")
     tiles = [("Attack confidence", d["confidence"], d["level_label"], "alert" if d["level"] == "critical" else ""),
-             ("Current stage", d["stage_label"], "", ""), ("Affected employee", d["employee_id"], "", ""),
+             ("Current stage", d["stage_label"], "", ""), ("Likely attack type", d["attack_type_label"], "", ""),
+             ("Affected employee", d["employee_id"], "", ""),
              ("Status", d["status"].title(), f"alert #{d['alert_id']}" if d["alert_id"] else "no alert", ""),
              ("Data exposure", d["exposure_label"], f"{d['records_exposed']:,} records potentially exposed", "")]
     sc.kpi_grid(tiles)
@@ -338,6 +349,8 @@ def render_investigation(inv_id: int) -> None:
     if tl:
         ui.section("Attack stages")
         st.markdown(sc.stage_strip(tl["stages"]), unsafe_allow_html=True)
+    findings_panel(d)
+    case_file_panel(d)
 
     a, b = st.columns(2)
     with a:
@@ -377,29 +390,180 @@ def render_investigation(inv_id: int) -> None:
 
     ui.section("Indicators")
     st.markdown("\n".join(f"- {i}" for i in d["indicators"]) or "None")
-    ui.section("Recommended containment")
-    ui.table([{"priority": a["priority"], "action": a["action"].replace("_", " "), "target": a.get("target") or "employee account",
-               "reason": a["reason"]} for a in d["recommended_actions"]],
-             {"priority": "Priority", "action": "Action", "target": "Target", "reason": "Reason"})
-    st.button("Go to Response Centre", key="inv_to_response", on_click=nav, args=("Response Centre",))
+    containment_panel(d)
     ui.section("Containment history")
     ui.table([{"time": short(c["at"]["local"]), "action": c["action"].replace("_", " "), "target": c["target"], "by": c["by"],
                "reason": c["reason"]} for c in d["containment_actions"]],
              {"time": "Time", "action": "Action", "target": "Target", "by": "Administrator", "reason": "Reason"})
-
-    ui.section("Investigation status")
-    closing = d["status"] != "closed"
-    confirm = st.checkbox("I confirm this investigation should be " + ("closed" if closing else "reopened"), key=f"inv_confirm_{inv_id}")
-    if st.button("Close investigation" if closing else "Reopen investigation", key=f"inv_status_{inv_id}", disabled=not confirm):
-        try:
-            api().patch(f"/api/investigations/{inv_id}", {"status": "closed" if closing else "open"})
-            st.session_state["_cache"] = {}
-            st.session_state["flash_ok"] = f"Investigation {inv_id} {'closed' if closing else 'reopened'}."
-        except ApiError as exc:
-            handle(exc)
-        else:
-            st.rerun(scope="fragment")
+    export_panel(d)
+    resolution_panel(d)
     flash_notice()
+
+
+def refs(items: list[dict], limit: int = 4) -> str:
+    text = ", ".join(f"#{r['event_id']} ({r['local']})" for r in items[:limit])
+    return text + (f" and {len(items) - limit} more" if len(items) > limit else "") if items else "-"
+
+
+def findings_panel(d: dict) -> None:
+    """The deterministic, evidence-based explanation: everything below cites stored event IDs and times."""
+    ex = d.get("explanation")
+    ui.section("Investigation findings")
+    if not ex:
+        st.caption("No explanation has been generated for this investigation yet.")
+        return
+    st.caption(f"Generated from {ex['evidence_event_count']} preserved events by a deterministic rule engine "
+               "(no external AI service). Every statement cites stored event IDs and times.")
+    ui.notice("info", f"Likely attack type: {ex['attack_type']['text']}")
+    ui.notice("warn", ex["attribution"])
+    if ex.get("simulation_notice"):
+        st.caption(ex["simulation_notice"])
+
+    a, b = st.columns(2)
+    with a:
+        ui.section("Attack classification")
+        ui.table([{"type": c["label"], "assessment": "Supported" if c["supported"] else "Not supported",
+                   "basis": refs(c["events"]) if c["supported"] else "-", "reason": c["reason"]} for c in ex["classifications"]],
+                 {"type": "Category", "assessment": "Assessment", "basis": "Supporting events", "reason": "Reasoning"})
+    with b:
+        ui.section("Current stage")
+        st.markdown(f"**{ex['current_stage']['label']}**")
+        ui.table([{"stage": s["label"], "first": short(s["first_seen"]), "events": ", ".join(f"#{i}" for i in s["event_ids"][:6])}
+                  for s in ex["current_stage"]["observed"]],
+                 {"stage": "Observed stage", "first": "First seen (UTC)", "events": "Events"})
+        st.caption(ex["confidence"]["statement"])
+
+    ui.section("Suspicious activities")
+    ui.table([{"activity": s["description"], "count": s["count"], "events": refs(s["events"], 3),
+               "where": ", ".join([*s["resources"], *s["source_ips"]]) or "-"} for s in ex["suspicious_activities"]],
+             {"activity": "Activity", "count": "Count", "events": "Events", "where": "Resources / addresses"})
+    ui.section("Supporting evidence")
+    ui.table([{"time": e["local"], "event": f"#{e['event_id']}", "statement": e["statement"],
+               "rules": ", ".join(r.replace("_", " ") for r in e["rules"])} for e in ex["supporting_evidence"]],
+             {"time": "Time", "event": "Event", "statement": "What the event shows", "rules": "Rules triggered"})
+
+    c, e = st.columns(2)
+    with c:
+        ui.section("Potential impact")
+        st.markdown("\n".join(f"- {i}" for i in ex["potential_impact"]))
+        ui.section("Missing evidence")
+        st.markdown("\n".join(f"- {i}" for i in ex["missing_evidence"]))
+    with e:
+        ui.section("Possible alternative explanations")
+        st.markdown("\n".join(f"- {i}" for i in ex["alternative_explanations"]))
+
+
+def case_file_panel(d: dict) -> None:
+    case, integrity = d.get("case_file"), d.get("integrity")
+    ui.section("Case file and preserved evidence")
+    if not case:
+        st.caption("No evidence has been collected for this investigation yet.")
+        return
+    data = case["data"]
+    sc.kpi_grid([("Related events", len(case["event_ids"]), f"first #{d['first_event_id']}, latest #{d['latest_event_id']}", ""),
+                 ("Sessions", len(case["sessions"]), "", ""), ("Suspicious IPs", len(case["suspicious_ips"]), "", ""),
+                 ("Records exported", f"{data['records_exported']:,}", "", ""),
+                 ("Potentially exposed", f"{data['records_potentially_exposed']:,}", "", ""),
+                 ("Confirmed external transfers", data["confirmed_external_transfers"], f"{data['records_confirmed_external']:,} records", "")])
+    if integrity:
+        ui.notice("ok" if integrity["intact"] else "error",
+                  f"Evidence integrity: {integrity['verified']} of {integrity['checked']} preserved events match their SHA-256 "
+                  "snapshot." + ("" if integrity["intact"] else f" Modified: {integrity['modified']}, missing: {integrity['missing']}."))
+    a, b = st.columns(2)
+    with a:
+        ui.table([{"session": f"#{s['session_id']}", "account": s["account"], "ip": s["source_ip"], "events": s["event_count"],
+                   "state": "Revoked" if s["revoked_at"] else "Active / ended"} for s in case["sessions"]],
+                 {"session": "Session", "account": "Account", "ip": "Source IP", "events": "Events", "state": "State"})
+        ui.table([{"ip": i["ip"], "events": i["event_count"], "first": short(i["first_seen"]), "state": "Blocked" if i["blocked"] else "Not blocked"}
+                  for i in case["suspicious_ips"]], {"ip": "Suspicious IP", "events": "Events", "first": "First seen (UTC)", "state": "Control"})
+    with b:
+        ui.table([{"resource": r["name"], "level": {2: "Confidential", 3: "Restricted"}[r["sensitivity"]], "read": f"{r['records_accessed']:,}",
+                   "exported": f"{r['records_downloaded']:,}", "denied": r["denied_attempts"]} for r in case["sensitive_resources"]],
+                 {"resource": "Sensitive resource", "level": "Classification", "read": "Records accessed", "exported": "Records exported",
+                  "denied": "Denied attempts"})
+        ui.table([{"account": a_["employee_id"], "username": a_["username"], "role": a_["job_role"], "status": a_["status"].title()}
+                  for a_ in case["related_accounts"]],
+                 {"account": "Related privileged account", "username": "Username", "role": "Role", "status": "Status"})
+
+
+def _locked(case: dict, target: str | None) -> bool:
+    if target:
+        return any(a["username"] == target and a["status"] == "locked" for a in case.get("related_accounts", []))
+    return case.get("employee", {}).get("status") == "locked"
+
+
+def containment_panel(d: dict) -> None:
+    ui.section("Containment actions")
+    st.caption("Every action needs administrator confirmation and a reason, and is audited. In a simulated attack the action changes "
+               "only the simulated environment (it does not touch a real banking network).")
+    case, resolved = d.get("case_file") or {}, d["status"] == "resolved"
+    blocked = {i["ip"] for i in case.get("suspicious_ips", []) if i["blocked"]}
+    rows = [a for a in d["recommended_actions"] if a.get("executable", True)]
+    head = st.columns([1.2, 2.4, 2.0, 3.8, 1.2, 1.4])
+    for col, title in zip(head, ["Priority", "Action", "Target", "Reason", "Status", ""]):
+        col.markdown(f"<span style='color:#5F6B7A;font-size:.78rem'>{title}</span>", unsafe_allow_html=True)
+    for i, a in enumerate(rows):
+        done = (a["action"] == "block_ip" and a.get("target") in blocked) or (a["action"] == "lock_account" and _locked(case, a.get("target")))
+        row = st.columns([1.2, 2.4, 2.0, 3.8, 1.2, 1.4], vertical_alignment="center")
+        row[0].write(a["priority"])
+        row[1].write(ACTION_LABELS.get(a["action"], a["action"].replace("_", " ").capitalize()))
+        row[2].write(a.get("target") or "employee account")
+        row[3].caption(a["reason"])
+        row[4].markdown(f"<span style='color:{'#1E6B34' if done else '#7A5200'};font-weight:600'>{'Done' if done else 'Pending'}</span>",
+                        unsafe_allow_html=True)
+        if not done and not resolved and row[5].button("Review", key=f"ic_{d['id']}_{i}_{a['action']}", width="stretch"):
+            request_action(action=a["action"], employee_pk=a.get("target_employee_id") or d["employee_pk"],
+                           subject=a.get("target") or d["employee_id"], reason=a["reason"], investigation_id=d["id"],
+                           target=a.get("target") if a["action"] in ("block_ip", "isolate_system") else None)
+    resources = case.get("sensitive_resources", [])
+    if resources and not resolved:
+        names = {r["resource"]: r["name"] for r in resources}
+        c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
+        pick = c1.selectbox("Restrict this employee's access to a sensitive resource", list(names), format_func=lambda r: names[r],
+                            key=f"restrict_pick_{d['id']}")
+        if c2.button("Review restriction", key=f"restrict_go_{d['id']}", width="stretch"):
+            request_action(action="restrict_access", employee_pk=d["employee_pk"], subject=f"{d['employee_id']} / {names[pick]}",
+                           reason=f"Restrict access to {names[pick]} during the investigation", investigation_id=d["id"], target=pick)
+
+
+def export_panel(d: dict) -> None:
+    ui.section("Evidence export")
+    st.caption("The report contains only this investigation's evidence: summary, attack timeline, correlated events with hashes, "
+               "risk score history, data exposure, containment actions and findings. Each export is audited.")
+    cols = st.columns([1.3, 1.3, 4])
+    for col, fmt in zip(cols, ("json", "csv")):
+        if col.button(f"Prepare {fmt.upper()} report", key=f"exp_{fmt}_{d['id']}", width="stretch"):
+            try:
+                data, name, mime = api().download(f"/api/investigations/{d['id']}/export", format=fmt)
+            except ApiError as exc:
+                handle(exc)
+            else:
+                st.session_state["export"] = {"id": d["id"], "data": data, "name": name, "mime": mime}
+    ready = st.session_state.get("export")
+    if ready and ready["id"] == d["id"]:
+        st.download_button(f"Download {ready['name']}", ready["data"], file_name=ready["name"], mime=ready["mime"], key=f"dl_{d['id']}")
+
+
+def resolution_panel(d: dict) -> None:
+    ui.section("Investigation status")
+    inv_id = d["id"]
+    if d["status"] == "resolved":
+        st.caption(f"Resolved {short(d['resolved_at']['local']) if d.get('resolved_at') else ''}. Preserved evidence is retained.")
+        confirm = st.checkbox("I confirm this investigation should be reopened", key=f"inv_confirm_{inv_id}")
+        if st.button("Reopen investigation", key=f"inv_status_{inv_id}", disabled=not confirm):
+            try:
+                api().patch(f"/api/investigations/{inv_id}", {"status": "open"})
+                st.session_state["_cache"] = {}
+                st.session_state["flash_ok"] = f"Investigation {inv_id} reopened."
+            except ApiError as exc:
+                handle(exc)
+            else:
+                st.rerun(scope="fragment")
+        return
+    note = st.text_input("Resolution note (recorded in the audit log)", key=f"resolve_note_{inv_id}")
+    if st.button("Review resolution", key=f"resolve_go_{inv_id}", disabled=len(note.strip()) < 3):
+        request_action(action="resolve_investigation", employee_pk=d["employee_pk"], subject=f"Investigation {inv_id} ({d['employee_id']})",
+                       reason=note.strip(), investigation_id=inv_id)
 
 
 # ------------------------------------------------------------------ 4. employee risk monitor
@@ -600,7 +764,8 @@ def page_response() -> None:
 
     ui.section("Manual response")
     c1, c2 = st.columns(2)
-    action = pselect("Action", list(options), "m_action", container=c1, fmt=lambda a: options[a]["label"])
+    manual = [a for a in options if options[a]["needs"] != "investigation"]       # resolving happens on the investigation page
+    action = pselect("Action", manual, "m_action", container=c1, fmt=lambda a: options[a]["label"])
     emp_map = {e["employee_id"]: e["id"] for e in centre["employees"]}
     emp = pselect("Employee / account concerned", list(emp_map), "m_emp", container=c2)
     needs = options[action]["needs"]
@@ -610,10 +775,13 @@ def page_response() -> None:
     elif needs == "system":
         systems = {s["id"]: s["label"] for s in centre["systems"]}
         target = pselect("System", list(systems), "m_system", fmt=lambda s: systems[s])
+    elif action == "restrict_access":
+        resources = {"": "All confidential and restricted resources", **{s["id"]: s["label"] for s in centre["systems"]}}
+        target = pselect("Resource", list(resources), "m_resource", fmt=lambda s: resources[s]) or None
     st.caption(options[action]["description"])
     reason = ptext("Reason", "m_reason", placeholder="Why this action is needed")
     if st.button("Review action", key="m_review", disabled=len(reason.strip()) < 3 or (needs == "ip" and not (target or "").strip())):
-        request_action(action=action, employee_pk=emp_map[emp], subject=target or emp, reason=reason.strip(),         target=target)
+        request_action(action=action, employee_pk=emp_map[emp], subject=target or emp, reason=reason.strip(), target=target)
 
 
 # ------------------------------------------------------------------ 8. audit logs

@@ -117,8 +117,9 @@ class AttackInvestigation(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"), index=True)
-    status: Mapped[str] = mapped_column(String(16), default="open", index=True)  # open | contained | closed
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)  # open | contained | resolved
     attack_stage: Mapped[str] = mapped_column(String(32), default="none")
+    attack_type: Mapped[str] = mapped_column(String(48), default="none", server_default="none")
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     risk_score: Mapped[int] = mapped_column(Integer, default=0)
     summary: Mapped[str] = mapped_column(Text, default="")
@@ -126,16 +127,39 @@ class AttackInvestigation(Base):
     indicators: Mapped[list] = mapped_column(JSON, default=list)
     recommended_actions: Mapped[list] = mapped_column(JSON, default=list)
     exposure: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    first_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)   # first suspicious event
+    latest_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # latest suspicious event
+    case_file: Mapped[dict | None] = mapped_column(JSON, nullable=True)          # sessions, IPs, resources, exposure totals
+    explanation: Mapped[dict | None] = mapped_column(JSON, nullable=True)        # deterministic, evidence-based
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
-    closed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)  # when it was resolved
 
     employee: Mapped[Employee] = relationship()
 
     @property
     def employee_username(self) -> str:
         return self.employee.username
+
+
+class InvestigationEvidence(Base):
+    """Append-only copy of an event as it was when it was collected into an investigation.
+
+    The snapshot and its SHA-256 are never rewritten; only `relations` (why the event is related) may change.
+    Exports compare the snapshot to the live event so tampering with the original event is detectable.
+    """
+
+    __tablename__ = "investigation_evidence"
+    __table_args__ = (UniqueConstraint("investigation_id", "event_id", name="uq_evidence_investigation_event"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    investigation_id: Mapped[int] = mapped_column(ForeignKey("attack_investigations.id", ondelete="CASCADE"), index=True)
+    event_id: Mapped[int] = mapped_column(Integer, index=True)
+    snapshot: Mapped[dict] = mapped_column(JSON)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    relations: Mapped[list] = mapped_column(JSON, default=list)
+    collected_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class SecurityAlert(Base):

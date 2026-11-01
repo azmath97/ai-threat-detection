@@ -124,6 +124,12 @@ class ApiClient:
     def patch(self, path: str, body: dict):
         return self._json("PATCH", path, json=body)
 
+    def download(self, path: str, **params) -> tuple[bytes, str, str]:
+        response = self._request("GET", path, params=params)
+        disposition = response.headers.get("content-disposition", "")
+        filename = disposition.split('filename="')[-1].rstrip('"') if "filename=" in disposition else "report"
+        return response.content, filename, response.headers.get("content-type", "application/octet-stream")
+
 
 def _detail(response: requests.Response) -> str:
     try:

@@ -37,7 +37,8 @@ ai-threat-detection/
 │   ├── correlation_engine.py  data_exposure.py  baseline.py
 │   ├── event_service.py            # event pipeline: persist -> rules -> ML/correlation -> alert
 │   ├── portal_routes.py  simulation_routes.py  auth_service.py  simulation_service.py  portal_data.py
-│   ├── investigation_service.py  response_service.py  controls.py   # reports, containment, IP blocks / isolation
+│   ├── investigation_service.py  response_service.py  controls.py   # investigations + preserved evidence, containment, IP blocks / isolation
+│   ├── investigation_explainer.py  investigation_export.py  investigation_routes.py   # explanation, evidence export, resolve
 │   ├── soc_service.py  soc_routes.py                                # SOC read models and /api/soc/* endpoints
 │   ├── models.py  database.py  schemas.py  security.py  catalog.py  config.py  errors.py
 ├── ml/
@@ -51,7 +52,7 @@ ai-threat-detection/
 │   ├── components.py  soc_components.py  api_client.py
 ├── .streamlit/config.toml          # enterprise light theme
 ├── data/seed_data.py               # synthetic employees + 14 days of history
-├── tests/                          # pytest suite (44 tests: API, portal, ML, detection, SOC)
+├── tests/                          # pytest suite (54 tests: API, portal, ML, detection, SOC, investigation workflow)
 └── requirements.txt  .env.example  README.md
 ```
 
@@ -154,13 +155,45 @@ and navigation are not reset. Employees are shown by ID, department and role onl
 | Response Centre | recommended containment, active controls, history, manual response |
 | Audit Logs | alerts, investigation updates, containment, administrator actions, failed responses |
 
-Response actions (all audited, failures included): `revoke_sessions`, `lock_account`, `restrict_access`,
-`remove_privileges`, `block_ip`, `isolate_system`, `restore_account`, `unblock_ip`, `release_system`. Disruptive
-actions (everything except the last three) require `confirm: true`; this is enforced by the backend, and the dashboard
-asks for explicit confirmation with a recorded reason. A blocked IP is rejected at login and on every request, and an
-isolated system denies access without scoring the denial against the employee.
+Response actions (all audited, failures included): `revoke_sessions`, `lock_account`, `restrict_access` (all
+confidential/restricted access, or one resource via `target`), `remove_privileges`, `block_ip`, `isolate_system`,
+`resolve_investigation`, plus `restore_account`, `unblock_ip`, `release_system`. Everything except those last three needs
+`confirm: true`; this is enforced by the backend, and the dashboard asks for explicit confirmation with a recorded reason.
+A blocked IP is rejected at login and on every request, a locked account cannot log in, and an isolated system denies
+access without scoring the denial against the employee.
 
 To see it live: open the dashboard, then run the steps in the Simulation Console (or `POST /api/simulation/steps`).
+
+## Investigation and incident response
+
+A critical alert automatically creates one investigation per employee (`attack_investigations`); it is updated by every
+later related event, even when a new event alone would not reach the alert threshold.
+
+* **Case file**: affected employee, associated sessions, suspicious IPs (with blocked state), related privileged accounts,
+  first and latest suspicious event, current confidence and stage, sensitive resources accessed, records exported,
+  potentially exposed and confirmed external transfers.
+* **Evidence correlation**: related events are collected by employee, session, source IP, related (created) account,
+  resource and time. Each is copied once into the append-only `investigation_evidence` table with a SHA-256 of the original.
+  Nothing edits or deletes events; `GET /api/investigations/{id}/evidence` and every export compare each snapshot with the
+  live event and report `verified`, `modified` or `missing`. (The simulation reset is the only thing that removes events: it
+  tears down all synthetic data including investigations, and is audited with counts.)
+* **Explanation** (`backend/investigation_explainer.py`): deterministic and evidence-based, no LLM or network call, so it
+  always works. It produces the likely attack type, current stage, suspicious activities, supporting evidence, confidence
+  and its components, potential impact, recommended containment, missing evidence and alternative explanations. Every
+  statement cites real event IDs and timestamps. It never names the person behind an account.
+* **Attack classification**: each of possible insider misuse, compromised credentials, automated account exploitation,
+  privilege escalation, unauthorised data export and confirmed external data transfer is reported as supported or not
+  supported with its supporting events. A transfer is "confirmed" only when a confirmed transfer event exists.
+* **Containment**: disable account, revoke sessions, block IP, remove privileges, restrict one sensitive resource and
+  resolve the investigation. Each needs administrator authentication, `confirm`, a reason, and records the administrator,
+  time and an audit entry, and changes the simulated environment (login refused, session revoked, permission removed).
+  This is a local simulation; no real banking network is touched.
+* **Evidence export**: `GET /api/investigations/{id}/export?format=json|csv` downloads incident summary, attack
+  timeline, correlated events (with hashes and integrity state), risk-score history, data exposure, containment actions and
+  findings, containing only that investigation's evidence. CSV is the correlated-event table. Exports are audited.
+
+In the dashboard open **Attack Investigations**, select an investigation, and use the Investigation findings, Case file,
+Containment actions, Evidence export and Investigation status sections.
 
 ## Detection engine
 
@@ -220,7 +253,10 @@ Auth is `Authorization: Bearer <token>`. "Admin" = `security_admin` role. Intera
 | GET | `/api/events/me` | any | own activity (no risk data) |
 | GET | `/api/risk/employees[/{id}]`, POST `/api/risk/assess` | admin | risk scores, factors, attack stages |
 | GET / PATCH | `/api/alerts[/{id}]` | admin | alerts |
-| GET / POST / PATCH | `/api/investigations[/{id}]` | admin | investigation reports |
+| GET / POST / PATCH | `/api/investigations[/{id}]` | admin | investigation records (PATCH only reopens a resolved one) |
+| GET | `/api/investigations/{id}/explanation`, `/evidence` | admin | evidence-based explanation; preserved events with hashes and integrity check |
+| GET | `/api/investigations/{id}/export?format=json\|csv` | admin | downloadable evidence report (audited) |
+| POST | `/api/investigations/{id}/resolve` | admin | body `reason` + `confirm: true`; audited containment action |
 | GET / POST | `/api/containment` | admin | `revoke_sessions`, `lock_account`, `restrict_access`, `remove_privileges`, `block_ip`, `isolate_system`, `restore_account`, `unblock_ip`, `release_system` (`confirm` required for disruptive ones) |
 | GET | `/api/soc/version`, `/overview`, `/confidence-history`, `/events`, `/employees`, `/investigations[/{id}]`, `/scopes`, `/timeline`, `/graph`, `/response`, `/audit` | admin | SOC dashboard read models |
 | GET | `/api/dashboard/stats`, `/api/audit-logs` | admin | KPIs, audit trail |

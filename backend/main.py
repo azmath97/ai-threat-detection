@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from backend import (
     baseline as baseline_service,
     event_service,
+    investigation_routes,
     investigation_service,
     portal_routes,
     response_service,
@@ -108,6 +109,7 @@ app.add_middleware(
 app.include_router(portal_routes.router)
 app.include_router(simulation_routes.router)
 app.include_router(soc_routes.router)
+app.include_router(investigation_routes.router)
 
 
 @app.exception_handler(ServiceError)
@@ -461,7 +463,7 @@ def update_alert(alert_id: int, body: AlertUpdate, auth: AuthContext = Depends(r
 def list_investigations(
     _: AuthContext = Depends(require_admin),
     db: Session = Depends(get_db),
-    inv_status: str | None = Query(None, alias="status", pattern="^(open|contained|closed)$"),
+    inv_status: str | None = Query(None, alias="status", pattern="^(open|contained|resolved)$"),
     employee_id: int | None = Query(None, gt=0),
 ):
     query = select(AttackInvestigation).order_by(AttackInvestigation.updated_at.desc(), AttackInvestigation.id.desc())
@@ -505,18 +507,18 @@ def run_investigation(body: InvestigationCreate, auth: AuthContext = Depends(req
 def update_investigation(
     investigation_id: int, body: InvestigationUpdate, auth: AuthContext = Depends(require_admin), db: Session = Depends(get_db)
 ):
+    """Reopen a resolved investigation. Resolving is a confirmed containment action: POST /{id}/resolve."""
     investigation = db.get(AttackInvestigation, investigation_id)
     if investigation is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Investigation not found")
-    investigation.status = body.status
-    investigation.closed_at = utcnow() if body.status == "closed" else None
-    if body.status == "closed":
-        for alert in db.scalars(select(SecurityAlert).where(SecurityAlert.investigation_id == investigation.id,
-                                                            SecurityAlert.status.in_(("open", "investigating", "contained")))):
-            alert.status = "resolved"
-            alert.updated_at = utcnow()
+    if investigation.status != "resolved":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a resolved investigation can be reopened")
+    if investigation_service.active_for(db, investigation.employee) is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "The employee already has an active investigation")
+    investigation.status = "open"
+    investigation.closed_at = None
     write_audit(db, "investigation_status_changed", actor_id=auth.employee.id, target_type="investigation",
-                target_id=investigation.id, details={"to": body.status})
+                target_id=investigation.id, details={"to": "open", "from": "resolved"})
     db.commit()
     return _investigation_detail(db, investigation)
 

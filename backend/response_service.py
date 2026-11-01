@@ -24,20 +24,22 @@ from backend.models import (
 
 ACTION_TYPES = (
     "revoke_sessions", "lock_account", "restrict_access", "remove_privileges", "block_ip", "isolate_system",
-    "restore_account", "unblock_ip", "release_system",
+    "restore_account", "unblock_ip", "release_system", "resolve_investigation",
 )
-NEEDS_CONFIRMATION = {"revoke_sessions", "lock_account", "restrict_access", "remove_privileges", "block_ip", "isolate_system"}
+NEEDS_CONFIRMATION = {"revoke_sessions", "lock_account", "restrict_access", "remove_privileges", "block_ip", "isolate_system",
+                      "resolve_investigation"}
 ACCOUNT_CONTAINMENT = {"revoke_sessions", "lock_account", "restrict_access", "remove_privileges"}
 ACTION_INFO = {
     "revoke_sessions": ("Revoke active sessions", "Immediately signs the account out everywhere.", "employee"),
     "lock_account": ("Disable account", "Locks the account and revokes its sessions.", "employee"),
-    "restrict_access": ("Restrict sensitive access", "Removes confidential and restricted permissions.", "employee"),
+    "restrict_access": ("Restrict sensitive access", "Removes confidential and restricted permissions (or only the chosen resource).", "employee"),
     "remove_privileges": ("Remove unauthorised privileges", "Downgrades write access to read; strips all access from accounts created during the incident.", "employee"),
     "block_ip": ("Block IP address", "Rejects logins and requests from the address and revokes its sessions.", "ip"),
     "isolate_system": ("Isolate system", "Denies all access to the system until released.", "system"),
     "restore_account": ("Restore account", "Unlocks the account and restores removed access.", "employee"),
     "unblock_ip": ("Unblock IP address", "Removes the block.", "ip"),
     "release_system": ("Release system", "Ends the isolation.", "system"),
+    "resolve_investigation": ("Resolve investigation", "Marks the investigation and its alerts resolved. Preserved evidence is kept.", "investigation"),
 }
 
 
@@ -137,9 +139,17 @@ def _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm
         target.status = "locked"
         details["sessions_revoked"] = _revoke_sessions(db, employee_id=target.id)
     elif action_type == "restrict_access":
-        sensitive = [p for p in target.permissions if sensitivity_of(p.resource) >= 2]
-        if not sensitive:
-            raise ServiceError(409, "Employee has no confidential or restricted access to remove")
+        if value:
+            resource = value.strip()
+            if resource not in RESOURCES or is_self_service(resource) or sensitivity_of(resource) < 2:
+                raise ServiceError(422, "A confidential or restricted resource is required")
+            sensitive = [p for p in target.permissions if p.resource == resource]
+            if not sensitive:
+                raise ServiceError(409, f"Employee has no access to {RESOURCES[resource]['name']} to remove")
+        else:
+            sensitive = [p for p in target.permissions if sensitivity_of(p.resource) >= 2]
+            if not sensitive:
+                raise ServiceError(409, "Employee has no confidential or restricted access to remove")
         details["removed_permissions"] = [{"resource": p.resource, "access_level": p.access_level} for p in sensitive]
         for p in sensitive:
             db.delete(p)
@@ -174,6 +184,18 @@ def _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm
             details["ip"] = address
     elif action_type == "restore_account":
         details = restore_employee(db, target)
+    elif action_type == "resolve_investigation":
+        if investigation is None:
+            raise ServiceError(422, "investigation_id is required to resolve an investigation")
+        if investigation.status == "resolved":
+            raise ServiceError(409, "Investigation is already resolved")
+        now = utcnow()
+        alerts = db.scalars(select(SecurityAlert).where(SecurityAlert.investigation_id == investigation.id,
+                                                        SecurityAlert.status.in_((*OPEN_ALERT_STATUSES, "contained")))).all()
+        for alert in alerts:
+            alert.status, alert.updated_at = "resolved", now
+        details = {"previous_status": investigation.status, "alerts_resolved": [a.id for a in alerts]}
+        investigation.status, investigation.closed_at, investigation.updated_at = "resolved", now, now
     else:  # isolate_system / release_system
         system = (value or "").strip()
         if system not in RESOURCES or is_self_service(system):
@@ -200,7 +222,7 @@ def _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm
         db.add(control)
 
     if action_type in ACCOUNT_CONTAINMENT:
-        if investigation is not None:
+        if investigation is not None and investigation.status == "open":
             investigation.status = "contained"
             investigation.updated_at = utcnow()
         for alert in db.scalars(select(SecurityAlert).where(SecurityAlert.employee_id == target.id,

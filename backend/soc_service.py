@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from backend import controls, threat_engine
+from backend import controls, investigation_explainer, investigation_service, threat_engine
 from backend.catalog import (
     RESOURCE_EVENT_TYPES,
     RESOURCES,
@@ -37,6 +37,7 @@ from backend.models import (
 from backend.response_service import ACTION_INFO, NEEDS_CONFIRMATION
 
 ACTIVE_INVESTIGATION = ("open", "contained")
+ATTACK_TYPE_LABELS = {key: label for key, (label, _rank) in investigation_explainer.ATTACK_TYPES.items()}
 ACTIVE_ALERT = ("open", "investigating", "contained")
 RANK = {stage: i for i, stage in enumerate(STAGES)}
 _MEMO: dict = {"token": None, "at": 0.0, "threats": {}}
@@ -269,6 +270,7 @@ def investigation_row(inv: AttackInvestigation, alert: SecurityAlert | None) -> 
         "id": inv.id, "employee_pk": inv.employee_id, "employee_id": inv.employee.employee_code,
         "confidence": inv.risk_score, "level": level, "level_label": SEVERITY_LABELS[level],
         "stage": inv.attack_stage, "stage_label": STAGE_LABELS.get(inv.attack_stage, inv.attack_stage),
+        "attack_type": inv.attack_type, "attack_type_label": ATTACK_TYPE_LABELS.get(inv.attack_type, "Not established"),
         "first_event": _with_local(first), "latest_event": _with_local(latest),
         "exposure_status": exposure.get("status", "none"), "exposure_label": STATUS_LABELS[exposure.get("status", "none")],
         "records_exposed": exposure.get("records_potentially_exposed", 0),
@@ -287,6 +289,23 @@ def investigation_rows(db: Session, status: str | None = None) -> list[dict]:
     return [investigation_row(inv, alerts.get(inv.id)) for inv in db.scalars(query)]
 
 
+def _live_case_file(db: Session, case: dict | None) -> dict | None:
+    """The stored case file with enforcement state (blocked IPs, revoked sessions, account status) read live."""
+    if not case:
+        return case
+    revoked = {s.id: s.revoked_at for s in db.scalars(select(EmployeeSession).where(
+        EmployeeSession.id.in_([s["session_id"] for s in case.get("sessions", [])] or [0])))}
+    status = {e.employee_code: e.status for e in _employees(db).values()}
+    return {
+        **case,
+        "employee": {**case["employee"], "status": status.get(case["employee"]["employee_id"], case["employee"]["status"])},
+        "sessions": [{**s, "revoked_at": revoked[s["session_id"]].isoformat() if revoked.get(s["session_id"]) else None}
+                     for s in case.get("sessions", [])],
+        "suspicious_ips": [{**ip, "blocked": controls.is_ip_blocked(db, ip["ip"])} for ip in case.get("suspicious_ips", [])],
+        "related_accounts": [{**a, "status": status.get(a["employee_id"], a["status"])} for a in case.get("related_accounts", [])],
+    }
+
+
 def investigation_detail(db: Session, investigation_id: int) -> dict:
     inv = db.get(AttackInvestigation, investigation_id)
     if inv is None:
@@ -302,6 +321,10 @@ def investigation_detail(db: Session, investigation_id: int) -> dict:
     return {
         **investigation_row(inv, alert),
         "summary": inv.summary, "indicators": inv.indicators, "exposure": inv.exposure,
+        "first_event_id": inv.first_event_id, "latest_event_id": inv.latest_event_id,
+        "resolved_at": iso(inv.closed_at) if inv.closed_at else None,
+        "case_file": _live_case_file(db, inv.case_file), "explanation": inv.explanation,
+        "integrity": investigation_service.integrity(db, inv),
         "recommended_actions": (alert.recommended_actions if alert and alert.recommended_actions else inv.recommended_actions),
         "timeline": [_with_local(i, by_name) for i in items],
         "alert": None if alert is None else {
@@ -498,7 +521,7 @@ AUDIT_CATEGORIES = {
     "administrator": "Administrator actions", "failed_response": "Failed response attempts",
 }
 _ALERTS = {"alert_created", "alert_updated"}
-_INVESTIGATIONS = {"investigation_run", "investigation_status_changed", "alert_status_changed"}
+_INVESTIGATIONS = {"investigation_run", "investigation_status_changed", "alert_status_changed", "investigation_exported"}
 
 
 def _summary(row: AuditLog) -> str:
@@ -514,6 +537,8 @@ def _summary(row: AuditLog) -> str:
         return f"alert status {d.get('from')} -> {d.get('to')}"
     if row.action == "investigation_status_changed":
         return f"investigation status -> {d.get('to')}"
+    if row.action == "investigation_exported":
+        return f"evidence exported as {d.get('format')} ({d.get('events')} events, integrity {'intact' if d.get('integrity_intact') else 'ISSUE'})"
     if row.action == "simulation_step":
         return f"{d.get('step')} ({d.get('status')}) from {d.get('source_ip')}"
     return ", ".join(f"{k}={v}" for k, v in list(d.items())[:4])

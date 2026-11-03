@@ -438,7 +438,8 @@ def test_a_run_that_breaks_is_marked_failed_and_releases_the_slot(client, admin,
 
     monkeypatch.setitem(runs._ACTIONS, "login", boom)
     run = run_scenario(client, admin, "benign_activity", seed=2)
-    assert run["status"] == "failed" and "simulated defect" in run["error"] and run["steps_done"] == 0
+    assert run["status"] == "failed" and "internal error" in run["error"] and "RuntimeError" in run["error"]
+    assert "simulated defect" not in run["error"] and run["steps_done"] == 0
     assert client.get("/api/simulation/status", headers=admin).json()["active_run_id"] is None
     monkeypatch.undo()
     assert run_scenario(client, admin, "benign_activity", seed=2)["status"] == "completed"

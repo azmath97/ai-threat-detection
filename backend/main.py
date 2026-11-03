@@ -34,7 +34,8 @@ from backend.config import get_settings, validate_for_environment
 from backend.database import SessionLocal, get_db, init_db, utcnow
 from backend.errors import ServiceError
 from backend.event_service import write_audit
-from backend.rate_limit import login_throttle
+from backend.rate_limit import login_ip_throttle, login_throttle
+from backend.route_limits import admin_limited, employee_limited
 from backend.models import (
     AttackInvestigation,
     AuditLog,
@@ -74,6 +75,12 @@ from backend.schemas import (
     RiskDetailOut,
 )
 from backend.containment_guard import containment_admin
+from backend.hardening import (
+    HttpsRequiredMiddleware,
+    RequestSizeLimitMiddleware,
+    SecurityHeadersMiddleware,
+    install_error_handlers,
+)
 from backend.security import AuthContext, device_info, get_auth, require_admin, resolve_ip
 from ml.anomaly_detector import ensure_model, get_detector, reload_detector
 
@@ -98,21 +105,41 @@ async def lifespan(_app: FastAPI):
         with SessionLocal() as db:
             if seed_database(db):
                 logger.info("Seeded synthetic demo data")
+    from data.demo_accounts import credentials_source_available
+    from data.seed_data import sync_demo_passwords
+
+    if get_settings().auto_seed or credentials_source_available():
+        with SessionLocal() as db:
+            updated = sync_demo_passwords(db)
+        if updated:
+            logger.warning("Updated the password hashes of %s demo account(s) to match the current credential source", updated)
     yield
 
 
+_settings = get_settings()
 app = FastAPI(
     title="AI-Based Insider Threat Detection API",
     description="Single source of truth for the Employee Portal and SOC Dashboard (synthetic data only).",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url="/docs" if _settings.enable_api_docs else None,
+    redoc_url="/redoc" if _settings.enable_api_docs else None,
+    openapi_url="/openapi.json" if _settings.enable_api_docs else None,
 )
+# Innermost first. Browsers are not expected to call this API (the dashboards call it server-side with a bearer token and no
+# cookies), so CORS lists explicit origins only, allows no credentials and names the methods and headers it accepts.
+app.add_middleware(RequestSizeLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=get_settings().cors_origins,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_settings.cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-Device-Info", "X-Frontend-Key"],
+    max_age=600,
 )
+app.add_middleware(HttpsRequiredMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
+install_error_handlers(app)
 
 
 app.include_router(portal_routes.router)
@@ -177,18 +204,23 @@ def health(db: Session = Depends(get_db)):
 def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
     employee = find_employee(db, body.identifier)
     ip = resolve_ip(request, employee)
-    wait = login_throttle.retry_after(body.identifier)
+    wait = max(login_throttle.retry_after(body.identifier), login_ip_throttle.retry_after(ip))
     if wait:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed sign-in attempts. Try again later.",
                             headers={"Retry-After": str(wait)})
     try:
         result = authenticate(db, body.identifier, body.password, ip=ip, device_info=device_info(request))
     except ServiceError as exc:
-        if exc.status_code in (401, 403) and login_throttle.record_failure(body.identifier):
-            event_service.write_audit(db, "login_throttled", actor_id=employee.id if employee else None, ip=ip,
-                                      details={"identifier": body.identifier[:64],
-                                               "lockout_seconds": get_settings().login_lockout_seconds})
-            db.commit()
+        if exc.status_code in (401, 403):
+            if login_ip_throttle.record_failure(ip):
+                event_service.write_audit(db, "login_throttled", actor_id=employee.id if employee else None, ip=ip,
+                                          details={"scope": "source_ip", "lockout_seconds": get_settings().login_ip_window_seconds})
+                db.commit()
+            if login_throttle.record_failure(body.identifier):
+                event_service.write_audit(db, "login_throttled", actor_id=employee.id if employee else None, ip=ip,
+                                          details={"identifier": body.identifier[:64],
+                                                   "lockout_seconds": get_settings().login_lockout_seconds})
+                db.commit()
         raise
     login_throttle.record_success(body.identifier)
     return LoginResponse(
@@ -245,7 +277,7 @@ def access_resource(
     resource_id: str,
     body: ResourceAccessRequest,
     request: Request,
-    auth: AuthContext = Depends(get_auth),
+    auth: AuthContext = Depends(employee_limited("resource_access")),
     db: Session = Depends(get_db),
 ):
     meta = RESOURCES.get(resource_id)
@@ -272,7 +304,7 @@ def access_resource(
 # ---------------------------------------------------------------- events
 @app.post("/api/events", response_model=EventCreated, status_code=status.HTTP_201_CREATED, tags=["events"])
 def create_event(
-    body: EventCreate, request: Request, auth: AuthContext = Depends(get_auth), db: Session = Depends(get_db)
+    body: EventCreate, request: Request, auth: AuthContext = Depends(employee_limited("event_create")), db: Session = Depends(get_db)
 ):
     """Telemetry for the authenticated employee only; identity, IP and device are derived by the backend.
 
@@ -398,7 +430,7 @@ def risk_detail(employee_id: int, _: AuthContext = Depends(require_admin), db: S
 
 
 @app.post("/api/risk/assess", response_model=RiskDetailOut, tags=["risk"])
-def assess_risk(body: RiskAssessRequest, auth: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
+def assess_risk(body: RiskAssessRequest, auth: AuthContext = Depends(admin_limited("risk_assess")), db: Session = Depends(get_db)):
     employee = _get_employee_or_404(db, body.employee_id)
     threat = threat_engine.assess(db, employee)
     db.add(threat_engine.to_row(threat, None))
@@ -426,7 +458,7 @@ def detection_status(_: AuthContext = Depends(require_admin)):
 
 
 @app.post("/api/detection/reload", tags=["detection"])
-def detection_reload(auth: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
+def detection_reload(auth: AuthContext = Depends(admin_limited("detection_reload", "heavy")), db: Session = Depends(get_db)):
     """Re-read detection_rules.json and the saved model without restarting."""
     rules.reload_rules()
     baseline_service.clear_cache()
@@ -437,7 +469,7 @@ def detection_reload(auth: AuthContext = Depends(require_admin), db: Session = D
 
 
 @app.post("/api/detection/retrain", tags=["detection"])
-def detection_retrain(auth: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
+def detection_retrain(auth: AuthContext = Depends(admin_limited("detection_retrain", "heavy")), db: Session = Depends(get_db)):
     """Retrain the Isolation Forest on synthetic normal behaviour, save it and load it."""
     from ml.train_model import train
 
@@ -477,7 +509,7 @@ def get_alert(alert_id: int, _: AuthContext = Depends(require_admin), db: Sessio
 
 
 @app.patch("/api/alerts/{alert_id}", response_model=AlertOut, tags=["alerts"])
-def update_alert(alert_id: int, body: AlertUpdate, auth: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
+def update_alert(alert_id: int, body: AlertUpdate, auth: AuthContext = Depends(admin_limited("alert_update")), db: Session = Depends(get_db)):
     alert = db.get(SecurityAlert, alert_id)
     if alert is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Alert not found")
@@ -525,7 +557,7 @@ def get_investigation(investigation_id: int, _: AuthContext = Depends(require_ad
 
 
 @app.post("/api/investigations", response_model=InvestigationDetail, status_code=status.HTTP_201_CREATED, tags=["investigations"])
-def run_investigation(body: InvestigationCreate, auth: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
+def run_investigation(body: InvestigationCreate, auth: AuthContext = Depends(admin_limited("investigation_create")), db: Session = Depends(get_db)):
     """Build (or refresh the active) investigation report for an employee from stored events."""
     employee = _get_employee_or_404(db, body.employee_id)
     investigation = investigation_service.upsert_investigation(db, employee)
@@ -537,7 +569,8 @@ def run_investigation(body: InvestigationCreate, auth: AuthContext = Depends(req
 
 @app.patch("/api/investigations/{investigation_id}", response_model=InvestigationDetail, tags=["investigations"])
 def update_investigation(
-    investigation_id: int, body: InvestigationUpdate, auth: AuthContext = Depends(require_admin), db: Session = Depends(get_db)
+    investigation_id: int, body: InvestigationUpdate, auth: AuthContext = Depends(admin_limited("investigation_update")),
+    db: Session = Depends(get_db)
 ):
     """Reopen a resolved investigation. Resolving is a confirmed containment action: POST /{id}/resolve."""
     investigation = db.get(AttackInvestigation, investigation_id)

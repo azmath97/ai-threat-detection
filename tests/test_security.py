@@ -8,10 +8,11 @@ from conftest import auth_header, login
 from fastapi.routing import APIRoute
 
 from backend.config import get_settings
+from backend.containment_guard import containment_admin
 from backend.detection_engine import level_for
 from backend.main import app
 from backend.security import get_auth, hash_password, require_admin, verify_password
-from data.demo_accounts import DEMO_PASSWORDS
+from data.demo_accounts import load_passwords
 
 PUBLIC = {("GET", "/api/health"), ("POST", "/api/auth/login")}
 SKIP_FUZZ = {"/api/detection/retrain", "/api/auth/logout"}        # retraining is slow; logout would end the shared session
@@ -38,7 +39,8 @@ def routes():
         if route.path.startswith("/api"):
             for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
                 calls = set(_calls(route.dependant))
-                yield method, route.path, route, (require_admin in calls), (get_auth in calls or require_admin in calls)
+                is_admin = require_admin in calls or containment_admin in calls
+                yield method, route.path, route, is_admin, (get_auth in calls or is_admin)
 
 
 ROUTES = list(routes())
@@ -55,21 +57,23 @@ def fill(path: str, value: str = "1") -> str:
 # ---------------------------------------------------------------- passwords and sessions
 def test_passwords_are_salted_hashes_and_sessions_store_only_a_digest(client, db_path):
     token = auth_header(client, "EMP-1001")["Authorization"].split()[-1]
+    passwords = load_passwords()
     with sqlite3.connect(db_path) as con:
         hashes = [r[0] for r in con.execute("select password_hash from employees where is_synthetic = 0")]
         session_hashes = [r[0] for r in con.execute("select token_hash from employee_sessions")]
     assert len(hashes) >= 11 and len(set(hashes)) == len(hashes)
-    assert len(set(DEMO_PASSWORDS.values())) == len(DEMO_PASSWORDS) == 11             # every account has its own password
+    assert len(set(passwords.values())) == len(passwords) == 11                        # every account has its own password
     for stored in hashes:
-        assert stored.startswith("pbkdf2_sha256$") and not any(p in stored for p in DEMO_PASSWORDS.values())
+        assert stored.startswith("$argon2id$") and not any(p in stored for p in passwords.values())
     assert token not in session_hashes and all(len(h) == 64 for h in session_hashes)
-    assert verify_password("Correct#Horse1", hash_password("Correct#Horse1", 1000))
-    assert not verify_password("wrong", hash_password("Correct#Horse1", 1000))
+    assert verify_password("Correct#Horse1", hash_password("Correct#Horse1"))
+    assert hash_password("Correct#Horse1") != hash_password("Correct#Horse1")          # salted
+    assert not verify_password("wrong", hash_password("Correct#Horse1"))
     assert not verify_password("anything", "plaintext-or-garbage")
-    assert login(client, "EMP-1002", DEMO_PASSWORDS["alice.morgan"]).status_code == 401        # not interchangeable
+    assert login(client, "EMP-1002", passwords["alice.morgan"]).status_code == 401        # not interchangeable
     body = login(client, "EMP-1001").text
-    assert "pbkdf2" not in body and DEMO_PASSWORDS["alice.morgan"] not in body
-    assert "pbkdf2" not in client.get("/api/employees", headers=auth_header(client, "SEC-9011")).text
+    assert "argon2" not in body and passwords["alice.morgan"] not in body
+    assert "argon2" not in client.get("/api/employees", headers=auth_header(client, "SEC-9011")).text
 
 
 def test_wrong_credentials_are_rejected_and_recorded_without_revealing_which_part_was_wrong(client, admin):

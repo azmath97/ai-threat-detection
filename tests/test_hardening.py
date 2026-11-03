@@ -7,10 +7,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from backend import config as app_config
 from backend import security
 from backend.config import get_settings, validate_for_environment
-from backend.rate_limit import login_throttle
+from backend.rate_limit import login_ip_throttle, login_throttle
 from backend.response_service import SCOPE_NOTICE
 from conftest import login
 from ml import synthetic_data as sd
@@ -47,11 +46,11 @@ def test_trusted_frontend_is_disabled_without_a_configured_key(client, db_path, 
     assert _last_session_ip(db_path, "EMP-1002") == "0.0.0.0"
 
 
-def test_production_refuses_default_or_short_secrets():
+def test_production_refuses_missing_default_or_short_secrets():
     base = get_settings()
-    validate_for_environment(replace(base, app_env="development"))        # development accepts the demo secret
-    for bad in (app_config.DEFAULT_SECRET_KEY, "change-me-for-anything-other-than-a-local-demo", "short"):
-        with pytest.raises(RuntimeError):
+    validate_for_environment(replace(base, app_env="development"))
+    for bad in ("", "dev-only-secret-" + "change-me", "change-me-for-anything-other-than-a-local-demo", "short", "secret" + "x" * 40):
+        with pytest.raises(RuntimeError, match="SECRET_KEY"):
             validate_for_environment(replace(base, app_env="production", secret_key=bad))
     with pytest.raises(RuntimeError):
         validate_for_environment(replace(base, app_env="production", secret_key="s" * 40, trusted_frontend_key="tiny"))

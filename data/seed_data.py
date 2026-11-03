@@ -14,7 +14,7 @@ from backend.database import Base, SessionLocal, engine, init_db, utcnow
 from backend.event_service import record_event, write_audit
 from backend.models import AccessPermission, Employee, EmployeeSession, employee_code_for
 from backend.security import hash_password, hash_token
-from data.demo_accounts import DEMO_PASSWORDS
+from data.demo_accounts import DEMO_USERNAMES, load_passwords
 
 HISTORY_DAYS = 14
 
@@ -116,13 +116,14 @@ def seed_database(db: Session, reset: bool = False) -> bool:
         return False
 
     rng = random.Random(20260101)
+    passwords = load_passwords()
 
     created: list[tuple[Employee, dict[str, str]]] = []
     for username, full_name, department, job_role, role, ips, perms in EMPLOYEES:
         employee = Employee(
             username=username, full_name=full_name, email=f"{username}@westbridgebank.test",
             department=department, job_role=job_role, role=role, status="active",
-            password_hash=hash_password(DEMO_PASSWORDS[username]),
+            password_hash=hash_password(passwords[username]),
             known_ips=ips, created_at=utcnow() - timedelta(days=HISTORY_DAYS + 30),
         )
         employee.permissions = [AccessPermission(resource=r, access_level=lvl) for r, lvl in perms.items()]
@@ -138,6 +139,25 @@ def seed_database(db: Session, reset: bool = False) -> bool:
     write_audit(db, "database_seeded", details={"employees": len(created), "history_days": HISTORY_DAYS})
     db.commit()
     return True
+
+
+def sync_demo_passwords(db: Session) -> int:
+    """Make the stored hashes of the demo accounts match the current credential source.
+
+    This rotates away any password an earlier version of the project published (an existing database keeps its old hashes
+    until now) and applies a password changed in the secret manager. Only usernames in DEMO_USERNAMES are touched, and only
+    hashes that no longer verify. Plaintext is never logged; the audit entry records the count only."""
+    from backend.security import verify_password
+
+    passwords, changed = load_passwords(), 0
+    for employee in db.scalars(select(Employee).where(Employee.username.in_(DEMO_USERNAMES), Employee.is_synthetic.is_(False))):
+        if not verify_password(passwords[employee.username], employee.password_hash):
+            employee.password_hash = hash_password(passwords[employee.username])
+            changed += 1
+    if changed:
+        write_audit(db, "demo_credentials_synced", details={"accounts_updated": changed})
+        db.commit()
+    return changed
 
 
 def main() -> None:

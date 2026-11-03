@@ -3,6 +3,7 @@ fastapi>=0.110,<1.0
 uvicorn[standard]>=0.29
 sqlalchemy>=2.0,<3.0
 pydantic>=2.6,<3.0
+argon2-cffi>=23.1         # Argon2id password hashing
 python-dotenv>=1.0
 tzdata>=2024.1            # time zone database for Windows
 requests>=2.31            # dashboards -> backend

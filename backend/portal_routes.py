@@ -13,6 +13,7 @@ from backend.catalog import RESOURCES
 from backend.database import get_db
 from backend.event_service import has_access, record_event
 from backend.models import Employee
+from backend.rate_limit import enforce
 from backend.security import AuthContext, device_info, get_auth, resolve_ip
 
 router = APIRouter(prefix="/api", tags=["portal"])
@@ -44,6 +45,7 @@ class Ctx:
 
 
 def _ctx(request: Request, auth: AuthContext = Depends(get_auth), db: Session = Depends(get_db)) -> Ctx:
+    enforce("portal", auth.employee.id, "employee")
     return Ctx(request, auth, db)
 
 
@@ -91,6 +93,7 @@ def payroll_register(ctx: Ctx = Depends(_ctx)):
 
 @router.post("/portal/payroll/export")
 def payroll_export(ctx: Ctx = Depends(_ctx)):
+    enforce("payroll_export", ctx.auth.employee.id, "heavy")
     ctx.require("payroll-records", "export", "data_export", {"view": "register"})
     rows = portal_data.payroll_register(_staff(ctx.db))
     ctx.log("data_export", "payroll-records", accessed=len(rows), downloaded=len(rows),
@@ -189,6 +192,7 @@ class AccountCreate(BaseModel):
 @router.post("/admin/accounts", status_code=status.HTTP_201_CREATED)
 def create_privileged_account(body: AccountCreate, ctx: Ctx = Depends(_ctx)):
     """Create a privileged account. Needs write access to the IT admin console (denied attempts are logged)."""
+    enforce("account_create", ctx.auth.employee.id, "heavy")
     account = create_account(
         ctx.db, ctx.auth.employee, ctx.auth.session, username=body.username, full_name=body.full_name,
         password=body.password, ip=ctx.ip, device_info=ctx.device,

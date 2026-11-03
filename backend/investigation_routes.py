@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from backend import investigation_export, investigation_service, response_service
 from backend.containment_guard import containment_admin
+from backend.route_limits import admin_limited
 from backend.database import get_db
 from backend.event_service import write_audit
 from backend.models import AttackInvestigation
@@ -44,7 +45,7 @@ def evidence(investigation_id: int, _: AuthContext = Depends(require_admin), db:
 
 @router.get("/{investigation_id}/export")
 def export(investigation_id: int, request: Request, export_format: str = Query("json", alias="format", pattern="^(json|csv)$"),
-           auth: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
+           auth: AuthContext = Depends(admin_limited("investigation_export")), db: Session = Depends(get_db)):
     """Download the investigation report (JSON, or CSV of the correlated events). The export is audited."""
     inv = _get(db, investigation_id)
     report = investigation_export.build(db, inv, auth.employee)

@@ -67,11 +67,12 @@ class AnomalyDetector:
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path or get_settings().ml_model_path)
         self._bundle: dict | None = None
-        self.error: str | None = None
+        self.error: str | None = None            # detailed (server log only)
+        self.error_public: str | None = None     # safe to return in API responses
         self.load()
 
     def load(self) -> bool:
-        self._bundle, self.error = None, None
+        self._bundle, self.error, self.error_public = None, None, None
         try:
             import joblib
 
@@ -81,8 +82,10 @@ class AnomalyDetector:
             self._bundle = bundle
         except FileNotFoundError:
             self.error = f"model file not found: {self.path}"
+            self.error_public = "model file not found"
         except Exception as exc:  # corrupt file, incompatible scikit-learn version, wrong features
             self.error = f"model could not be loaded: {exc}"
+            self.error_public = "model could not be loaded (see the server log)"
         if self._bundle is None:
             log.warning("Anomaly model unavailable (%s); using fallback scoring", self.error)
         return self._bundle is not None
@@ -101,8 +104,8 @@ class AnomalyDetector:
         return AnomalyResult(max(forest, guard), raw, "isolation_forest", guard)
 
     def status(self) -> dict:
-        info = {"mode": "isolation_forest" if self.available else "fallback", "model_path": str(self.path),
-                "error": self.error, "feature_names": FEATURE_NAMES}
+        info = {"mode": "isolation_forest" if self.available else "fallback", "model_file": self.path.name,
+                "error": self.error_public, "feature_names": FEATURE_NAMES}
         if self._bundle:
             info.update({k: self._bundle.get(k) for k in ("trained_at", "n_training_windows", "trained_on", "metrics",
                                                           "calibration", "sklearn_version", "volume_reference")})

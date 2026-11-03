@@ -33,7 +33,7 @@ class Backend:
         self.directory = directory
         self.process: subprocess.Popen | None = None
         self.env = {**os.environ, "DATABASE_URL": f"sqlite:///{(directory / 'runtime.db').as_posix()}",
-                    "ML_MODEL_PATH": str(directory / "model.joblib"), "AUTO_SEED": "true", "PASSWORD_HASH_ITERATIONS": "1000",
+                    "ML_MODEL_PATH": str(directory / "model.joblib"), "AUTO_SEED": "true",
                     "SECRET_KEY": "runtime-test-secret"}
 
     def start(self) -> None:

@@ -1,4 +1,8 @@
+import base64
+import hashlib
+import hmac
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
@@ -40,7 +44,19 @@ class Settings:
     login_lockout_seconds: int
     containment_max_per_minute: int
     simulation_privileged_password: str
-    password_hash_iterations: int
+    argon2_time_cost: int
+    argon2_memory_kib: int
+    argon2_parallelism: int
+    require_https: bool
+    trust_forwarded_proto: bool
+    max_request_bytes: int
+    enable_api_docs: bool
+    login_ip_max_failures: int
+    login_ip_window_seconds: int
+    rate_limits_enabled: bool
+    rate_limit_sensitive_per_minute: int
+    rate_limit_heavy_per_minute: int
+    rate_limit_employee_per_minute: int
     correlation_window_minutes: int
     investigation_window_hours: int
     threat_suspicious_threshold: int
@@ -66,22 +82,43 @@ def get_settings() -> Settings:
     db_url = _str("DATABASE_URL", default_db)
     if db_url.startswith("sqlite:///./"):
         db_url = f"sqlite:///{(BASE_DIR / db_url[len('sqlite:///./'):]).as_posix()}"
+    app_env = _str("APP_ENV", "development").strip().lower()
+    secret = _str("SECRET_KEY", "").strip()
+    if not secret and app_env != "production":
+        from backend.local_secrets import local_secret_key
+
+        secret = local_secret_key()                      # per-machine random value; production never gets one
+    privileged = os.getenv("SIMULATION_PRIVILEGED_PASSWORD") or (
+        base64.urlsafe_b64encode(hmac.new(secret.encode() or b"unset", b"simulation-privileged-account", hashlib.sha256).digest())
+        [:24].decode() if secret else "")                # derived from the secret, so there is no fixed default
     return Settings(
         database_url=db_url,
-        secret_key=_str("SECRET_KEY", "dev-only-secret-change-me"),  # DEFAULT_SECRET_KEY; rejected when APP_ENV=production
+        secret_key=secret,
         session_ttl_minutes=_int("SESSION_TTL_MINUTES", 480),
         display_timezone=_str("DISPLAY_TIMEZONE", "Asia/Kolkata"),
-        cors_origins=[o.strip() for o in _str("CORS_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501,http://localhost:8503,http://127.0.0.1:8503").split(",") if o.strip()],
+        cors_origins=[o.strip().rstrip("/") for o in _str("CORS_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501,http://localhost:8503,http://127.0.0.1:8503").split(",") if o.strip()],
         auto_seed=_bool("AUTO_SEED", True),
         simulation_enabled=_bool("SIMULATION_ENABLED", True),
         map_loopback_to_workstation=_bool("MAP_LOOPBACK_TO_WORKSTATION", True),
         trusted_frontend_key=_str("TRUSTED_FRONTEND_KEY", ""),
-        app_env=_str("APP_ENV", "development").strip().lower(),
+        app_env=app_env,
         login_max_failures=_int("LOGIN_MAX_FAILURES", 5),
         login_lockout_seconds=_int("LOGIN_LOCKOUT_SECONDS", 300),
         containment_max_per_minute=_int("CONTAINMENT_MAX_PER_MINUTE", 30),
-        simulation_privileged_password=_str("SIMULATION_PRIVILEGED_PASSWORD", "Synthetic#Priv2026"),
-        password_hash_iterations=_int("PASSWORD_HASH_ITERATIONS", 260_000),
+        simulation_privileged_password=privileged,
+        argon2_time_cost=_int("ARGON2_TIME_COST", 3),
+        argon2_memory_kib=_int("ARGON2_MEMORY_KIB", 65_536),
+        argon2_parallelism=_int("ARGON2_PARALLELISM", 2),
+        require_https=_bool("REQUIRE_HTTPS", app_env == "production"),
+        trust_forwarded_proto=_bool("TRUST_FORWARDED_PROTO", False),
+        max_request_bytes=_int("MAX_REQUEST_BYTES", 1_000_000),
+        enable_api_docs=_bool("ENABLE_API_DOCS", app_env != "production"),
+        login_ip_max_failures=_int("LOGIN_IP_MAX_FAILURES", 20),
+        login_ip_window_seconds=_int("LOGIN_IP_WINDOW_SECONDS", 300),
+        rate_limits_enabled=_bool("RATE_LIMITS_ENABLED", True),
+        rate_limit_sensitive_per_minute=_int("RATE_LIMIT_SENSITIVE_PER_MINUTE", 30),
+        rate_limit_heavy_per_minute=_int("RATE_LIMIT_HEAVY_PER_MINUTE", 6),
+        rate_limit_employee_per_minute=_int("RATE_LIMIT_EMPLOYEE_PER_MINUTE", 60),
         correlation_window_minutes=_int("CORRELATION_WINDOW_MINUTES", 240),
         investigation_window_hours=_int("INVESTIGATION_WINDOW_HOURS", 24),
         threat_suspicious_threshold=_int("THREAT_SUSPICIOUS_THRESHOLD", 25),
@@ -98,18 +135,44 @@ def get_settings() -> Settings:
     )
 
 
-DEFAULT_SECRET_KEY = "dev-only-secret-change-me"
+PLACEHOLDER_SECRETS = ("change-me", "changeme", "dev-only", "secret", "test-secret", "password")
+
+
+def _origin_problems(origins: list[str]) -> list[str]:
+    problems = []
+    for origin in origins:
+        if origin in ("*", "null") or "*" in origin:
+            problems.append(f"'{origin}' (wildcards and 'null' are not allowed)")
+        elif not re.fullmatch(r"https?://[A-Za-z0-9.\-]+(:\d{1,5})?", origin):
+            problems.append(f"'{origin}' (must look like https://host or http://host:port)")
+    return problems
 
 
 def validate_for_environment(settings: Settings | None = None) -> None:
-    """Refuse to start in production with the built-in demo secret or a short secret."""
+    """Fail at start-up, with a clear message, rather than run unsafely.
+
+    Always: CORS origins must be explicit. Production additionally needs a strong SECRET_KEY from the environment (there is
+    no default), a long TRUSTED_FRONTEND_KEY if one is set, and a demo-credential source when demo data is seeded.
+    """
     s = settings or get_settings()
+    problems = _origin_problems(s.cors_origins)
+    if problems:
+        raise RuntimeError("CORS_ORIGINS must list explicit origins; invalid: " + ", ".join(problems))
     if s.app_env != "production":
         return
-    if s.secret_key == DEFAULT_SECRET_KEY or s.secret_key.startswith("change-me") or len(s.secret_key) < 32:
-        raise RuntimeError("APP_ENV=production requires SECRET_KEY to be set to a random value of at least 32 characters")
+    lowered = s.secret_key.lower()
+    if not s.secret_key or len(s.secret_key) < 32 or any(lowered.startswith(p) for p in PLACEHOLDER_SECRETS):
+        raise RuntimeError("APP_ENV=production requires SECRET_KEY, set by the environment or your secret manager, to be a "
+                           "random value of at least 32 characters; there is no default")
     if s.trusted_frontend_key and len(s.trusted_frontend_key) < 24:
         raise RuntimeError("TRUSTED_FRONTEND_KEY must be at least 24 characters")
+    if s.auto_seed:
+        from data.demo_accounts import CredentialsMissing, load_passwords
+
+        try:
+            load_passwords(create=False)
+        except CredentialsMissing as exc:
+            raise RuntimeError(f"APP_ENV=production with AUTO_SEED=true needs demo credentials from the environment: {exc}") from exc
 
 
 def to_local(dt: datetime) -> datetime:

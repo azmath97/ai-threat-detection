@@ -13,8 +13,16 @@ services:
         value: 3.12.3
       - key: APP_ENV
         value: production
+      # Secrets come from the platform, never from the repository.
       - key: SECRET_KEY
         generateValue: true
+      # Behind Render's TLS-terminating proxy: honour X-Forwarded-Proto so REQUIRE_HTTPS (on in production) sees https.
+      - key: TRUST_FORWARDED_PROTO
+        value: "true"
+      # JSON object {"alice.morgan": "<password>", ... all 11 demo usernames} with a strong, unique password each (12+ chars).
+      # Enter it in the Render dashboard (sync: false = not stored in this file). Or set AUTO_SEED to "false" and manage accounts yourself.
+      - key: DEMO_PASSWORDS_JSON
+        sync: false
       # Shared with the Streamlit apps (as the TRUSTED_FRONTEND_KEY secret) so the API can attribute their requests
       # to the signed-in employee's registered workstation. Copy the generated value from the Render dashboard.
       - key: TRUSTED_FRONTEND_KEY

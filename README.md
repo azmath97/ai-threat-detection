@@ -50,7 +50,7 @@ notice that **while it is happening** and before the simulated data leaves.
 18. [API](#api)
 19. [Project structure](#project-structure)
 20. [Tests](#tests)
-21. [Known limitations](#known-limitations)
+21. [Security notes](#security-notes-and-limitations) and [Known limitations](#known-limitations)
 
 ## Architecture
 
@@ -83,7 +83,7 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | SOC read models | `soc_service.py`, `soc_routes.py` |
 | Simulation | `scenario_generator.py` (seeded plans), `simulation_runs.py` (background runs, status, stop), `simulation_service.py` (manual steps, reset), `simulation_routes.py` |
 | Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (310 tests) |
+| Tests | `tests/` (347 tests) |
 
 ## Technology stack
 
@@ -93,7 +93,7 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | Database | SQLite through SQLAlchemy 2 (timestamps stored in UTC, shown in `DISPLAY_TIMEZONE`) |
 | Machine learning | scikit-learn `IsolationForest`, NumPy, joblib (model saved locally and reused) |
 | Dashboards | Streamlit and Plotly (charts and the attack graph); custom CSS theme in `frontend/theme.py` (responsive down to phone width, no external fonts or assets) |
-| Security | PBKDF2-SHA256 salted password hashes, random session tokens stored as HMAC digests |
+| Security | Argon2id password hashes (`argon2-cffi`), random session tokens stored as HMAC digests, rate limiting, strict CORS, security headers (see [Security](#security-notes-and-limitations)) |
 | Tests | pytest, FastAPI TestClient, Streamlit `AppTest` |
 
 Pandas is not imported by the project itself; it is installed because Streamlit depends on it.
@@ -108,6 +108,8 @@ cd ai-threat-detection
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+python app.py setup         # first time only: random SECRET_KEY in .env and random demo credentials
+python app.py credentials   # show the demo sign-in credentials generated for this machine
 python app.py all
 ```
 
@@ -117,8 +119,15 @@ macOS / Linux:
 git clone https://github.com/azmath97/ai-threat-detection.git && cd ai-threat-detection
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+python app.py setup && python app.py credentials
 python app.py all
 ```
+
+`python app.py setup` is the safe local procedure. It writes `.env` (from `.env.example`) with a freshly generated random
+`SECRET_KEY` and creates `data/demo_credentials.local.json` with a random password for each demo account. Both files are
+git-ignored and created with owner-only permissions where the platform supports it. It is safe to re-run: existing files
+are kept. Skipping it also works for a quick look (the backend then creates the same files on first start), but run
+`python app.py credentials` to see the passwords. **No password or secret is stored in the repository.**
 
 That starts the backend and all three dashboards:
 
@@ -135,8 +144,8 @@ The dashboards are told where the backend is automatically.
 
 ## Environment setup
 
-Everything works with defaults and no `.env` file. To change settings, copy `.env.example` to `.env`
-(`app.py` loads it):
+Everything works with defaults and no `.env` file. To change settings, run `python app.py setup` (which writes `.env` for you)
+or copy `.env.example` to `.env` yourself (`app.py` loads it):
 
 ```powershell
 Copy-Item .env.example .env        # bash: cp .env.example .env
@@ -145,17 +154,25 @@ Copy-Item .env.example .env        # bash: cp .env.example .env
 | Variable | Default | Meaning |
 |---|---|---|
 | `DATABASE_URL` | `sqlite:///./data/insider_threat.db` | database location |
-| `SECRET_KEY` | demo value | keys the session-token HMAC; **change it for anything but a local demo** |
+| `SECRET_KEY` | none | keys the session-token HMAC. **No default exists.** Development: if unset, a random per-machine key is created in `data/.local_secret` (git-ignored). Production: must be set (32+ random characters) by the environment or your platform's secret manager, or the backend refuses to start |
+| `DEMO_PASSWORDS_JSON` | unset | production: JSON object `{"alice.morgan": "...", ...}` giving all 11 demo usernames a unique password of 12+ characters, from a secret manager. Alternative: `DEMO_CREDENTIALS_FILE` |
+| `DEMO_CREDENTIALS_FILE` | `data/demo_credentials.local.json` | local credentials file (generated outside production, git-ignored) |
 | `SESSION_TTL_MINUTES` | `480` | session lifetime |
 | `DISPLAY_TIMEZONE` | `Asia/Kolkata` | zone used for `*_local` timestamps and "after hours" |
-| `CORS_ORIGINS` | portal and SOC origins | allowed browser origins |
-| `AUTO_SEED` | `true` | seed the synthetic data when the database is empty |
+| `CORS_ORIGINS` | portal and SOC origins | explicit allowed origins; a wildcard, `null` or a malformed origin stops start-up; credentials are never allowed |
+| `AUTO_SEED` | `true` | seed the synthetic data when the database is empty (in production this needs a demo credential source) |
 | `SIMULATION_ENABLED` | `true` | set `false` for "normal" mode; the simulation API then returns 403 to everyone |
-| `SIMULATION_PRIVILEGED_PASSWORD` | `Synthetic#Priv2026` | password given to the privileged account the simulation creates |
+| `SIMULATION_PRIVILEGED_PASSWORD` | derived from `SECRET_KEY` | password of the privileged account the simulation creates; set it only to override |
+| `ARGON2_TIME_COST`, `ARGON2_MEMORY_KIB`, `ARGON2_PARALLELISM` | `3`, `65536`, `2` | Argon2id cost (hashes made with weaker settings are upgraded at the next login) |
 | `MAP_LOOPBACK_TO_WORKSTATION` | `true` | local demo: attribute loopback connections to the employee's registered workstation IP |
 | `TRUSTED_FRONTEND_KEY` | empty (off) | split hosting: shared secret (24+ characters) sent by the dashboards as `X-Frontend-Key`; requests carrying it are attributed to the employee's registered workstation IP |
-| `APP_ENV` | `development` | `production` refuses to start with the demo `SECRET_KEY` (needs 32+ random characters) |
+| `APP_ENV` | `development` | `production` enforces the checks above, turns on `REQUIRE_HTTPS` and turns off `/docs` |
+| `REQUIRE_HTTPS`, `TRUST_FORWARDED_PROTO` | on in production, off | refuse plain-HTTP requests (loopback and `/api/health` exempt); honour `X-Forwarded-Proto` from a proxy you control |
+| `ENABLE_API_DOCS` | on in development | interactive `/docs`, `/redoc` and `/openapi.json` |
+| `MAX_REQUEST_BYTES` | `1000000` | largest accepted request body (HTTP 413 beyond it) |
 | `LOGIN_MAX_FAILURES`, `LOGIN_LOCKOUT_SECONDS` | `5`, `300` | failed sign-ins per employee ID before a temporary lockout (HTTP 429) |
+| `LOGIN_IP_MAX_FAILURES`, `LOGIN_IP_WINDOW_SECONDS` | `20`, `300` | failed sign-ins from one source address before it is locked out |
+| `RATE_LIMITS_ENABLED`, `RATE_LIMIT_SENSITIVE_PER_MINUTE`, `RATE_LIMIT_HEAVY_PER_MINUTE`, `RATE_LIMIT_EMPLOYEE_PER_MINUTE` | `true`, `30`, `6`, `60` | per-caller, per-route limits for administrator state changes, expensive actions (reset, retrain, reload, payroll export, account creation) and employee actions (HTTP 429 with `Retry-After`) |
 | `CONTAINMENT_MAX_PER_MINUTE` | `30` | simulated containment requests one administrator may submit per minute (HTTP 429 beyond it) |
 | `API_TIMEOUT_SECONDS` | `20` | how long the dashboards wait for the API (raise it for a free host that sleeps) |
 | `API_HOST`, `API_PORT`, `API_BASE_URL` | `127.0.0.1`, `8000`, `http://127.0.0.1:8000` | where the backend listens and where dashboards find it |
@@ -183,23 +200,27 @@ Data persists across restarts (SQLite file `data/insider_threat.db`, git-ignored
 
 ## Demo credentials
 
-For local demonstration only; every account is synthetic and has its own password. Sign in with the **Employee ID**
-(the username also works). Emails are `<username>@westbridgebank.test`. The passwords live in `data/demo_accounts.py` and
-are stored in the database only as salted PBKDF2-SHA256 hashes.
+For local demonstration only; every account is synthetic. **The passwords are not in the repository.** They are random,
+generated on your machine by `python app.py setup` (or on first start) into `data/demo_credentials.local.json`
+(git-ignored), and shown by `python app.py credentials`. Sign in with the **Employee ID** (the username also works).
+Emails are `<username>@westbridgebank.test`. The database stores only Argon2id hashes; the backend never logs or returns a
+password. If you started an earlier version, the first start of this one replaces the old, published demo passwords in your
+existing database with the new random ones (the audit log records `demo_credentials_synced` with a count only). Passwords
+that were committed to earlier versions of the repository remain in its git history and must be treated as public.
 
-| Employee ID | Name | Department / job role | Password | Access (resource: level) | Registered IP(s) |
+| Employee ID | Username | Name | Department / job role | Access (resource: level) | Registered IP(s) |
 |---|---|---|---|---|---|
-| `EMP-1001` | Alice Morgan | Finance / Financial Analyst | `Cedar#Harbor47` | Financial Reports rw, Customer Accounts r, Wiki r | 10.20.1.11, 10.20.1.12 |
-| `EMP-1002` | Bob Chen | Finance / Payroll Specialist | `Quill&Meadow82` | Payroll Records rw, Financial Reports r, Wiki r | 10.20.1.21 |
-| `EMP-1003` | Carol Diaz | HR / HR Manager | `Birch!Lantern26` | HR Records rw, Payroll Records r, Wiki r | 10.20.2.31, 10.20.2.32 |
-| `EMP-1004` | David Kumar | IT / Systems Administrator | `Falcon$Ridge63` | IT Admin Console rw, Source Code r, Wiki rw | 10.20.3.41 |
-| `EMP-1005` | Emma Wilson | Trading / Risk Analyst | `Willow#Summit19` | Trading Reports rw, Financial Reports r, Wiki r | 10.20.4.51 |
-| `EMP-1006` | Frank Osei | Customer Service / Account Manager | `Amber%Compass74` | Customer Accounts rw, Wiki r | 10.20.5.61, 10.20.5.62 |
-| `EMP-1007` | Grace Lee | Compliance / Compliance Officer | `Juniper!Atlas58` | Audit Reports rw, Financial Reports r, Customer Accounts r, Wiki r | 10.20.6.71 |
-| `EMP-1008` | Henry Novak | Engineering / Software Engineer | `Granite#Voyage31` | Source Code rw, Wiki rw | 10.20.7.81 |
-| `EMP-1009` | Isla Murphy | Lending / Loan Officer | `Coral&Beacon95` | Loan Applications rw, Customer Accounts r, Wiki r | 10.20.8.91 |
-| `EMP-1010` | Jack Silva | Marketing / Marketing Coordinator | `Cobalt!Meadow68` | Marketing Assets rw, Wiki r | 10.20.9.101 |
-| `SEC-9011` | Sam Okafor | Security / SOC Analyst (**security administrator**) | `Sentinel#Vault2026` | Audit Reports r, Wiki r; SOC dashboard and simulation console | 10.20.10.5 (also 127.0.0.1 and ::1) |
+| `EMP-1001` | `alice.morgan` | Alice Morgan | Finance / Financial Analyst | Financial Reports rw, Customer Accounts r, Wiki r | 10.20.1.11, 10.20.1.12 |
+| `EMP-1002` | `bob.chen` | Bob Chen | Finance / Payroll Specialist | Payroll Records rw, Financial Reports r, Wiki r | 10.20.1.21 |
+| `EMP-1003` | `carol.diaz` | Carol Diaz | HR / HR Manager | HR Records rw, Payroll Records r, Wiki r | 10.20.2.31, 10.20.2.32 |
+| `EMP-1004` | `david.kumar` | David Kumar | IT / Systems Administrator | IT Admin Console rw, Source Code r, Wiki rw | 10.20.3.41 |
+| `EMP-1005` | `emma.wilson` | Emma Wilson | Trading / Risk Analyst | Trading Reports rw, Financial Reports r, Wiki r | 10.20.4.51 |
+| `EMP-1006` | `frank.osei` | Frank Osei | Customer Service / Account Manager | Customer Accounts rw, Wiki r | 10.20.5.61, 10.20.5.62 |
+| `EMP-1007` | `grace.lee` | Grace Lee | Compliance / Compliance Officer | Audit Reports rw, Financial Reports r, Customer Accounts r, Wiki r | 10.20.6.71 |
+| `EMP-1008` | `henry.novak` | Henry Novak | Engineering / Software Engineer | Source Code rw, Wiki rw | 10.20.7.81 |
+| `EMP-1009` | `isla.murphy` | Isla Murphy | Lending / Loan Officer | Loan Applications rw, Customer Accounts r, Wiki r | 10.20.8.91 |
+| `EMP-1010` | `jack.silva` | Jack Silva | Marketing / Marketing Coordinator | Marketing Assets rw, Wiki r | 10.20.9.101 |
+| `SEC-9011` | `soc.admin` | Sam Okafor | Security / SOC Analyst (**security administrator**) | Audit Reports r, Wiki r; SOC dashboard and simulation console | 10.20.10.5 (also 127.0.0.1 and ::1) |
 
 Every employee can also reach the self-service pages (own profile and payslips, directory, document library). The HR
 manager sees HR records, the payroll specialist the payroll register and export, and the IT administrator can create
@@ -219,10 +240,12 @@ Stop with Ctrl+C. All state stays in `data/insider_threat.db`.
 
 Nothing is deployed for you and this repository contains no deployment URLs. Two supported layouts:
 
-**A. One machine or VM (simplest).** Run `python app.py all` and put a reverse proxy with HTTPS in front of ports
-8501, 8502 and 8503 (WebSocket support is required by Streamlit). Keep the backend on `127.0.0.1`; the dashboards call
-it locally, so the default `MAP_LOOPBACK_TO_WORKSTATION=true` already attributes sessions correctly. Set
-`APP_ENV=production` and a random `SECRET_KEY` (`python -c "import secrets; print(secrets.token_urlsafe(48))"`).
+**A. One machine or VM (simplest).** Run `python app.py all` and put a reverse proxy that terminates HTTPS in front of ports
+8501, 8502 and 8503 (WebSocket support is required by Streamlit). The backend does not provide TLS itself: HTTPS exists
+only if your proxy or host provides it. Keep the backend on `127.0.0.1`; the dashboards call it locally, so the default
+`MAP_LOOPBACK_TO_WORKSTATION=true` already attributes sessions correctly (and loopback is exempt from `REQUIRE_HTTPS`). Set
+`APP_ENV=production`, a random `SECRET_KEY` (`python -c "import secrets; print(secrets.token_urlsafe(48))"`) and either
+`DEMO_PASSWORDS_JSON` (from your secret store) or `AUTO_SEED=false`; production refuses to start without them.
 
 **B. Split hosting: API on Render, dashboards on Streamlit Community Cloud.** The Streamlit apps run on a different
 host from the API, so the API only sees the dashboard server's address for every user. `TRUSTED_FRONTEND_KEY` solves
@@ -232,8 +255,12 @@ address, and `X-Forwarded-For` is never trusted. Steps that need **your** accoun
 
 1. Push this repository to GitHub (it already is: `azmath97/ai-threat-detection`).
 2. Render: *New > Blueprint*, choose the repository. [render.yaml](render.yaml) creates the `westbridge-api` web service
-   with `APP_ENV=production` and generated `SECRET_KEY` and `TRUSTED_FRONTEND_KEY`. When it is live, open
-   `https://<your-service>.onrender.com/api/health` and expect `{"status":"ok",...}`. Copy the service URL and the
+   with `APP_ENV=production`, generated `SECRET_KEY` and `TRUSTED_FRONTEND_KEY`, and `TRUST_FORWARDED_PROTO=true` (Render's
+   proxy terminates TLS, so the API sees `X-Forwarded-Proto: https`). Render will ask you for **`DEMO_PASSWORDS_JSON`**
+   (declared `sync: false`, so it is never stored in the repository): paste a JSON object that gives each of the 11 demo
+   usernames (see [Demo credentials](#demo-credentials)) its own strong password of 12+ characters, for example
+   `{"alice.morgan": "...", "bob.chen": "...", ..., "soc.admin": "..."}`; or set `AUTO_SEED` to `false`. When it is live,
+   open `https://<your-service>.onrender.com/api/health` and expect `{"status":"ok",...}`. Copy the service URL and the
    `TRUSTED_FRONTEND_KEY` value from the service's *Environment* tab.
 3. Streamlit Community Cloud: *Create app* three times from the same repository and branch `main`, with main file
    `frontend/employee_portal.py`, `frontend/soc_dashboard.py` and `frontend/simulation_console.py`, Python 3.12. In each
@@ -244,19 +271,19 @@ address, and `X-Forwarded-For` is never trusted. Steps that need **your** accoun
    TRUSTED_FRONTEND_KEY = "<value copied from Render>"
    API_TIMEOUT_SECONDS = "60"
    ```
-4. Check it: sign in to the portal as `EMP-1001`, then open the SOC dashboard as `SEC-9011`. The login event should show
-   source IP `10.20.1.11` (a known address), not the Streamlit server's address.
+4. Check it: sign in to the portal as `EMP-1001` with the password you set, then open the SOC dashboard as `SEC-9011`. The
+   login event should show source IP `10.20.1.11` (a known address), not the Streamlit server's address.
 
 Things to know before relying on layout B:
 
 * **Free tiers sleep.** The first request after idle time can take a minute, hence `API_TIMEOUT_SECONDS`.
 * **The database is on the API host's disk.** On Render's free plan it is wiped on restart or redeploy; the backend
   re-seeds and retrains automatically, but investigations and sessions are lost.
-* **Run one backend process.** The baseline cache, the model and the login throttle live in process memory
+* **Run one backend process.** The baseline cache, the model and the rate limiters live in process memory
   (`render.yaml` starts a single `uvicorn` worker).
-* **The demo passwords are public.** Anyone who can open the SOC or simulation URL can sign in as `SEC-9011` using this
-  README. Restrict who can view those two apps (Streamlit Cloud's sharing settings) and change `data/demo_accounts.py`,
-  or set `SIMULATION_ENABLED=false` on the API.
+* **Anyone who can open the SOC or simulation URL gets the sign-in form for administrators.** Use strong, unique passwords
+  in `DEMO_PASSWORDS_JSON`, restrict who can view those two apps (Streamlit Cloud's sharing settings), or set
+  `SIMULATION_ENABLED=false` on the API.
 * **Vercel cannot host this**: it needs long-running processes and WebSockets, and its filesystem is not persistent.
 
 ## How to simulate an attack
@@ -324,7 +351,8 @@ are recorded as blocked.
 
 ```powershell
 $base = "http://127.0.0.1:8000"
-$login = '{"employee_id":"SEC-9011","password":"Sentinel#Vault2026"}'
+$pw = (Get-Content data\demo_credentials.local.json | ConvertFrom-Json).'soc.admin'      # created by python app.py setup
+$login = @{ employee_id = "SEC-9011"; password = $pw } | ConvertTo-Json
 $tok = (Invoke-RestMethod "$base/api/auth/login" -Method Post -ContentType application/json -Body $login).access_token
 $h = @{ Authorization = "Bearer $tok" }
 $body = @{ scenario = "bulk_export"; seed = 42; pace = "instant"; idempotency_key = [guid]::NewGuid().ToString("N") } | ConvertTo-Json
@@ -381,7 +409,7 @@ Avoid claiming "this protects the bank" and avoid quoting the benchmark figures 
 ## How it works, end to end
 
 1. **Sign in.** The portal posts the employee ID and password to `POST /api/auth/login`. The backend looks the employee
-   up, verifies the PBKDF2 hash (a dummy hash is checked for unknown IDs so timing does not reveal whether an ID exists),
+   up, verifies the Argon2id hash (a dummy hash is checked for unknown IDs so timing does not reveal whether an ID exists),
    refuses blocked IPs and locked accounts, opens a session, returns a random token and records a `login` event (or a
    `login_failed` event with the reason: `bad_password`, `ip_blocked`, `account_locked`).
 2. **Authenticated requests.** Every later call carries `Authorization: Bearer <token>`. The backend hashes the token
@@ -773,13 +801,13 @@ controls below work inside the application and the simulation.
 
 | Control | What it stops | Where |
 |---|---|---|
-| PBKDF2-SHA256 salted hashes (260,000 iterations) | stolen database revealing passwords | `backend/security.py` |
+| Argon2id salted password hashes (`argon2-cffi`; old PBKDF2 hashes are upgraded at login) | stolen database revealing passwords | `backend/security.py` |
 | Equal-time check for unknown employee IDs | user enumeration by timing | `auth_service.authenticate` |
 | Random session tokens, only an HMAC is stored, 480-minute lifetime, revocation | stolen database revealing live sessions; sessions that never expire | `security.py` |
 | Backend decides identity, IP and device | an attacker choosing a different employee ID or IP in a request | `security.get_auth`, `resolve_ip` |
 | Role-based access control (`security_admin` vs `employee`) | employees reaching the SOC, simulation or response endpoints | `require_admin` |
-| Failed-login throttle (HTTP 429 with `Retry-After`) | online password guessing at `/api/auth/login` | `rate_limit.py`, `main.login` |
-| `APP_ENV=production` start-up check | running with the built-in demo `SECRET_KEY` | `config.validate_for_environment` |
+| Failed-login throttle per employee ID and per source address; per-route limits (HTTP 429 with `Retry-After`) | online password guessing, scripted abuse of state-changing routes | `rate_limit.py`, `route_limits.py`, `main.login` |
+| `APP_ENV=production` start-up checks | running without a strong `SECRET_KEY`, without demo credentials from a secret source, or with a wildcard CORS origin | `config.validate_for_environment` |
 | Shared `TRUSTED_FRONTEND_KEY` (constant-time compare) | an outside caller being attributed to a workstation IP | `security.is_trusted_frontend` |
 | Per-resource permission checks on every access | reading or exporting data the role is not granted | `event_service.has_access` |
 | Self-only profile endpoint | reading another employee's private record | `portal_routes.py` |
@@ -968,14 +996,14 @@ All tables have timestamps and indexes on their lookup columns (employee, time, 
 app.py                       launcher (loads .env, starts backend and dashboards)
 backend/                     FastAPI app, models, detection, correlation, investigation, response, SOC read models
   detection_rules.json       configurable rules, weights and parameters
-data/                        demo_accounts.py (credentials), seed_data.py (history), the SQLite file (git-ignored)
+data/                        demo_accounts.py (usernames; random passwords come from a git-ignored file or the secret manager), seed_data.py (history), the SQLite file (git-ignored)
 ml/                          features.py, synthetic_data.py, train_model.py, anomaly_detector.py, evaluate_dataset.py, artifacts/ (git-ignored)
 ml/cert/                     CERT r4.2 pipeline: schema, validate, prepare, labels, split, leakage, synthetic supplement
 ml/detect/                   window builder, features, models, hybrid risk, benchmark and summary (offline benchmark)
 docs/                        cert-dataset.md, detection-evaluation.md, detection-results/
 docs/cert-dataset.md         CERT dataset setup, field mapping, label rules, caveats
 frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       310 pytest tests
+tests/                       347 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
 requirements.txt  .env.example
 ```
@@ -983,7 +1011,7 @@ requirements.txt  .env.example
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 310 tests, about two minutes
+python -m pytest tests -q          # 347 tests, about two minutes
 ```
 
 The suite uses a temporary database and a separate backend process, and an autouse fixture resets the simulation and
@@ -1001,6 +1029,12 @@ removes rows each test creates. It covers:
 * **Detection, ML, SOC and investigation workflow:** normal activity, unfamiliar IP, restricted access, large export,
   failed logins, privileged account creation, external transfer, a complete attack, duplicate events, false positives,
   evidence preservation and tamper detection, containment enforcement and report export.
+* **Security** (`tests/test_security_hardening.py`, with `test_security.py`): no published default password or secret
+  remains in the working tree; local secret and credential files are git-ignored and untracked; Argon2id with legacy-hash
+  upgrade and no plaintext in the database file; start-up refusal in production without a secret, CORS origins or demo
+  credentials; per-account and per-address brute-force lockout and per-route rate limits with `Retry-After`; role
+  escalation, tampered, expired, revoked and locked sessions; oversized, malformed and mistyped payloads without echoing
+  input; generic 500s with no paths or stack traces; CORS, security headers, HTTPS requirement and no cookies.
 * **Simulated containment** (`tests/test_containment_simulation.py`): each action records the alert and investigation, the
   initiator, time and result; only this application's tables change (digest comparison before and after every action) and
   evidence tables never do; socket, DNS, SMTP, HTTP and subprocess calls fail the test if attempted, and the backend imports no
@@ -1012,11 +1046,55 @@ removes rows each test creates. It covers:
   expected evidence while their outcome level varies and is decided by the detector; one active run, idempotent
   submissions, stop, failure and restart recovery; runs do not share investigations; no network operation is attempted.
 
+## Security notes and limitations
+
+This is an **educational security-monitoring demo on synthetic data. It is not production banking security** and has not
+been reviewed or penetration-tested. What is in place, and what is not:
+
+**In place (all enforced by the backend, never only by hiding UI):**
+* **Secrets.** No secret or password is in the source. `SECRET_KEY` has no default: development creates a random per-machine
+  key; production refuses to start without one (32+ random characters) from the environment or a secret manager, and
+  without `DEMO_PASSWORDS_JSON` (or `AUTO_SEED=false`). Demo passwords are random, per machine, and git-ignored.
+* **Passwords.** Argon2id (`argon2-cffi`); legacy hashes verify once and are upgraded at login; plaintext is never stored,
+  logged or returned. Session tokens are random and only an HMAC of them is stored.
+* **Authentication and authorization.** Every route except `/api/health` and login needs a valid session; administrator
+  routes check the role server-side. State-changing routes (simulation, investigations, alerts, containment, detection)
+  need the administrator role, and the simulation also needs `SIMULATION_ENABLED`. Employees can reach only their own data;
+  a job title such as IT administrator never grants the SOC role. Expired, revoked, locked and tampered sessions are refused.
+* **Brute force and abuse.** Failed sign-ins are throttled per employee ID and per source address (HTTP 429, `Retry-After`);
+  uniform error text for unknown IDs and wrong passwords; per-caller, per-minute limits on administrator state changes,
+  expensive actions and employee actions; a separate limit and audit trail for containment.
+* **Requests.** Pydantic validates types, lengths and ranges; bodies over `MAX_REQUEST_BYTES` get 413; validation errors
+  return only the field, a short message and the error type (never the submitted value); unexpected errors return a
+  generic 500 with a request id and the stack trace stays in the server log; API responses name files, not server paths.
+* **CORS and headers.** Explicit origins only (a wildcard stops start-up), no credentials, named methods and headers.
+  Every response carries `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` and a
+  deny-all CSP; `Strict-Transport-Security` is sent when the request arrived over HTTPS.
+* **Sessions and cookies.** The backend sets **no cookies**: sessions are bearer tokens in the `Authorization` header, held
+  in each Streamlit session's server-side state, so classic CSRF does not apply to the API. Streamlit's own XSRF and
+  origin checks stay enabled (`.streamlit/config.toml`).
+* **HTTPS.** **The application does not provide HTTPS.** Run it behind a TLS-terminating host or proxy. With
+  `REQUIRE_HTTPS` (on by default in production) plain-HTTP requests are refused except from loopback and `/api/health`;
+  behind a proxy you control set `TRUST_FORWARDED_PROTO=true`. Without a proxy, tokens and passwords travel in clear text.
+* **Docs.** `/docs`, `/redoc` and `/openapi.json` are off in production unless `ENABLE_API_DOCS=true`.
+
+**Not in place / known limitations:**
+* No MFA, password reset, password-strength policy for self-chosen passwords beyond length, or account-recovery flow.
+* Rate limits and lockouts are in memory and per process (lost on restart, not shared between workers); a lockout can also
+  be used to lock a victim out for a few minutes. Use one worker, or add a shared store and a gateway/WAF for real use.
+* Sessions are valid for `SESSION_TTL_MINUTES` (480) with no idle timeout, and revoked only by logout or containment.
+* Source-IP attribution relies on the loopback mapping or `TRUSTED_FRONTEND_KEY`; anyone holding that key can have a
+  request attributed to a workstation address. Keep it secret and rotate it.
+* SQLite has no encryption at rest, role separation or backup; the local secret and credential files are protected only by
+  file permissions. Anyone with the host can read them.
+* Passwords committed to earlier versions of this repository remain in its git history (a start-up sync replaces them in
+  an existing database, but they must be considered public). There is no dependency or container scanning here.
+* Audit logs are database rows an administrator with database access could alter; they are not tamper-evident.
+
 ## Known limitations
 
-* **Local demonstration only.** It is not hardened for production: HTTP unless a host adds TLS, no MFA, no password reset,
-  and the demo passwords are public in this README. `APP_ENV=production` makes the backend refuse to start with the
-  built-in `SECRET_KEY`, but it does not make the demo accounts safe: change `data/demo_accounts.py` before exposing it.
+* **Local demonstration only.** It is not hardened for production (see [Security notes](#security-notes-and-limitations)): no
+  TLS of its own, no MFA, no password reset. Treat the demo accounts as exposed to anyone who can reach the dashboards.
 * **Synthetic data.** The model is trained on generated sessions; its metrics, the rule severities and the scoring weights
   are hand-tuned for the case study and would need real data and tuning before any real use. The five confidence weights
   are not learned from labelled outcomes.

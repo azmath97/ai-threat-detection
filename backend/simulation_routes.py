@@ -14,6 +14,7 @@ from backend import simulation_service as sim
 from backend.config import get_settings
 from backend.database import get_db
 from backend.models import Employee, SimulationRun
+from backend.rate_limit import enforce
 from backend.security import AuthContext, require_admin
 
 router = APIRouter(prefix="/api/simulation", tags=["simulation"])
@@ -24,6 +25,15 @@ def require_simulation(auth: AuthContext = Depends(require_admin)) -> AuthContex
     if not get_settings().simulation_enabled:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Simulation environment is disabled")
     return auth
+
+
+def simulation_limited(name: str, tier: str = "sensitive"):
+    """Admin + simulation-enabled + per-minute limit, for the state-changing simulation routes."""
+    def dependency(auth: AuthContext = Depends(require_simulation)) -> AuthContext:
+        enforce(name, auth.employee.id, tier)
+        return auth
+
+    return dependency
 
 
 def _valid_ip(v: str) -> str:
@@ -112,7 +122,7 @@ def simulation_status(_: AuthContext = Depends(require_simulation), db: Session 
 
 
 @router.post("/steps")
-def run_step(body: StepRequest, auth: AuthContext = Depends(require_simulation), db: Session = Depends(get_db)):
+def run_step(body: StepRequest, auth: AuthContext = Depends(simulation_limited("simulation_step")), db: Session = Depends(get_db)):
     if body.step not in sim.STEP_IDS:
         raise HTTPException(422, f"step must be one of: {', '.join(sim.STEP_IDS)}")
     active = db.scalar(select(SimulationRun).where(SimulationRun.active_slot == 1))
@@ -124,7 +134,7 @@ def run_step(body: StepRequest, auth: AuthContext = Depends(require_simulation),
 
 
 @router.post("/runs", status_code=status.HTTP_202_ACCEPTED)
-def start_run(body: RunRequest, auth: AuthContext = Depends(require_simulation), db: Session = Depends(get_db)):
+def start_run(body: RunRequest, auth: AuthContext = Depends(simulation_limited("simulation_run")), db: Session = Depends(get_db)):
     run, duplicate = runs.start_run(
         db, auth.employee, scenario=body.scenario, target_employee_id=body.target_employee_id, seed=body.seed,
         records=body.records, source_ip=body.source_ip, pace=body.pace, noise=body.noise,
@@ -147,10 +157,10 @@ def get_run(run_id: int, _: AuthContext = Depends(require_simulation), db: Sessi
 
 
 @router.post("/runs/{run_id}/cancel")
-def cancel_run(run_id: int, auth: AuthContext = Depends(require_simulation), db: Session = Depends(get_db)):
+def cancel_run(run_id: int, auth: AuthContext = Depends(simulation_limited("simulation_cancel")), db: Session = Depends(get_db)):
     return runs.serialize(db, runs.cancel_run(db, auth.employee, run_id), detail=True)
 
 
 @router.post("/reset")
-def reset(auth: AuthContext = Depends(require_simulation), db: Session = Depends(get_db)):
+def reset(auth: AuthContext = Depends(simulation_limited("simulation_reset", "heavy")), db: Session = Depends(get_db)):
     return sim.reset(db, auth.employee)

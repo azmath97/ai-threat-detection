@@ -2,10 +2,13 @@ import hashlib
 import hmac
 import ipaddress
 import secrets
-from base64 import b64decode, b64encode
+from base64 import b64decode
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import lru_cache
 
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
@@ -15,26 +18,42 @@ from backend.config import get_settings
 from backend.database import get_db, utcnow
 from backend.models import Employee, EmployeeSession
 
-_ALGORITHM = "pbkdf2_sha256"
+_LEGACY_ALGORITHM = "pbkdf2_sha256"           # hashes written by earlier versions; still verified, then upgraded on login
 _bearer = HTTPBearer(auto_error=False)
 
 
-def hash_password(password: str, iterations: int | None = None) -> str:
-    iterations = iterations or get_settings().password_hash_iterations
-    salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
-    return f"{_ALGORITHM}${iterations}${b64encode(salt).decode()}${b64encode(digest).decode()}"
+@lru_cache
+def _hasher() -> PasswordHasher:
+    """Argon2id, the current recommendation for password storage. Cost is configurable (ARGON2_* settings)."""
+    s = get_settings()
+    return PasswordHasher(time_cost=s.argon2_time_cost, memory_cost=s.argon2_memory_kib, parallelism=s.argon2_parallelism)
+
+
+def hash_password(password: str) -> str:
+    return _hasher().hash(password)
 
 
 def verify_password(password: str, stored: str) -> bool:
     try:
-        algorithm, iterations, salt, expected = stored.split("$")
-        if algorithm != _ALGORITHM:
-            return False
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), b64decode(salt), int(iterations))
-        return hmac.compare_digest(digest, b64decode(expected))
-    except (ValueError, TypeError):
+        if stored.startswith("$argon2"):
+            return _hasher().verify(stored, password)
+        if stored.startswith(_LEGACY_ALGORITHM + "$"):
+            _, iterations, salt, expected = stored.split("$")
+            digest = hashlib.pbkdf2_hmac("sha256", password.encode(), b64decode(salt), int(iterations))
+            return hmac.compare_digest(digest, b64decode(expected))
+    except (VerifyMismatchError, VerificationError, InvalidHashError, ValueError, TypeError):
         return False
+    return False
+
+
+def needs_rehash(stored: str) -> bool:
+    """True for legacy hashes and for Argon2 hashes made with weaker parameters than the current settings."""
+    if not stored.startswith("$argon2"):
+        return True
+    try:
+        return _hasher().check_needs_rehash(stored)
+    except InvalidHashError:
+        return True
 
 
 def generate_token() -> str:

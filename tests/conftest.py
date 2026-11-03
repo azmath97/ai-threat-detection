@@ -8,8 +8,14 @@ import pytest
 _tmp = tempfile.mkdtemp(prefix="itd_test_")
 os.environ["DATABASE_URL"] = f"sqlite:///{Path(_tmp, 'test.db').as_posix()}"
 os.environ["AUTO_SEED"] = "true"
-os.environ["PASSWORD_HASH_ITERATIONS"] = "1000"
+os.environ["ARGON2_TIME_COST"], os.environ["ARGON2_MEMORY_KIB"], os.environ["ARGON2_PARALLELISM"] = "1", "8", "1"   # fast hashing in tests
 os.environ["SECRET_KEY"] = "test-secret"
+os.environ["LOCAL_SECRET_FILE"] = str(Path(_tmp, "local_secret"))
+os.environ["DEMO_CREDENTIALS_FILE"] = str(Path(_tmp, "demo_credentials.json"))      # random per test run, generated on first use
+os.environ.pop("DEMO_PASSWORDS_JSON", None)
+os.environ["APP_ENV"] = "development"
+for _name in ("SENSITIVE", "HEAVY", "EMPLOYEE"):        # the suite makes many rapid calls; limit tests set their own low values
+    os.environ[f"RATE_LIMIT_{_name}_PER_MINUTE"] = "100000"
 os.environ["ML_MODEL_PATH"] = str(Path(_tmp, "isolation_forest.joblib"))  # exercises train-on-first-start
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -92,14 +98,14 @@ def restore_state(request):
     with sqlite3.connect(db_path) as con:
         marks = {t: con.execute(f"select coalesce(max(id), 0) from {t}").fetchone()[0] for t in tables}
     yield
-    from backend.rate_limit import containment_limiter, login_throttle
+    from backend.rate_limit import reset_all
 
-    login_throttle.reset()
-    containment_limiter.reset()
+    reset_all()
     active = client.get("/api/simulation/status", headers=admin).json().get("active_run_id")
     if active:
         client.post(f"/api/simulation/runs/{active}/cancel", headers=admin)
     client.post("/api/simulation/reset", headers=admin)
+    reset_all()                                                     # the clean-up calls above must not count against the next test
     with sqlite3.connect(db_path) as con:
         con.execute("delete from investigation_evidence where investigation_id > ?", (marks["attack_investigations"],))
         for table in ("security_alerts", "attack_investigations", "risk_assessments", "security_events"):

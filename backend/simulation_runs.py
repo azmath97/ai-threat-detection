@@ -37,7 +37,7 @@ from backend.models import (
     SecurityEvent,
     SimulationRun,
 )
-from data.demo_accounts import DEMO_PASSWORDS, demo_password
+from data.demo_accounts import DEMO_USERNAMES, demo_password
 
 logger = logging.getLogger("insider_threat.simulation")
 
@@ -63,7 +63,7 @@ def eligible_employees(db: Session) -> list[Employee]:
     """Seeded standard employees that may take part: active, not synthetic accounts, with a demo credential."""
     rows = db.scalars(select(Employee).where(Employee.role == "employee", Employee.is_synthetic.is_(False),
                                              Employee.status == "active").order_by(Employee.id))
-    return [e for e in rows if e.username in DEMO_PASSWORDS]
+    return [e for e in rows if e.username in DEMO_USERNAMES]
 
 
 # ------------------------------------------------------------------------------------------------------- starting
@@ -114,7 +114,7 @@ def start_run(db: Session, admin: Employee, *, scenario: str, target_employee_id
             target = db.get(Employee, target_employee_id)
             if target is None or target.is_synthetic:
                 raise ServiceError(404, "Employee not found")
-            if target.role != "employee" or target.username not in DEMO_PASSWORDS:
+            if target.role != "employee" or target.username not in DEMO_USERNAMES:
                 raise ServiceError(400, "Only the standard demo employee accounts can be simulated")
             if target.status != "active":
                 raise ServiceError(409, f"{target.username} is locked (containment in effect); restore the account first")
@@ -340,7 +340,7 @@ def _execute(run_id: int) -> None:
         except Exception as exc:                                   # a defect or database error, not a scenario outcome
             logger.exception("simulation run %s failed", run_id)
             db.rollback()
-            final, error = "failed", f"{type(exc).__name__}: {exc}"[:500]
+            final, error = "failed", f"Run failed with an internal error ({type(exc).__name__}); see the server log"
         finally:
             _finish(db, run_id, final, error)
             _cancel_events.pop(run_id, None)

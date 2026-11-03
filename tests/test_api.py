@@ -29,7 +29,7 @@ def test_seed_data_codes_and_password_hashing(client, admin, db_path):
     assert {e["employee_code"] for e in employees} >= {"EMP-1001", "EMP-1010", "SEC-9011"}
     hashes = [r[0] for r in _query(db_path, "select password_hash from employees")]
     tables = {r[0] for r in _query(db_path, "select name from sqlite_master where type='table'")}
-    assert all(h.startswith("pbkdf2_sha256$") and "Demo2026" not in h for h in hashes)
+    assert all(h.startswith("$argon2id$") and "Demo2026" not in h for h in hashes)
     assert len(set(hashes)) == len(hashes)
     assert {"employees", "employee_sessions", "access_permissions", "security_events", "risk_assessments",
             "security_alerts", "attack_investigations", "containment_actions", "audit_logs"} <= tables

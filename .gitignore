@@ -3,10 +3,18 @@ __pycache__/
 .venv/
 venv/
 .env
+.env.*
+!.env.example
 .pytest_cache/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+# Local secrets and credentials: generated per machine, never committed
+data/demo_credentials.local.json
+data/.local_secret
+*.local.json
+*.key
+*.pem
 ml/artifacts/
 *.egg-info/
 

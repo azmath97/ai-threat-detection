@@ -74,7 +74,7 @@ def stage_weight(stage: str) -> float:
 
 def summary() -> dict:
     return {
-        "path": get_settings().detection_rules_path,
+        "path": Path(get_settings().detection_rules_path).name,
         "scoring": _raw()["scoring"],
         "parameters": _raw()["parameters"],
         "rules": {rid: {"enabled": r.enabled, "severity": r.severity, "stages": list(r.stages), "description": r.description}

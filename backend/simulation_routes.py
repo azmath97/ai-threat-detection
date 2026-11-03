@@ -26,6 +26,7 @@ class _Target(BaseModel):
     source_ip: str = Field(default=sim.DEFAULT_SOURCE_IP, description="Simulated attacker address")
     scenario: str = "it_admin_full_chain"
     records: int = Field(default=sim.EXPORT_RECORDS, ge=1, le=1_000_000, description="Records in the simulated export and transfer")
+    seed: int | None = Field(default=None, ge=0, lt=2**31, description="Replays a randomised_campaign run")
 
     @field_validator("source_ip")
     @classmethod
@@ -89,8 +90,10 @@ def run_step(body: StepRequest, auth: AuthContext = Depends(require_simulation),
 
 @router.post("/run")
 def run_scenario(body: _Target, auth: AuthContext = Depends(require_simulation), db: Session = Depends(get_db)):
-    results = sim.run_scenario(db, auth.employee, _target(db, body.target_employee_id), body.source_ip, body.scenario, body.records)
-    return {"scenario": body.scenario, "results": results}
+    plan = sim.plan_scenario(body.scenario, body.records, body.seed)
+    results = sim.run_plan(db, auth.employee, _target(db, body.target_employee_id), body.source_ip, plan)
+    return {"scenario": body.scenario, "seed": plan["seed"], "plan": plan["steps"], "records": plan["records"],
+            "results": results}
 
 
 @router.post("/reset")

@@ -22,6 +22,11 @@ from backend.models import (
     SecurityAlert,
 )
 
+SCOPE_KEY = "simulated_application_state"
+SCOPE_NOTICE = ("Containment is a controlled application simulation. Actions change this application's own records "
+                "(accounts, sessions, permissions, blocked addresses, isolated systems) and are enforced by this backend only. "
+                "No firewall, directory service, endpoint agent or real network is contacted or changed.")
+
 ACTION_TYPES = (
     "revoke_sessions", "lock_account", "restrict_access", "remove_privileges", "block_ip", "isolate_system",
     "restore_account", "unblock_ip", "release_system", "resolve_investigation",
@@ -214,7 +219,8 @@ def _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm
             details["system"] = system
 
     action = ContainmentAction(investigation_id=investigation_id, employee_id=target.id, action_type=action_type,
-                               status="completed", reason=reason, performed_by=admin.id, details=details)
+                               status="completed", reason=reason, performed_by=admin.id,
+                               details={**details, "scope": SCOPE_KEY})
     db.add(action)
     db.flush()
     if control is not None:

@@ -16,6 +16,7 @@ from sklearn.metrics import roc_auc_score
 
 from backend import rules
 from backend.config import get_settings
+from ml.anomaly_detector import volume_guard, volume_reference
 from ml.features import FEATURE_NAMES, vectorize
 from ml.synthetic_data import HARD_NORMAL_KINDS as HARD, export_csv, generate_dataset, window_features
 
@@ -38,10 +39,14 @@ def train(model_path: str | Path | None = None, *, seed: int = 42, n_employees: 
     raw_train = -model.score_samples(X)
     lo = float(np.quantile(raw_train, 0.90))        # upper edge of typical behaviour
     hi = lo + float(rules.scoring("ml_calibration_span"))
+    reference = volume_reference([window_features(data, w) for w in normal_train])
 
     test = [w for w in data.windows if w.split == "test"]
-    raw_test = -model.score_samples(np.array([vectorize(window_features(data, w)) for w in test]))
-    scores = _calibrated(raw_test, lo, hi)
+    test_features = [window_features(data, w) for w in test]
+    raw_test = -model.score_samples(np.array([vectorize(f) for f in test_features]))
+    forest_scores = _calibrated(raw_test, lo, hi)
+    guards = np.array([volume_guard(f, reference) for f in test_features])
+    scores = np.maximum(forest_scores, guards)
     labels = np.array([w.label for w in test])
     scenarios = np.array([w.scenario for w in test])
     metrics = {
@@ -52,12 +57,15 @@ def train(model_path: str | Path | None = None, *, seed: int = 42, n_employees: 
         "attack_recall": round(float((scores[labels == 1] >= 0.5).mean()), 4),
         "attack_recall_by_scenario": {s: round(float((scores[scenarios == s] >= 0.5).mean()), 3)
                                      for s in sorted(set(scenarios[labels == 1]))},
+        "attack_recall_isolation_forest_only": round(float((forest_scores[labels == 1] >= 0.5).mean()), 4),
+        "bulk_export_recall_isolation_forest_only": round(float((forest_scores[scenarios == "bulk_export"] >= 0.5).mean()), 3),
         "mean_score_normal": round(float(scores[scenarios == "normal"].mean()), 4),
         "mean_score_attack": round(float(scores[labels == 1].mean()), 4),
         "n_test_normal": int((labels == 0).sum()), "n_test_attack": int((labels == 1).sum()),
     }
     bundle = {
         "model": model, "feature_names": FEATURE_NAMES, "calibration": {"lo": lo, "hi": hi},
+        "volume_reference": reference,
         "trained_at": datetime.now(timezone.utc).isoformat(), "n_training_windows": len(normal_train),
         "trained_on": "synthetic normal employee sessions only", "metrics": metrics,
         "sklearn_version": sklearn.__version__, "seed": seed,

@@ -30,10 +30,11 @@ from backend.catalog import (
     SEVERITY_LEVELS,
     is_self_service,
 )
-from backend.config import get_settings
+from backend.config import get_settings, validate_for_environment
 from backend.database import SessionLocal, get_db, init_db, utcnow
 from backend.errors import ServiceError
 from backend.event_service import write_audit
+from backend.rate_limit import login_throttle
 from backend.models import (
     AttackInvestigation,
     AuditLog,
@@ -80,6 +81,7 @@ logger = logging.getLogger("insider_threat")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    validate_for_environment()
     init_db()
     detector = ensure_model()  # loads the saved Isolation Forest (trains one on first start); falls back if unavailable
     logger.info("Anomaly detection mode: %s", detector.status()["mode"])
@@ -166,8 +168,22 @@ def health(db: Session = Depends(get_db)):
 # ---------------------------------------------------------------- auth
 @app.post("/api/auth/login", response_model=LoginResponse, tags=["auth"])
 def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
-    ip = resolve_ip(request, find_employee(db, body.identifier))
-    result = authenticate(db, body.identifier, body.password, ip=ip, device_info=device_info(request))
+    employee = find_employee(db, body.identifier)
+    ip = resolve_ip(request, employee)
+    wait = login_throttle.retry_after(body.identifier)
+    if wait:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed sign-in attempts. Try again later.",
+                            headers={"Retry-After": str(wait)})
+    try:
+        result = authenticate(db, body.identifier, body.password, ip=ip, device_info=device_info(request))
+    except ServiceError as exc:
+        if exc.status_code in (401, 403) and login_throttle.record_failure(body.identifier):
+            event_service.write_audit(db, "login_throttled", actor_id=employee.id if employee else None, ip=ip,
+                                      details={"identifier": body.identifier[:64],
+                                               "lockout_seconds": get_settings().login_lockout_seconds})
+            db.commit()
+        raise
+    login_throttle.record_success(body.identifier)
     return LoginResponse(
         access_token=result.token, expires_at=result.session.expires_at,
         employee=EmployeeOut.model_validate(result.employee),

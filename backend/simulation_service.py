@@ -3,6 +3,9 @@
 Every step goes through the same authentication, permission checks, event collection and detection
 engine as a normal employee. Everything it creates is flagged `is_synthetic` and can be reset.
 """
+import random
+import secrets
+
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
@@ -58,16 +61,54 @@ SCENARIOS = [
      "default_target": "alice.morgan",
      "steps": ["unfamiliar_login", "restricted_access", "large_export", "admin_login_failures", "external_transfer"],
      "description": "A standard employee account: restricted access is denied by the backend, exports are limited to its own data."},
+    {"id": "randomized_campaign", "name": "Randomised campaign - varying stages, order and size",
+     "default_target": "david.kumar", "steps": STEP_IDS, "randomized": True,
+     "description": "Each run picks which stages happen, their order, the export size, the number of failed logins and the "
+                    "probed resources from a seed (returned, so a run can be replayed). Stages the account is not entitled to "
+                    "are still denied by the backend."},
 ]
 SCENARIO_IDS = {s["id"] for s in SCENARIOS}
 
 
 class _Sim:
-    def __init__(self, db: Session, admin: Employee, target: Employee, ip: str, scenario: str, records: int = EXPORT_RECORDS):
+    def __init__(self, db: Session, admin: Employee, target: Employee, ip: str, scenario: str, records: int = EXPORT_RECORDS,
+                 failed_attempts: int = 5, probe_resources: list[str] | None = None):
         self.db, self.admin, self.target, self.ip, self.scenario, self.records = db, admin, target, ip, scenario, records
+        self.failed_attempts = failed_attempts
+        self.probe_resources = probe_resources or PROBE_RESOURCES
 
     def meta(self, step: str) -> dict:
         return {"sim_step": step, "scenario": self.scenario, "simulated_by": self.admin.username}
+
+
+def plan_scenario(scenario: str, records: int = EXPORT_RECORDS, seed: int | None = None) -> dict:
+    """Concrete steps and parameters for a run.
+
+    The fixed scenarios are identical every time. `randomized_campaign` draws which stages happen, their order, the
+    export size, the number of failed logins and the probed resources from a seeded generator, so a run can be
+    replayed by reusing its seed. The simulated attacker still goes through the normal backend for every step.
+    """
+    definition = next(s for s in SCENARIOS if s["id"] == scenario)
+    if not definition.get("randomized"):
+        return {"scenario": scenario, "seed": None, "steps": list(definition["steps"]), "records": records,
+                "failed_attempts": 5, "probe_resources": list(PROBE_RESOURCES)}
+    seed = secrets.randbelow(2**31) if seed is None else seed
+    rng = random.Random(seed)
+    middle = [step for step, p in (("restricted_access", 0.85), ("large_export", 0.9), ("admin_login_failures", 0.7)) if rng.random() < p]
+    if rng.random() < 0.6:
+        middle += ["create_privileged_account", "privileged_login"]
+    if not {"restricted_access", "large_export"} & set(middle):
+        middle.append("large_export")
+    rng.shuffle(middle)
+    if "create_privileged_account" in middle and middle.index("privileged_login") < middle.index("create_privileged_account"):
+        a, b = middle.index("create_privileged_account"), middle.index("privileged_login")
+        middle[a], middle[b] = middle[b], middle[a]
+    steps = ["unfamiliar_login", *middle]
+    if rng.random() < 0.8:       # exfiltration normally follows collection, but some campaigns never reach it
+        steps.insert(rng.randint(steps.index("large_export") + 1, len(steps)) if "large_export" in steps else len(steps),
+                     "external_transfer")
+    return {"scenario": scenario, "seed": seed, "steps": steps, "records": max(500, int(records * rng.uniform(0.4, 1.6))),
+            "failed_attempts": rng.randint(3, 8), "probe_resources": rng.sample(PROBE_RESOURCES, rng.randint(3, 5))}
 
 
 def _active_session(sim: _Sim, employee: Employee) -> EmployeeSession | None:
@@ -120,7 +161,7 @@ def _step_unfamiliar_login(sim: _Sim) -> dict:
 def _step_restricted_access(sim: _Sim) -> dict:
     session = _need_session(sim, sim.target)
     outcomes = []
-    for resource in PROBE_RESOURCES:
+    for resource in sim.probe_resources:
         _, permitted = access_resource(
             sim.db, sim.target, resource, "view", source_ip=sim.ip, session=session, record_count=25,
             details=sim.meta("restricted_access"), device_info=SIM_DEVICE, is_synthetic=True, scenario=sim.scenario,
@@ -142,14 +183,14 @@ def _step_large_export(sim: _Sim) -> dict:
 
 def _step_admin_login_failures(sim: _Sim) -> dict:
     session = _need_session(sim, sim.target)
-    for attempt in range(1, 6):
+    for attempt in range(1, sim.failed_attempts + 1):
         record_event(
             sim.db, sim.target, "login_failed", source_ip=sim.ip, resource="it-admin-console", outcome="failure",
             details={**sim.meta("admin_login_failures"), "auth_target": "administrator_console", "attempt": attempt,
                      "reason": "bad_password"},
             session=session, device_info=SIM_DEVICE, scenario=sim.scenario,
         )
-    return {"status": "completed", "detail": "5 failed administrator console logins recorded"}
+    return {"status": "completed", "detail": f"{sim.failed_attempts} failed administrator console logins recorded"}
 
 
 def _step_create_privileged_account(sim: _Sim) -> dict:
@@ -211,11 +252,12 @@ _HANDLERS = {
 
 
 def run_step(db: Session, admin: Employee, target: Employee, step: str, ip: str, scenario: str,
-             records: int = EXPORT_RECORDS) -> dict:
+             records: int = EXPORT_RECORDS, *, plan: dict | None = None) -> dict:
     if step not in _HANDLERS:
         raise ServiceError(422, f"Unknown simulation step '{step}'")
     before = db.scalar(select(func.max(SecurityEvent.id))) or 0
-    sim = _Sim(db, admin, target, ip, scenario, records)
+    extra = {k: plan[k] for k in ("failed_attempts", "probe_resources") if plan} if plan else {}
+    sim = _Sim(db, admin, target, ip, scenario, records, **extra)
     try:
         outcome = _HANDLERS[step](sim)
     except ServiceError as exc:
@@ -228,9 +270,13 @@ def run_step(db: Session, admin: Employee, target: Employee, step: str, ip: str,
     return {"step": step, **outcome, "event_ids": events}
 
 
-def run_scenario(db: Session, admin: Employee, target: Employee, ip: str, scenario: str, records: int = EXPORT_RECORDS) -> list[dict]:
-    steps = next(s["steps"] for s in SCENARIOS if s["id"] == scenario)
-    return [run_step(db, admin, target, step, ip, scenario, records) for step in steps]
+def run_plan(db: Session, admin: Employee, target: Employee, ip: str, plan: dict) -> list[dict]:
+    return [run_step(db, admin, target, step, ip, plan["scenario"], plan["records"], plan=plan) for step in plan["steps"]]
+
+
+def run_scenario(db: Session, admin: Employee, target: Employee, ip: str, scenario: str, records: int = EXPORT_RECORDS,
+                 seed: int | None = None) -> list[dict]:
+    return run_plan(db, admin, target, ip, plan_scenario(scenario, records, seed))
 
 
 def status(db: Session) -> dict:

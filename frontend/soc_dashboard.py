@@ -502,8 +502,9 @@ def _locked(case: dict, target: str | None) -> bool:
 
 def containment_panel(d: dict) -> None:
     ui.section("Containment actions")
-    st.caption("Every action needs administrator confirmation and a reason, and is audited. In a simulated attack the action changes "
-               "only the simulated environment (it does not touch a real banking network).")
+    st.caption("Every action needs administrator confirmation and a reason, and is audited. Containment is a controlled "
+               "application simulation: it changes this application's own state only and does not touch any firewall, "
+               "directory service, endpoint or real network.")
     case, resolved = d.get("case_file") or {}, d["status"] == "resolved"
     blocked = {i["ip"] for i in case.get("suspicious_ips", []) if i["blocked"]}
     rows = [a for a in d["recommended_actions"] if a.get("executable", True)]
@@ -714,6 +715,7 @@ def page_response() -> None:
     if centre is None:
         return
     options = {o["action"]: o for o in centre["options"]}
+    ui.notice("info", centre.get("scope_notice", "Containment is a controlled application simulation."))
     flash_notice()
     if st.session_state.get("pending"):
         confirmation_panel(options)

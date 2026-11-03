@@ -16,7 +16,7 @@ compromised or misused, and the system must notice that **while it is happening*
 
 1. [Architecture](#architecture)
 2. [Technology stack](#technology-stack)
-3. [Install and run](#install-and-run)
+3. [Install and run](#install-and-run) and [deploy to the cloud](#deploying-to-the-cloud)
 4. [Environment setup](#environment-setup)
 5. [Database initialisation](#database-initialisation)
 6. [Demo credentials](#demo-credentials)
@@ -67,7 +67,7 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | SOC read models | `soc_service.py`, `soc_routes.py` |
 | Simulation | `simulation_service.py`, `simulation_routes.py` |
 | Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (134 tests) |
+| Tests | `tests/` (147 tests) |
 
 ## Technology stack
 
@@ -137,6 +137,10 @@ Copy-Item .env.example .env        # bash: cp .env.example .env
 | `SIMULATION_ENABLED` | `true` | set `false` for "normal" mode; the simulation API then returns 403 to everyone |
 | `SIMULATION_PRIVILEGED_PASSWORD` | `Synthetic#Priv2026` | password given to the privileged account the simulation creates |
 | `MAP_LOOPBACK_TO_WORKSTATION` | `true` | local demo: attribute loopback connections to the employee's registered workstation IP |
+| `TRUSTED_FRONTEND_KEY` | empty (off) | split hosting: shared secret (24+ characters) sent by the dashboards as `X-Frontend-Key`; requests carrying it are attributed to the employee's registered workstation IP |
+| `APP_ENV` | `development` | `production` refuses to start with the demo `SECRET_KEY` (needs 32+ random characters) |
+| `LOGIN_MAX_FAILURES`, `LOGIN_LOCKOUT_SECONDS` | `5`, `300` | failed sign-ins per employee ID before a temporary lockout (HTTP 429) |
+| `API_TIMEOUT_SECONDS` | `20` | how long the dashboards wait for the API (raise it for a free host that sleeps) |
 | `API_HOST`, `API_PORT`, `API_BASE_URL` | `127.0.0.1`, `8000`, `http://127.0.0.1:8000` | where the backend listens and where dashboards find it |
 | `CORRELATION_WINDOW_MINUTES` | `240` | correlation window |
 | `BASELINE_DAYS` | `30` | how much history forms an employee's behavioural baseline |
@@ -193,6 +197,50 @@ python app.py portal        # one dashboard (needs the backend running): portal 
 ```
 
 Stop with Ctrl+C. All state stays in `data/insider_threat.db`.
+
+## Deploying to the cloud
+
+Nothing is deployed for you and this repository contains no deployment URLs. Two supported layouts:
+
+**A. One machine or VM (simplest).** Run `python app.py all` and put a reverse proxy with HTTPS in front of ports
+8501, 8502 and 8503 (WebSocket support is required by Streamlit). Keep the backend on `127.0.0.1`; the dashboards call
+it locally, so the default `MAP_LOOPBACK_TO_WORKSTATION=true` already attributes sessions correctly. Set
+`APP_ENV=production` and a random `SECRET_KEY` (`python -c "import secrets; print(secrets.token_urlsafe(48))"`).
+
+**B. Split hosting: API on Render, dashboards on Streamlit Community Cloud.** The Streamlit apps run on a different
+host from the API, so the API only sees the dashboard server's address for every user. `TRUSTED_FRONTEND_KEY` solves
+that: dashboards send it as `X-Frontend-Key`, and the API then attributes the request to the signed-in employee's
+registered workstation IP (the same rule as loopback locally). Requests without the key are recorded with their real peer
+address, and `X-Forwarded-For` is never trusted. Steps that need **your** accounts:
+
+1. Push this repository to GitHub (it already is: `azmath97/ai-threat-detection`).
+2. Render: *New > Blueprint*, choose the repository. [render.yaml](render.yaml) creates the `westbridge-api` web service
+   with `APP_ENV=production` and generated `SECRET_KEY` and `TRUSTED_FRONTEND_KEY`. When it is live, open
+   `https://<your-service>.onrender.com/api/health` and expect `{"status":"ok",...}`. Copy the service URL and the
+   `TRUSTED_FRONTEND_KEY` value from the service's *Environment* tab.
+3. Streamlit Community Cloud: *Create app* three times from the same repository and branch `main`, with main file
+   `frontend/employee_portal.py`, `frontend/soc_dashboard.py` and `frontend/simulation_console.py`, Python 3.12. In each
+   app's *Advanced settings > Secrets* paste (top-level secrets are exposed to the app as environment variables):
+
+   ```toml
+   API_BASE_URL = "https://<your-service>.onrender.com"
+   TRUSTED_FRONTEND_KEY = "<value copied from Render>"
+   API_TIMEOUT_SECONDS = "60"
+   ```
+4. Check it: sign in to the portal as `EMP-1001`, then open the SOC dashboard as `SEC-9011`. The login event should show
+   source IP `10.20.1.11` (a known address), not the Streamlit server's address.
+
+Things to know before relying on layout B:
+
+* **Free tiers sleep.** The first request after idle time can take a minute, hence `API_TIMEOUT_SECONDS`.
+* **The database is on the API host's disk.** On Render's free plan it is wiped on restart or redeploy; the backend
+  re-seeds and retrains automatically, but investigations and sessions are lost.
+* **Run one backend process.** The baseline cache, the model and the login throttle live in process memory
+  (`render.yaml` starts a single `uvicorn` worker).
+* **The demo passwords are public.** Anyone who can open the SOC or simulation URL can sign in as `SEC-9011` using this
+  README. Restrict who can view those two apps (Streamlit Cloud's sharing settings) and change `data/demo_accounts.py`,
+  or set `SIMULATION_ENABLED=false` on the API.
+* **Vercel cannot host this**: it needs long-running processes and WebSockets, and its filesystem is not persistent.
 
 ## How to simulate an attack
 
@@ -363,20 +411,48 @@ Attack windows are used **only for evaluation**, never for training.
 * **Fallback mode.** If the file is missing, corrupt, from an incompatible scikit-learn version, or its feature names do
   not match, the engine uses `heuristic_score` instead: a noisy-OR of bounded terms over the same features. The
   application keeps working, `GET /api/detection/status` reports which mode is active.
-* **Measured on the held-out synthetic test set (839 windows):**
+* **Volume guard.** An Isolation Forest cannot extrapolate: a download 50x larger than anything in training lands in the
+  same outer leaf as one 3x larger, so a bare bulk export barely moved its score (3.3% recall in the first version).
+  The saved model therefore also stores the largest `download_volume` and `external_transfer_volume` seen in normal
+  training sessions, and the anomaly score is `max(forest score, volume guard)`. The guard is 0 up to 2x that maximum
+  and rises linearly (in log units) to 1 at about 10x further. It is monotonic and has no effect on ordinary sessions.
+  Models saved without a reference (older files) are still loaded and simply have no guard.
+* **Measured on the held-out synthetic test set (839 windows)** with the model produced by `python -m ml.train_model`:
 
   | Metric | Value |
   |---|---|
-  | ROC-AUC | 0.978 |
+  | ROC-AUC | 0.992 |
   | False positives on all normal windows | 2.4% |
   | False positives on hard normals | 6.4% (unfamiliar IP only 11.7%, heavy plausible download 5.0%, after-hours only 3.3%, legitimate admin work 0%) |
-  | Attack recall using the ML score alone | 83.9% |
-  | Mean anomaly score | normal 0.027, attack 0.758 |
+  | Attack recall, Isolation Forest alone | 83.9% (`bulk_export` 3.3%) |
+  | Attack recall, forest plus volume guard | 100% in every attack scenario |
+  | Mean anomaly score | normal 0.027, attack 0.905 |
 
-  Per scenario recall: `brute_force`, `external_transfer`, `full_chain`, `privileged_account` and `restricted_probe`
-  reach 100%. **`bulk_export` alone is only 3.3%**: a large download by itself is not unusual enough in the feature
-  space. That is expected and is exactly why the ML score is only one of five inputs: the `large_export` rule and the
-  correlation with other stages cover it. These figures describe synthetic data and say nothing about real banks.
+  The guard's headroom and span were chosen after seeing that the forest alone missed bulk exports, and the attack sizes
+  in the synthetic data (3,000 to 50,000 records) are ones I generated, so the 100% recall is an optimistic, in-sample
+  figure. It says nothing about real banks. The first external check is the evaluator below.
+
+### Evaluating on a dataset this project did not generate
+
+`ml/evaluate_dataset.py` scores the saved model on any event-level CSV, using the same feature pipeline as the live
+system. It does not train anything.
+
+```powershell
+python -m ml.evaluate_dataset --events path\to\events.csv --history-days 28 --out report.json
+```
+
+Required columns: `employee_id`, `timestamp`, `event_type`, `source_ip`. Optional: `resource`, `outcome`,
+`records_accessed`, `records_downloaded`, `session_id`, `department`, `label` (0/1 per event) and `scenario`. Event types
+and resource ids must be the application's (see `backend/catalog.py`); `--resource-map map.json` renames resources.
+Each employee's first `--history-days` days become the baseline, later events are grouped into sessions, and the report
+gives ROC-AUC, false-positive rate and recall at the chosen threshold (and recall per `scenario`) when labels exist, or
+just the score distribution when they do not. `tests/test_hardening.py` runs it on a CSV generated from the synthetic
+generators, which proves the plumbing only, not real-world accuracy.
+
+**Using a public insider-threat dataset needs you.** The CERT insider-threat datasets (Carnegie Mellon SEI) are not
+included and are not downloaded by this project: obtain one yourself under its terms, convert its logon, file, device
+and email records and its answer key into the CSV above (mapping its resources onto the catalogue ids), and run the
+command. Do not commit the downloaded files. Until that is done, **no figure in this README comes from real data.**
 
 ## Detection rules in detail
 
@@ -506,6 +582,16 @@ The attacker uses the target's stolen password through the normal login code pat
 The second scenario, `finance_data_theft` (Alice Morgan), runs steps 1 to 4 and 7: a standard employee cannot create
 accounts, restricted access is denied by the backend and exports are limited to her own data.
 
+The two scenarios above are fixed, so they are predictable by design (they are what the tests and the demo rely on). The
+third, **`randomized_campaign`**, is not: each run draws, from a seed, which stages happen (login always first), their
+order (account creation always precedes the login with it; a transfer always follows an export), the export size
+(0.4x to 1.6x the chosen record count, at least 500), the number of failed administrator logins (3 to 8) and which 3 to 5
+resources are probed. The seed is returned by `POST /api/simulation/run` (`"seed"`, `"plan"`) and can be sent back to
+replay the same campaign. Every stage still goes through the real login, permission checks, event pipeline and detection
+engine, so a stage the account is not entitled to is denied exactly as in the fixed scenarios, and a campaign that never
+reaches an export or a transfer is scored accordingly. It varies the sequence; it is still a scripted simulation, not an
+adaptive attacker.
+
 The critical alert appears by step 3 or 4, **before step 7**. Step 7 is stored as its own `external_transfer` event with
 the records counted separately from the earlier export, so the exposure shows `confirmed_export` first and
 `confirmed_external_transfer` only after step 7.
@@ -524,6 +610,9 @@ controls below work inside the application and the simulation.
 | Random session tokens, only an HMAC is stored, 480-minute lifetime, revocation | stolen database revealing live sessions; sessions that never expire | `security.py` |
 | Backend decides identity, IP and device | an attacker choosing a different employee ID or IP in a request | `security.get_auth`, `resolve_ip` |
 | Role-based access control (`security_admin` vs `employee`) | employees reaching the SOC, simulation or response endpoints | `require_admin` |
+| Failed-login throttle (HTTP 429 with `Retry-After`) | online password guessing at `/api/auth/login` | `rate_limit.py`, `main.login` |
+| `APP_ENV=production` start-up check | running with the built-in demo `SECRET_KEY` | `config.validate_for_environment` |
+| Shared `TRUSTED_FRONTEND_KEY` (constant-time compare) | an outside caller being attributed to a workstation IP | `security.is_trusted_frontend` |
 | Per-resource permission checks on every access | reading or exporting data the role is not granted | `event_service.has_access` |
 | Self-only profile endpoint | reading another employee's private record | `portal_routes.py` |
 | Input validation (Pydantic), integer overflow limits, safe error handling | malformed requests, crashes, stack-trace leaks | `schemas.py`, `main.py` |
@@ -556,9 +645,12 @@ records who, when and why, changes backend state and writes an audit log. Failur
 
 ### What is deliberately not covered
 
-* No rate limiting, account throttling, MFA or password reset. Brute force is *detected* (burst rules) but not slowed down.
+* **Login throttling, but no MFA or password reset.** After `LOGIN_MAX_FAILURES` (5) failed sign-ins for one employee ID,
+  further attempts get HTTP 429 for `LOGIN_LOCKOUT_SECONDS` (300), even with the right password, and the lockout is
+  audited. It is in memory (lost on restart, per process) and per account, so an attacker can also lock a victim out for
+  a few minutes. Brute force is additionally *detected* by the burst rules.
 * Containment only changes application state. A real deployment would connect it to a firewall, identity provider and
-  endpoint agents.
+  endpoint agents; no such integration exists or is configured here.
 * The model learns from synthetic data; production use would need real baselines, tuning and review of false positives.
 * Detection needs events: an attacker who never touches the application produces nothing to analyse.
 
@@ -655,7 +747,7 @@ Interactive documentation: `/docs`. Send `Authorization: Bearer <token>` with th
 | GET | `/api/soc/version`, `/overview`, `/confidence-history`, `/events`, `/employees`, `/investigations[/{id}]`, `/scopes`, `/timeline`, `/graph`, `/response`, `/audit` | admin | SOC read models |
 | GET | `/api/dashboard/stats`, `/api/audit-logs` | admin | KPIs, audit trail |
 | GET / POST | `/api/detection/status`, `/reload`, `/retrain` | admin | model, thresholds, rules |
-| GET / POST | `/api/simulation/scenarios`, `/status`, `/steps`, `/run`, `/reset` | admin, simulation enabled | attack simulation (`records` sets the export size) |
+| GET / POST | `/api/simulation/scenarios`, `/status`, `/steps`, `/run`, `/reset` | admin, simulation enabled | attack simulation (`records` sets the export size; `scenario: randomized_campaign` with an optional `seed` randomises the run) |
 
 Timestamps are stored in UTC and returned as `timestamp` (UTC) and `timestamp_local`.
 
@@ -686,7 +778,7 @@ backend/                     FastAPI app, models, detection, correlation, invest
 data/                        demo_accounts.py (credentials), seed_data.py (history), the SQLite file (git-ignored)
 ml/                          features.py, synthetic_data.py, train_model.py, anomaly_detector.py, artifacts/ (git-ignored)
 frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       134 pytest tests
+tests/                       147 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
 requirements.txt  .env.example
 ```
@@ -694,7 +786,7 @@ requirements.txt  .env.example
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 134 tests, 1 to 2.5 minutes
+python -m pytest tests -q          # 147 tests, about one minute
 ```
 
 The suite uses a temporary database and a separate backend process, and an autouse fixture resets the simulation and
@@ -715,16 +807,23 @@ removes rows each test creates. It covers:
 
 ## Known limitations
 
-* **Local demonstration only.** It is not hardened for production: HTTP only, no MFA, no password reset, no login rate
-  limiting or account throttling, and the default `SECRET_KEY` must be changed.
+* **Local demonstration only.** It is not hardened for production: HTTP unless a host adds TLS, no MFA, no password reset,
+  and the demo passwords are public in this README. `APP_ENV=production` makes the backend refuse to start with the
+  built-in `SECRET_KEY`, but it does not make the demo accounts safe: change `data/demo_accounts.py` before exposing it.
 * **Synthetic data.** The model is trained on generated sessions; its metrics, the rule severities and the scoring weights
-  are hand-tuned for the case study and would need real data and tuning before any real use.
-* **ML alone misses a bare bulk export** (3.3% recall); the `large_export` rule and correlation cover that case.
+  are hand-tuned for the case study and would need real data and tuning before any real use. The five confidence weights
+  are not learned from labelled outcomes.
+* **The volume guard was tuned against the synthetic attacks** (see Machine learning), so its recall is in-sample.
 * **Simulated containment.** Blocking, isolating, locking and privilege removal change application state only; there is no
-  firewall, directory or endpoint integration.
+  firewall, directory or endpoint integration, and the SOC dashboard says so on the Response Centre page.
 * **Source IPs:** the backend trusts only the TCP peer. On one machine every client is loopback, so
-  `MAP_LOOPBACK_TO_WORKSTATION` attributes it to the employee's registered workstation IP; `X-Forwarded-For` is ignored.
-* **SQLite and polling.** One local database file and 3-second polling suit a demo, not concurrent multi-site use.
+  `MAP_LOOPBACK_TO_WORKSTATION` attributes it to the employee's registered workstation IP; with split hosting the
+  shared `TRUSTED_FRONTEND_KEY` does the same for requests from your own dashboards. `X-Forwarded-For` is ignored. Anyone
+  holding the key can have their request attributed to a workstation IP, so keep it secret.
+* **SQLite, polling and single-process state.** One local database file and 3-second polling suit a demo, not concurrent
+  multi-site use. The baseline cache, the detector and the login throttle live in one process's memory, so run a single
+  backend worker. `DATABASE_URL` accepts other SQLAlchemy URLs, but only SQLite is tested here. Investigation upserts are
+  not guarded against two simultaneous critical events for the same employee.
 * **One active investigation per employee.** Once resolved, a later critical alert opens a new one.
 * **Explanations are rule-based.** They state only what the stored events show; an LLM is not used.
 * **Evidence retention.** Nothing deletes real events, but *Reset simulation* deletes synthetic events and investigations,

@@ -34,7 +34,7 @@ from backend.models import (
     SecurityAlert,
     SecurityEvent,
 )
-from backend.response_service import ACTION_INFO, NEEDS_CONFIRMATION
+from backend.response_service import ACTION_INFO, NEEDS_CONFIRMATION, SCOPE_NOTICE
 
 ACTIVE_INVESTIGATION = ("open", "contained")
 ATTACK_TYPE_LABELS = {key: label for key, (label, _rank) in investigation_explainer.ATTACK_TYPES.items()}
@@ -501,6 +501,7 @@ def response_centre(db: Session) -> dict:
         ContainmentAction.id.in_([c.action_id for c in active if c.action_id] or [0])))}
     history = db.scalars(select(ContainmentAction).order_by(ContainmentAction.id.desc()).limit(40)).all()
     return {
+        "scope_notice": SCOPE_NOTICE,
         "threats": items,
         "controls": [{"id": c.id, "kind": c.kind, "value": c.value, "label": RESOURCES[c.value]["name"] if c.kind == "isolated_system" else c.value,
                       "reason": c.reason, "by": codes.get(c.created_by), "created_at": iso(c.created_at),

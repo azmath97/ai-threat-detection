@@ -60,6 +60,9 @@ def restore_state(request):
     with sqlite3.connect(db_path) as con:
         marks = {t: con.execute(f"select coalesce(max(id), 0) from {t}").fetchone()[0] for t in tables}
     yield
+    from backend.rate_limit import login_throttle
+
+    login_throttle.reset()
     client.post("/api/simulation/reset", headers=admin)
     with sqlite3.connect(db_path) as con:
         con.execute("delete from investigation_evidence where investigation_id > ?", (marks["attack_investigations"],))

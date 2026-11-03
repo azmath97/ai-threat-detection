@@ -2,7 +2,7 @@
 import logging
 import threading
 from dataclasses import dataclass
-from math import log1p, prod
+from math import log as _ln, log1p, prod
 from pathlib import Path
 
 from backend.config import get_settings
@@ -16,9 +16,35 @@ class AnomalyResult:
     score: float          # 0 (typical) .. 1 (highly anomalous), calibrated against normal training data
     raw: float | None     # raw Isolation Forest anomaly score (higher = more anomalous); None in fallback mode
     mode: str             # "isolation_forest" | "fallback"
+    volume_guard: float = 0.0   # 0..1 term for volumes beyond anything seen in training (0 in fallback mode)
 
     def as_dict(self) -> dict:
-        return {"score": round(self.score, 4), "raw": None if self.raw is None else round(self.raw, 4), "mode": self.mode}
+        return {"score": round(self.score, 4), "raw": None if self.raw is None else round(self.raw, 4), "mode": self.mode,
+                "volume_guard": round(self.volume_guard, 4)}
+
+
+# An Isolation Forest cannot extrapolate: a download 50x larger than anything in training lands in the same outer
+# leaf as one 3x larger, so a bare bulk export barely moves its score. The volume guard adds a monotonic term for
+# volumes above the largest value seen in normal training sessions (plus a 2x headroom). It reaches 1.0 at
+# VOLUME_GUARD_SPAN (in log units) beyond that, i.e. about 10x more records.
+VOLUME_FEATURES = ("download_volume", "external_transfer_volume")
+VOLUME_GUARD_HEADROOM = _ln(2)     # volumes up to 2x the training maximum are not penalised
+VOLUME_GUARD_SPAN = _ln(10)
+
+
+def volume_reference(rows: list[dict[str, float]]) -> dict[str, float]:
+    """Largest value of each volume feature over normal training windows."""
+    return {name: max((r[name] for r in rows), default=0.0) for name in VOLUME_FEATURES}
+
+
+def volume_guard(features: dict[str, float], reference: dict[str, float] | None) -> float:
+    if not reference:
+        return 0.0
+    return max(
+        (min(1.0, max(0.0, (features[name] - ref - VOLUME_GUARD_HEADROOM) / VOLUME_GUARD_SPAN))
+         for name, ref in reference.items() if name in features),
+        default=0.0,
+    )
 
 
 def heuristic_score(f: dict[str, float]) -> float:
@@ -70,14 +96,16 @@ class AnomalyDetector:
             return AnomalyResult(heuristic_score(features), None, "fallback")
         raw = float(-self._bundle["model"].score_samples([vectorize(features)])[0])
         lo, hi = self._bundle["calibration"]["lo"], self._bundle["calibration"]["hi"]
-        return AnomalyResult(min(1.0, max(0.0, (raw - lo) / (hi - lo))), raw, "isolation_forest")
+        forest = min(1.0, max(0.0, (raw - lo) / (hi - lo)))
+        guard = volume_guard(features, self._bundle.get("volume_reference"))
+        return AnomalyResult(max(forest, guard), raw, "isolation_forest", guard)
 
     def status(self) -> dict:
         info = {"mode": "isolation_forest" if self.available else "fallback", "model_path": str(self.path),
                 "error": self.error, "feature_names": FEATURE_NAMES}
         if self._bundle:
             info.update({k: self._bundle.get(k) for k in ("trained_at", "n_training_windows", "trained_on", "metrics",
-                                                          "calibration", "sklearn_version")})
+                                                          "calibration", "sklearn_version", "volume_reference")})
         return info
 
 

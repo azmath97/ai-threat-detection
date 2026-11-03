@@ -34,6 +34,10 @@ class Settings:
     auto_seed: bool
     simulation_enabled: bool
     map_loopback_to_workstation: bool
+    trusted_frontend_key: str
+    app_env: str
+    login_max_failures: int
+    login_lockout_seconds: int
     simulation_privileged_password: str
     password_hash_iterations: int
     correlation_window_minutes: int
@@ -63,13 +67,17 @@ def get_settings() -> Settings:
         db_url = f"sqlite:///{(BASE_DIR / db_url[len('sqlite:///./'):]).as_posix()}"
     return Settings(
         database_url=db_url,
-        secret_key=_str("SECRET_KEY", "dev-only-secret-change-me"),
+        secret_key=_str("SECRET_KEY", "dev-only-secret-change-me"),  # DEFAULT_SECRET_KEY; rejected when APP_ENV=production
         session_ttl_minutes=_int("SESSION_TTL_MINUTES", 480),
         display_timezone=_str("DISPLAY_TIMEZONE", "Asia/Kolkata"),
         cors_origins=[o.strip() for o in _str("CORS_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501,http://localhost:8503,http://127.0.0.1:8503").split(",") if o.strip()],
         auto_seed=_bool("AUTO_SEED", True),
         simulation_enabled=_bool("SIMULATION_ENABLED", True),
         map_loopback_to_workstation=_bool("MAP_LOOPBACK_TO_WORKSTATION", True),
+        trusted_frontend_key=_str("TRUSTED_FRONTEND_KEY", ""),
+        app_env=_str("APP_ENV", "development").strip().lower(),
+        login_max_failures=_int("LOGIN_MAX_FAILURES", 5),
+        login_lockout_seconds=_int("LOGIN_LOCKOUT_SECONDS", 300),
         simulation_privileged_password=_str("SIMULATION_PRIVILEGED_PASSWORD", "Synthetic#Priv2026"),
         password_hash_iterations=_int("PASSWORD_HASH_ITERATIONS", 260_000),
         correlation_window_minutes=_int("CORRELATION_WINDOW_MINUTES", 240),
@@ -86,6 +94,20 @@ def get_settings() -> Settings:
         business_hours_start=_int("BUSINESS_HOURS_START", 7),
         business_hours_end=_int("BUSINESS_HOURS_END", 19),
     )
+
+
+DEFAULT_SECRET_KEY = "dev-only-secret-change-me"
+
+
+def validate_for_environment(settings: Settings | None = None) -> None:
+    """Refuse to start in production with the built-in demo secret or a short secret."""
+    s = settings or get_settings()
+    if s.app_env != "production":
+        return
+    if s.secret_key == DEFAULT_SECRET_KEY or s.secret_key.startswith("change-me") or len(s.secret_key) < 32:
+        raise RuntimeError("APP_ENV=production requires SECRET_KEY to be set to a random value of at least 32 characters")
+    if s.trusted_frontend_key and len(s.trusted_frontend_key) < 24:
+        raise RuntimeError("TRUSTED_FRONTEND_KEY must be at least 24 characters")
 
 
 def to_local(dt: datetime) -> datetime:

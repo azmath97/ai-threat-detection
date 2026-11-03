@@ -3,8 +3,16 @@ import os
 
 import requests
 
+def _timeout() -> float:
+    try:
+        return float(os.getenv("API_TIMEOUT_SECONDS", "20"))
+    except ValueError:
+        return 20.0
+
+
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
-TIMEOUT = 20
+TIMEOUT = _timeout()          # raise it on free hosts whose API sleeps when idle
+FRONTEND_KEY = os.getenv("TRUSTED_FRONTEND_KEY", "")
 
 
 class ApiError(Exception):
@@ -25,6 +33,8 @@ class ApiClient:
             headers["Authorization"] = f"Bearer {self.token}"
         if self.device:
             headers["X-Device-Info"] = self.device
+        if FRONTEND_KEY:
+            headers["X-Frontend-Key"] = FRONTEND_KEY
         try:
             response = requests.request(method, f"{API_BASE_URL}{path}", headers=headers, timeout=TIMEOUT, **kwargs)
         except requests.RequestException as exc:

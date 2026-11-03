@@ -87,6 +87,9 @@ def run_and_log(action) -> None:
     for r in results:
         log.insert(0, {"step": r["step"], "status": STATUS_TEXT.get(r["status"], r["status"]), "detail": r["detail"],
                        "events": len(r["event_ids"])})
+    if outcome.get("seed") is not None:
+        log.insert(0, {"step": "run plan", "status": "Seed " + str(outcome["seed"]),
+                       "detail": " > ".join(outcome.get("plan", [])), "events": 0})
 
 
 def console() -> None:
@@ -132,7 +135,8 @@ def console() -> None:
 
     ui.section("Run")
     run_col, reset_col = st.columns([1, 1])
-    if run_col.button(f"Run complete scenario ({len(scenario['steps'])} steps)", type="primary", disabled=not ip_valid):
+    steps_label = "varies each run" if scenario.get("randomized") else f"{len(scenario['steps'])} steps"
+    if run_col.button(f"Run complete scenario ({steps_label})", type="primary", disabled=not ip_valid):
         run_and_log(lambda: api().sim_run(target["id"], source_ip.strip(), scenario["id"], records))
         st.rerun()
     confirm = reset_col.checkbox("Confirm reset: removes all synthetic data and undoes containment on affected accounts")

@@ -72,16 +72,29 @@ def normalize_ip(value: str | None) -> str | None:
         return None
 
 
+def is_trusted_frontend(request: Request) -> bool:
+    """True when the request carries the shared key that only our own dashboards hold (TRUSTED_FRONTEND_KEY)."""
+    expected = get_settings().trusted_frontend_key
+    provided = request.headers.get("x-frontend-key", "")
+    return bool(expected) and hmac.compare_digest(provided.encode(), expected.encode())
+
+
 def resolve_ip(request: Request, employee: Employee | None = None) -> str:
     """Source IP as seen by the backend; clients cannot supply it.
 
     Everything runs on one machine in the local demo, so loopback connections are attributed to the
-    employee's registered workstation address (MAP_LOOPBACK_TO_WORKSTATION=true). Any other peer
-    address is recorded as-is.
+    employee's registered workstation address (MAP_LOOPBACK_TO_WORKSTATION=true). When the dashboards run on a
+    different host (for example Streamlit Cloud calling a hosted API) the backend only sees the dashboard
+    server's address, so a request that proves it comes from our own dashboards (X-Frontend-Key matching
+    TRUSTED_FRONTEND_KEY) is attributed the same way. Any other peer address is recorded as-is, and
+    X-Forwarded-For is never used.
     """
     host = normalize_ip(request.client.host if request.client else None)
     is_local = host is None or ipaddress.ip_address(host).is_loopback
-    if is_local and employee is not None and employee.known_ips and get_settings().map_loopback_to_workstation:
+    has_workstation = employee is not None and bool(employee.known_ips)
+    if has_workstation and is_local and get_settings().map_loopback_to_workstation:
+        return employee.known_ips[0]
+    if has_workstation and is_trusted_frontend(request):
         return employee.known_ips[0]
     return host or "0.0.0.0"
 

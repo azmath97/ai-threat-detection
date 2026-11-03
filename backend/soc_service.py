@@ -377,7 +377,9 @@ def investigation_detail(db: Session, investigation_id: int) -> dict:
             "independent_stages": live.counted_stages,
         },
         "containment_actions": [{"id": a.id, "action": a.action_type, "target": codes.get(a.employee_id), "reason": a.reason,
-                                 "by": codes.get(a.performed_by), "at": iso(a.created_at), "details": a.details} for a in actions],
+                                 "by": codes.get(a.performed_by), "at": iso(a.created_at), "details": a.details,
+                                 "result": a.result, "alert_id": a.alert_id, "status_label": a.status_label,
+                                 "simulated": True} for a in actions],
     }
 
 
@@ -547,7 +549,8 @@ def response_centre(db: Session) -> dict:
                       "employee_pk": origin.get(c.action_id, c.created_by)} for c in active],
         "history": [{"id": a.id, "action": a.action_type, "label": ACTION_INFO[a.action_type][0], "employee_id": codes.get(a.employee_id),
                      "by": codes.get(a.performed_by), "reason": a.reason, "at": iso(a.created_at), "details": a.details,
-                     "investigation_id": a.investigation_id} for a in history],
+                     "investigation_id": a.investigation_id, "alert_id": a.alert_id, "result": a.result,
+                     "status_label": a.status_label, "simulated": True} for a in history],
         "options": [{"action": k, "label": v[0], "description": v[1], "needs": v[2], "needs_confirmation": k in NEEDS_CONFIRMATION}
                     for k, v in ACTION_INFO.items()],
         "systems": [{"id": rid, "label": meta["name"]} for rid, meta in RESOURCES.items() if not is_self_service(rid)],

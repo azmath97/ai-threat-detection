@@ -2,7 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
@@ -73,6 +73,7 @@ from backend.schemas import (
     RiskAssessRequest,
     RiskDetailOut,
 )
+from backend.containment_guard import containment_admin
 from backend.security import AuthContext, device_info, get_auth, require_admin, resolve_ip
 from ml.anomaly_detector import ensure_model, get_detector, reload_detector
 
@@ -557,13 +558,19 @@ def update_investigation(
 # ---------------------------------------------------------------- containment
 @app.post("/api/containment", response_model=ContainmentOut, status_code=status.HTTP_201_CREATED, tags=["containment"])
 def create_containment(
-    body: ContainmentRequest, request: Request, auth: AuthContext = Depends(require_admin), db: Session = Depends(get_db)
+    body: ContainmentRequest, request: Request, response: Response, auth: AuthContext = Depends(containment_admin),
+    db: Session = Depends(get_db),
 ):
+    """Run a simulated containment action against this application's own records. A retry with the same
+    `idempotency_key` returns the original action with HTTP 200 and `replayed: true`."""
     target = _get_employee_or_404(db, body.employee_id)
-    return response_service.apply_action(
+    action = response_service.apply_action(
         db, auth.employee, target, body.action_type, body.reason, body.investigation_id, ip=resolve_ip(request, auth.employee),
-        confirm=body.confirm, value=body.target,
+        confirm=body.confirm, value=body.target, alert_id=body.alert_id, idempotency_key=body.idempotency_key,
     )
+    if getattr(action, "replayed", False):
+        response.status_code = status.HTTP_200_OK
+    return action
 
 
 @app.get("/api/containment", response_model=list[ContainmentOut], tags=["containment"])

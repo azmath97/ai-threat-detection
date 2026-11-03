@@ -97,6 +97,8 @@ class InvestigationUpdate(BaseModel):
 class InvestigationResolve(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
     confirm: bool = Field(default=False, description="Must be true to resolve")
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$",
+                                        description="Retrying with the same key returns the original action")
 
 
 class ContainmentRequest(BaseModel):
@@ -104,8 +106,11 @@ class ContainmentRequest(BaseModel):
     action_type: str
     reason: str = Field(min_length=3, max_length=500)
     investigation_id: int | None = Field(default=None, gt=0)
+    alert_id: int | None = Field(default=None, gt=0, description="The alert this simulated action responds to")
     confirm: bool = Field(default=False, description="Must be true for disruptive actions")
     target: str | None = Field(default=None, max_length=64, description="IP address or system for block_ip / isolate_system")
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$",
+                                        description="Retrying with the same key returns the original action instead of repeating it")
 
     @field_validator("action_type")
     @classmethod
@@ -285,11 +290,21 @@ class AlertOut(APIModel):
 class ContainmentOut(APIModel):
     id: int
     investigation_id: int | None
+    alert_id: int | None = None
     employee_id: int
     action_type: str
     status: str
+    status_label: str = "Simulation completed"
     reason: str
     performed_by: int
+    performed_by_username: str | None = None
+    simulated: bool = True
+    scope: str | None = None
+    result: str | None = None
+    effects: list[str] = []
+    external_systems_contacted: list[str] = []
+    idempotency_key: str | None = None
+    replayed: bool = False
     details: dict[str, Any]
     created_at: datetime
 

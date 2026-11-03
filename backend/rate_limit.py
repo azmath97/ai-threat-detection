@@ -56,3 +56,30 @@ class LoginThrottle:
 
 
 login_throttle = LoginThrottle()
+
+
+class ActionLimiter:
+    """Sliding-window cap on containment requests per administrator (in memory, per process)."""
+
+    def __init__(self) -> None:
+        self._hits: dict[int, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def check(self, admin_id: int) -> int:
+        """Record a request. Returns 0 if allowed, otherwise the seconds to wait."""
+        limit, now = get_settings().containment_max_per_minute, time.monotonic()
+        with self._lock:
+            hits = self._hits.setdefault(admin_id, deque())
+            while hits and now - hits[0] > 60:
+                hits.popleft()
+            if len(hits) >= limit:
+                return int(60 - (now - hits[0])) + 1
+            hits.append(now)
+            return 0
+
+    def reset(self) -> None:
+        with self._lock:
+            self._hits.clear()
+
+
+containment_limiter = ActionLimiter()

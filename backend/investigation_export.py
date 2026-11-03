@@ -92,8 +92,9 @@ def build(db: Session, investigation: AttackInvestigation, admin: Employee) -> d
             "format_version": FORMAT_VERSION, "generated_at": _times(utcnow()), "generated_by": admin.employee_code,
             "timezone": get_settings().display_timezone, "investigation_id": inv.id,
             "synthetic": inv.is_synthetic or any(e["synthetic"] for e in events),
-            "notice": "Synthetic data from a local simulation. Containment actions affected only the simulated environment, "
-                      "not a real banking network." if inv.is_synthetic else "Evidence export for a single investigation.",
+            "notice": ("Synthetic data from a local simulation. Containment actions affected only the simulated environment, "
+                       "not a real banking network." if inv.is_synthetic else "Evidence export for a single investigation.")
+                      + " Containment actions in this report are simulations that changed only this application's own records.",
         },
         "incident_summary": {
             "investigation_id": inv.id, "employee_id": employee.employee_code, "department": employee.department,
@@ -117,8 +118,10 @@ def build(db: Session, investigation: AttackInvestigation, admin: Employee) -> d
                                 "level": a.level, "stage": a.stage, "ml_score": a.ml_score} for a in assessments],
         "data_exposure_assessment": {**(inv.exposure or {}), "case_totals": case.get("data", {})},
         "containment_actions": [{"action_id": a.id, "action": a.action_type, "target_employee_id": codes.get(a.employee_id),
-                                 "investigation_id": a.investigation_id, "status": a.status, "reason": a.reason,
-                                 "performed_by": codes.get(a.performed_by), "timestamp": _times(a.created_at), "details": a.details}
+                                 "investigation_id": a.investigation_id, "alert_id": a.alert_id, "status": a.status,
+                                 "status_label": a.status_label, "simulated": True, "scope": a.scope, "reason": a.reason,
+                                 "result": a.result, "performed_by": codes.get(a.performed_by), "timestamp": _times(a.created_at),
+                                 "details": a.details}
                                 for a in actions],
         "investigation_findings": inv.explanation,
         "evidence_integrity": {**integrity, "events_with_issues": sorted(bad)},

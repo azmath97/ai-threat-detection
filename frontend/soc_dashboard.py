@@ -6,6 +6,7 @@ the navigation.
 """
 import sys
 import time
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -30,9 +31,9 @@ EVENT_TYPES = ["All event types", "login", "login_failed", "logout", "resource_a
                "directory_search", "administrative_action", "external_transfer", "permission_change_attempt"]
 COMPONENT_LABELS = {"ml": "ML anomaly score", "rules": "Rule severity", "correlation": "Correlated evidence",
                     "baseline": "Behavioural baseline", "stage": "Attack stage"}
-ACTION_LABELS = {"revoke_sessions": "Revoke active sessions", "lock_account": "Disable account",
-                 "restrict_access": "Restrict sensitive access", "remove_privileges": "Remove unauthorised privileges",
-                 "block_ip": "Block IP address", "isolate_system": "Isolate system"}
+ACTION_LABELS = {"revoke_sessions": "Revoke sessions (simulated)", "lock_account": "Disable account (simulated)",
+                 "restrict_access": "Restrict sensitive access (simulated)", "remove_privileges": "Remove privileges (simulated)",
+                 "block_ip": "Block IP in this application (simulated)", "isolate_system": "Isolate system record (simulated)"}
 EXPOSURE_ROWS = [("sensitive_records_accessed", "Sensitive records accessed"), ("records_exported", "Records exported"),
                  ("records_potentially_exposed", "Records potentially exposed"),
                  ("records_in_external_transfers", "Records in external transfers")]
@@ -198,7 +199,7 @@ def render_overview() -> None:
                  f"{k['events_24h']:,} events in 24 h", f"Last event {short(top['last_event_at']['local'])}"],
                 tone="alert" if top["level"] == "critical" else "")
     else:
-        ui.hero("Threat posture", "All clear", "No employee is above the Normal threshold. Detection is running on every new event.",
+        ui.hero("Threat posture", "No active threats", "No employee is above the Normal threshold. Detection is running on every new event.",
                 [f"{k['total_events']:,} events monitored", f"{k['events_24h']:,} in the last 24 h"])
     tiles = [
         ("Total security events", f"{k['total_events']:,}", f"{k['events_24h']:,} in the last 24 h", "", "activity",
@@ -421,10 +422,12 @@ def render_investigation(inv_id: int) -> None:
     ui.section("Indicators")
     st.markdown("\n".join(f"- {i}" for i in d["indicators"]) or "None")
     containment_panel(d)
-    ui.section("Containment history")
-    ui.table([{"time": short(c["at"]["local"]), "action": c["action"].replace("_", " "), "target": c["target"], "by": c["by"],
-               "reason": c["reason"]} for c in d["containment_actions"]],
-             {"time": "Time", "action": "Action", "target": "Target", "by": "Administrator", "reason": "Reason"})
+    ui.section("Simulated containment history")
+    ui.table([{"time": short(c["at"]["local"]), "action": ACTION_LABELS.get(c["action"], c["action"].replace("_", " ")),
+               "target": c["target"], "by": c["by"], "reason": c["reason"], "result": c.get("result") or "-",
+               "alert": f"#{c['alert_id']}" if c.get("alert_id") else "-"} for c in d["containment_actions"]],
+             {"time": "Time", "action": "Requested action", "target": "Target", "by": "Initiated by", "reason": "Reason",
+              "alert": "Alert", "result": "Result (simulation only)"})
     export_panel(d)
     resolution_panel(d)
     flash_notice()
@@ -504,8 +507,8 @@ def case_file_panel(d: dict) -> None:
         ui.table([{"session": f"#{s['session_id']}", "account": s["account"], "ip": s["source_ip"], "events": s["event_count"],
                    "state": "Revoked" if s["revoked_at"] else "Active / ended"} for s in case["sessions"]],
                  {"session": "Session", "account": "Account", "ip": "Source IP", "events": "Events", "state": "State"})
-        ui.table([{"ip": i["ip"], "events": i["event_count"], "first": short(i["first_seen"]), "state": "Blocked" if i["blocked"] else "Not blocked"}
-                  for i in case["suspicious_ips"]], {"ip": "Suspicious IP", "events": "Events", "first": "First seen (UTC)", "state": "Control"})
+        ui.table([{"ip": i["ip"], "events": i["event_count"], "first": short(i["first_seen"]),         "state": "Blocked (simulated)" if i["blocked"] else "Not blocked"}
+                          for i in case["suspicious_ips"]], {"ip": "Suspicious IP", "events": "Events", "first": "First seen (UTC)", "state": "Control in this application"})
     with b:
         ui.table([{"resource": r["name"], "level": {2: "Confidential", 3: "Restricted"}[r["sensitivity"]], "read": f"{r['records_accessed']:,}",
                    "exported": f"{r['records_downloaded']:,}", "denied": r["denied_attempts"]} for r in case["sensitive_resources"]],
@@ -523,26 +526,26 @@ def _locked(case: dict, target: str | None) -> bool:
 
 
 def containment_panel(d: dict) -> None:
-    ui.section("Containment actions")
-    st.caption("Every action needs administrator confirmation and a reason, and is audited. Containment is a controlled "
-               "application simulation: it changes this application's own state only and does not touch any firewall, "
-               "directory service, endpoint or real network.")
+    ui.section("Simulated containment")
+    st.caption("Simulation only. Every action needs administrator confirmation and a reason, and is audited. It edits this "
+               "application's own records (account status, sessions, permissions, block list, isolation flags) and does not "
+               "contact or change any firewall, directory service, endpoint, email service or real network.")
     case, resolved = d.get("case_file") or {}, d["status"] == "resolved"
     blocked = {i["ip"] for i in case.get("suspicious_ips", []) if i["blocked"]}
     rows = [a for a in d["recommended_actions"] if a.get("executable", True)]
-    head = st.columns([1.2, 2.4, 2.0, 3.8, 1.2, 1.4])
-    for col, title in zip(head, ["Priority", "Action", "Target", "Reason", "Status", ""]):
+    head = st.columns([1.2, 2.6, 2.0, 3.6, 1.4, 1.8])
+    for col, title in zip(head, ["Priority", "Simulated action", "Target", "Reason", "Status", ""]):
         col.markdown(f"<span style='color:#5F6B7A;font-size:.78rem'>{title}</span>", unsafe_allow_html=True)
     for i, a in enumerate(rows):
         done = (a["action"] == "block_ip" and a.get("target") in blocked) or (a["action"] == "lock_account" and _locked(case, a.get("target")))
-        row = st.columns([1.2, 2.4, 2.0, 3.8, 1.2, 1.4], vertical_alignment="center")
+        row = st.columns([1.2, 2.6, 2.0, 3.6, 1.4, 1.8], vertical_alignment="center")
         row[0].write(a["priority"])
         row[1].write(ACTION_LABELS.get(a["action"], a["action"].replace("_", " ").capitalize()))
         row[2].write(a.get("target") or "employee account")
         row[3].caption(a["reason"])
-        row[4].markdown(f"<span style='color:{'#1E6B34' if done else '#7A5200'};font-weight:600'>{'Done' if done else 'Pending'}</span>",
+        row[4].markdown(f"<span style='color:{'#1E6B34' if done else '#7A5200'};font-weight:600'>{'Simulated' if done else 'Not simulated'}</span>",
                         unsafe_allow_html=True)
-        if not done and not resolved and row[5].button("Review", key=f"ic_{d['id']}_{i}_{a['action']}", width="stretch"):
+        if not done and not resolved and row[5].button("Simulate containment", key=f"ic_{d['id']}_{i}_{a['action']}", width="stretch"):
             request_action(action=a["action"], employee_pk=a.get("target_employee_id") or d["employee_pk"],
                            subject=a.get("target") or d["employee_id"], reason=a["reason"], investigation_id=d["id"],
                            target=a.get("target") if a["action"] in ("block_ip", "isolate_system") else None)
@@ -550,9 +553,9 @@ def containment_panel(d: dict) -> None:
     if resources and not resolved:
         names = {r["resource"]: r["name"] for r in resources}
         c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
-        pick = c1.selectbox("Restrict this employee's access to a sensitive resource", list(names), format_func=lambda r: names[r],
+        pick = c1.selectbox("Simulate restricting this employee's access to a sensitive resource", list(names), format_func=lambda r: names[r],
                             key=f"restrict_pick_{d['id']}")
-        if c2.button("Review restriction", key=f"restrict_go_{d['id']}", width="stretch"):
+        if c2.button("Simulate restriction", key=f"restrict_go_{d['id']}", width="stretch"):
             request_action(action="restrict_access", employee_pk=d["employee_pk"], subject=f"{d['employee_id']} / {names[pick]}",
                            reason=f"Restrict access to {names[pick]} during the investigation", investigation_id=d["id"], target=pick)
 
@@ -697,32 +700,37 @@ def page_graph() -> None:
 
 # ------------------------------------------------------------------ 7. response centre
 def request_action(**spec) -> None:
-    st.session_state["pending"] = spec
+    # One idempotency key per confirmation, so a double click or rerun of "Run simulation" cannot repeat the action.
+    st.session_state["pending"] = {**spec, "key": uuid.uuid4().hex}
     st.rerun()
 
 
 def confirmation_panel(options: dict) -> None:
     p = st.session_state["pending"]
     info = options[p["action"]]
-    ui.section("Confirm response action")
+    ui.section("Confirm simulated containment")
     ui.notice("warn", "Live updates are paused while this action awaits confirmation." if info["needs_confirmation"]
-              else "Review the action before executing.")
-    ui.kv_table([("Action", info["label"]), ("Applies to", p["subject"]), ("Effect", info["description"]),
+              else "Review the action before running the simulation.")
+    ui.kv_table([("Requested action", info["label"]), ("Applies to", p["subject"]),
+                 ("Investigation", f"#{p['investigation_id']}" if p.get("investigation_id") else "-"),
+                 ("What changes", info["description"]),
+                 ("Scope", "Simulation only: this application's own records. No external system is contacted."),
                  ("Disruptive", "Yes - confirmation required" if info["needs_confirmation"] else "No")])
     reason = st.text_input("Reason (recorded in the audit log)", value=p["reason"], key="pending_reason")
-    confirmed = st.checkbox("I confirm that I want to execute this action", key="pending_confirm") if info["needs_confirmation"] else True
+    confirmed = st.checkbox("I confirm that I want to run this simulated action", key="pending_confirm") if info["needs_confirmation"] else True
     a, b, _ = st.columns([1, 1, 4])
-    if a.button("Execute action", type="primary", disabled=not confirmed or len(reason.strip()) < 3, key="pending_go"):
+    if a.button("Run simulation", type="primary", disabled=not confirmed or len(reason.strip()) < 3, key="pending_go"):
         body = {"employee_id": p["employee_pk"], "action_type": p["action"], "reason": reason.strip(), "confirm": bool(confirmed),
-                "investigation_id": p.get("investigation_id"), "target": p.get("target")}
+                "investigation_id": p.get("investigation_id"), "target": p.get("target"), "idempotency_key": p["key"]}
         try:
-            api().post("/api/containment", {k: v for k, v in body.items() if v is not None})
+            done = api().post("/api/containment", {k: v for k, v in body.items() if v is not None})
         except ApiError as exc:
             if exc.status_code == 401:
                 handle(exc)
-            ui.notice("error", f"Action failed: {exc.detail} (the attempt has been recorded in the audit log)")
+            ui.notice("error", f"Simulation not run: {exc.detail} (the attempt has been recorded in the audit log)")
         else:
-            st.session_state["flash_ok"] = f"{info['label']} executed for {p['subject']}."
+            st.session_state["flash_ok"] = (done.get("result") or f"Simulation completed: {info['label']} for {p['subject']}.") \
+                + (" (already recorded; not repeated)" if done.get("replayed") else "")
             st.session_state.pop("pending")
             st.session_state["_cache"] = {}
             st.rerun()
@@ -732,7 +740,7 @@ def confirmation_panel(options: dict) -> None:
 
 
 def page_response() -> None:
-    ui.page_header("Response Centre", "Recommended containment actions, active controls and response history")
+    ui.page_header("Response Centre", "Recommended containment actions, active controls and history (simulation only)")
     refresh_token()
     centre = cached("response", "/api/soc/response")
     if centre is None:
@@ -748,54 +756,57 @@ def page_response() -> None:
         if data is None:
             return
         sc.live_note("Live - recommendations update as the attack progresses")
-        ui.section(f"Recommended actions ({len(data['threats'])} active threat{'s' if len(data['threats']) != 1 else ''})")
+        ui.section(f"Recommended simulated actions ({len(data['threats'])} active threat{'s' if len(data['threats']) != 1 else ''})")
         if not data["threats"]:
-            ui.notice("ok", "No active threats require a response.")
+            ui.notice("ok", "No active threats require a simulated response.")
         for t in data["threats"]:
             st.markdown(f"**{t['employee_id']}** &nbsp; {sc.severity_badge(t['level'])} &nbsp; confidence {t['confidence']:.1f} "
                         f"&nbsp; stage: {t['stage_label']} &nbsp; exposure: {t['exposure_label']}", unsafe_allow_html=True)
-            head = st.columns([1.3, 2.4, 2.0, 3.8, 1.3, 1.5])
-            for col, title in zip(head, ["Priority", "Action", "Target", "Reason", "Status", ""]):
+            head = st.columns([1.3, 2.6, 2.0, 3.6, 1.4, 1.8])
+            for col, title in zip(head, ["Priority", "Simulated action", "Target", "Reason", "Status", ""]):
                 col.markdown(f"<span style='color:#5F6B7A;font-size:.78rem'>{title}</span>", unsafe_allow_html=True)
             for i, a in enumerate(t["actions"]):
-                row = st.columns([1.3, 2.4, 2.0, 3.8, 1.3, 1.5], vertical_alignment="center")
+                row = st.columns([1.3, 2.6, 2.0, 3.6, 1.4, 1.8], vertical_alignment="center")
                 label = options.get(a["action"], {}).get("label", a["action"].replace("_", " ").title())
                 row[0].write(a["priority"])
                 row[1].write(label)
                 row[2].write(a.get("target") or "employee account")
                 row[3].caption(a["reason"])
                 row[4].markdown(f"<span style='color:{'#1E6B34' if a['done'] else '#7A5200'};font-weight:600'>"
-                                f"{'Done' if a['done'] else ('Advisory' if not a['executable'] else 'Pending')}</span>", unsafe_allow_html=True)
+                                f"{'Simulated' if a['done'] else ('Advisory' if not a['executable'] else 'Not simulated')}</span>",
+                                unsafe_allow_html=True)
                 if a["executable"] and not a["done"]:
-                    if row[5].button("Review", key=f"act_{t['employee_pk']}_{i}_{a['action']}", width="stretch"):
+                    if row[5].button("Simulate containment", key=f"act_{t['employee_pk']}_{i}_{a['action']}", width="stretch"):
                         request_action(action=a["action"], employee_pk=a.get("target_employee_id") or t["employee_pk"],
                                        subject=f"{a.get('target') or t['employee_id']}", reason=a["reason"],
                                        investigation_id=t["investigation_id"],
                                        target=a.get("target") if a["action"] in ("block_ip", "isolate_system") else None)
             st.divider()
 
-        ui.section(f"Active response controls ({len(data['controls'])})")
+        ui.section(f"Active simulated controls ({len(data['controls'])})")
         if data["controls"]:
-            ui.table([{"kind": "Blocked IP" if c["kind"] == "blocked_ip" else "Isolated system", "target": c["label"], "by": c["by"],
-                       "since": short(c["created_at"]["local"]), "reason": c["reason"]} for c in data["controls"]],
+            ui.table([{"kind": "Blocked IP (simulated)" if c["kind"] == "blocked_ip" else "Isolated system (simulated)", "target": c["label"],
+                       "by": c["by"], "since": short(c["created_at"]["local"]), "reason": c["reason"]} for c in data["controls"]],
                      {"kind": "Control", "target": "Target", "by": "Applied by", "since": "Since", "reason": "Reason"})
             for c in data["controls"]:
                 release = "unblock_ip" if c["kind"] == "blocked_ip" else "release_system"
-                if st.button(f"Release {c['label']}", key=f"rel_{c['id']}"):
+                if st.button(f"Simulate release of {c['label']}", key=f"rel_{c['id']}"):
                     request_action(action=release, employee_pk=c["employee_pk"], subject=c["label"], reason="Control released",
                                    target=c["value"])
         else:
-            st.caption("No IP blocks or system isolations are active.")
+            st.caption("No simulated IP blocks or system isolations are active.")
 
-        ui.section("Response history")
+        ui.section("Simulated response history")
         ui.table([{"time": short(h["at"]["local"]), "action": h["label"], "employee": h["employee_id"], "by": h["by"],
-                   "reason": h["reason"], "inv": f"#{h['investigation_id']}" if h["investigation_id"] else "-"} for h in data["history"]],
-                 {"time": "Time", "action": "Action", "employee": "Employee ID", "by": "Administrator", "reason": "Reason",
-                  "inv": "Investigation"})
+                   "reason": h["reason"], "inv": f"#{h['investigation_id']}" if h["investigation_id"] else "-",
+                   "alert": f"#{h['alert_id']}" if h.get("alert_id") else "-", "result": h.get("result") or "-"}
+                  for h in data["history"]],
+                 {"time": "Time", "action": "Requested action", "employee": "Employee ID", "by": "Initiated by", "reason": "Reason",
+                  "inv": "Investigation", "alert": "Alert", "result": "Result (simulation only)"})
 
     live(render)
 
-    ui.section("Manual response")
+    ui.section("Manual simulated response")
     c1, c2 = st.columns(2)
     manual = [a for a in options if options[a]["needs"] != "investigation"]       # resolving happens on the investigation page
     action = pselect("Action", manual, "m_action", container=c1, fmt=lambda a: options[a]["label"])
@@ -813,7 +824,7 @@ def page_response() -> None:
         target = pselect("Resource", list(resources), "m_resource", fmt=lambda s: resources[s]) or None
     st.caption(options[action]["description"])
     reason = ptext("Reason", "m_reason", placeholder="Why this action is needed")
-    if st.button("Review action", key="m_review", disabled=len(reason.strip()) < 3 or (needs == "ip" and not (target or "").strip())):
+    if st.button("Simulate containment", key="m_review", disabled=len(reason.strip()) < 3 or (needs == "ip" and not (target or "").strip())):
         request_action(action=action, employee_pk=emp_map[emp], subject=target or emp, reason=reason.strip(), target=target)
 
 
@@ -867,6 +878,8 @@ def dashboard() -> None:
         st.button("Logout", key="nav_logout", width="stretch", on_click=sign_out, icon=":material/logout:")
         ui.user_card(st.session_state.get("admin_id", ""), "Security administrator")
         st.markdown(f'<div class="org-sub" style="margin:.8rem 0 0 .2rem">Live refresh: {LIVE_SECONDS} s</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sim-banner">SIMULATED THREAT-DETECTION AND RESPONSE PLATFORM - synthetic data only. Containment changes '
+                "this application's own records; it does not act on any real network, account or device.</div>", unsafe_allow_html=True)
     PAGE_FUNCTIONS[page]()
 
 

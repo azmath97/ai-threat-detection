@@ -1,7 +1,14 @@
-"""Containment actions executed by security administrators.
+"""Simulated containment actions executed by security administrators.
 
-Disruptive actions need explicit confirmation (enforced here, not just in the UI). Every attempt is audited,
-including failed ones.
+Nothing here contacts a firewall, identity provider, endpoint agent, mail server or network: every action edits this
+application's own database records (account status, session rows, permission rows, a block list, isolation flags,
+investigation and alert status), and this backend's own login and permission code then honours those records.
+Each action is recorded with the alert and/or investigation it concerns, the requested action, who initiated it, when, the
+outcome and the list of records it changed, and it is audited.
+
+Disruptive actions need explicit confirmation (enforced here, not just in the UI). Every attempt is audited, including
+failed ones. A request carrying an `idempotency_key` is replayed, not repeated, when it is retried; a request that would
+change nothing is refused with 409 instead of creating a duplicate action.
 """
 import ipaddress
 
@@ -23,9 +30,11 @@ from backend.models import (
 )
 
 SCOPE_KEY = "simulated_application_state"
-SCOPE_NOTICE = ("Containment is a controlled application simulation. Actions change this application's own records "
+SCOPE_NOTICE = ("Containment here is a controlled application simulation. Actions change this application's own records "
                 "(accounts, sessions, permissions, blocked addresses, isolated systems) and are enforced by this backend only. "
-                "No firewall, directory service, endpoint agent or real network is contacted or changed.")
+                "No firewall, directory service, endpoint agent, email service or real network is contacted or changed, and "
+                "nothing protects a real organisation.")
+RESULT_PREFIX = "Simulation completed: "
 
 ACTION_TYPES = (
     "revoke_sessions", "lock_account", "restrict_access", "remove_privileges", "block_ip", "isolate_system",
@@ -35,16 +44,16 @@ NEEDS_CONFIRMATION = {"revoke_sessions", "lock_account", "restrict_access", "rem
                       "resolve_investigation"}
 ACCOUNT_CONTAINMENT = {"revoke_sessions", "lock_account", "restrict_access", "remove_privileges"}
 ACTION_INFO = {
-    "revoke_sessions": ("Revoke active sessions", "Immediately signs the account out everywhere.", "employee"),
-    "lock_account": ("Disable account", "Locks the account and revokes its sessions.", "employee"),
-    "restrict_access": ("Restrict sensitive access", "Removes confidential and restricted permissions (or only the chosen resource).", "employee"),
-    "remove_privileges": ("Remove unauthorised privileges", "Downgrades write access to read; strips all access from accounts created during the incident.", "employee"),
-    "block_ip": ("Block IP address", "Rejects logins and requests from the address and revokes its sessions.", "ip"),
-    "isolate_system": ("Isolate system", "Denies all access to the system until released.", "system"),
-    "restore_account": ("Restore account", "Unlocks the account and restores removed access.", "employee"),
-    "unblock_ip": ("Unblock IP address", "Removes the block.", "ip"),
-    "release_system": ("Release system", "Ends the isolation.", "system"),
-    "resolve_investigation": ("Resolve investigation", "Marks the investigation and its alerts resolved. Preserved evidence is kept.", "investigation"),
+    "revoke_sessions": ("Revoke sessions (simulated)", "Marks the account's session records in this application as revoked, so the backend rejects them.", "employee"),
+    "lock_account": ("Disable account (simulated)", "Sets the account record to locked in this application and revokes its session records; this backend then refuses the login.", "employee"),
+    "restrict_access": ("Restrict sensitive access (simulated)", "Deletes confidential and restricted permission rows (or only the chosen resource) from this application's access table.", "employee"),
+    "remove_privileges": ("Remove privileges (simulated)", "Downgrades write permission rows to read; deletes all permission rows of accounts created during the incident.", "employee"),
+    "block_ip": ("Block IP in this application (simulated)", "Adds the address to this application's block list; its login code rejects the address and its session records are revoked. No firewall is involved.", "ip"),
+    "isolate_system": ("Isolate system record (simulated)", "Flags the resource as isolated in this application, so its permission check denies everyone until released.", "system"),
+    "restore_account": ("Restore account (simulated)", "Sets the account record back to active and restores permission rows removed by earlier simulated containment.", "employee"),
+    "unblock_ip": ("Unblock IP (simulated)", "Removes the address from this application's block list.", "ip"),
+    "release_system": ("Release system (simulated)", "Clears the isolation flag on the resource record.", "system"),
+    "resolve_investigation": ("Resolve investigation", "Marks the investigation and its alerts resolved in this application. Preserved evidence is kept.", "investigation"),
 }
 
 
@@ -102,22 +111,41 @@ def apply_action(
     ip: str | None = None,
     confirm: bool = False,
     value: str | None = None,
+    alert_id: int | None = None,
+    idempotency_key: str | None = None,
 ) -> ContainmentAction:
     """`target` is the account the action concerns (or the incident's employee for IP / system actions);
-    `value` is the IP address or system for block_ip / unblock_ip / isolate_system / release_system."""
+    `value` is the IP address or system for block_ip / unblock_ip / isolate_system / release_system.
+
+    With an `idempotency_key`, retrying the same request returns the original action (marked `replayed`) instead of
+    performing it again; reusing the key for a different request is refused."""
     admin_id, target_id = admin.id, target.id
+    request = {"employee_id": target_id, "action_type": action_type, "target": (value or "").strip() or None,
+               "investigation_id": investigation_id, "alert_id": alert_id}
     try:
-        return _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm, value)
+        if idempotency_key:
+            existing = db.scalar(select(ContainmentAction).where(ContainmentAction.idempotency_key == idempotency_key))
+            if existing is not None:
+                if (existing.details or {}).get("request") != request or existing.performed_by != admin_id:
+                    raise ServiceError(409, "This idempotency key was already used for a different containment request")
+                write_audit(db, "containment_replayed", actor_id=admin_id, target_type="employee", target_id=target_id, ip=ip,
+                            details={"action_id": existing.id, "action": action_type, "idempotency_key": idempotency_key})
+                db.commit()
+                existing.replayed = True
+                return existing
+        return _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm, value, alert_id, idempotency_key, request)
     except ServiceError as exc:
         db.rollback()
         write_audit(db, "containment_failed", actor_id=admin_id, target_type="employee", target_id=target_id, ip=ip,
                     details={"action": action_type, "reason": reason, "error": exc.message, "http_status": exc.status_code,
-                             "value": value, "confirmed": confirm})
+                             "value": value, "confirmed": confirm, "investigation_id": investigation_id, "alert_id": alert_id,
+                             "scope": SCOPE_KEY})
         db.commit()
         raise
 
 
-def _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm, value) -> ContainmentAction:
+def _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm, value, alert_id, idempotency_key,
+           request) -> ContainmentAction:
     if action_type not in ACTION_TYPES:
         raise ServiceError(422, f"Unknown action_type '{action_type}'")
     if action_type in NEEDS_CONFIRMATION and not confirm:
@@ -125,6 +153,17 @@ def _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm
     if action_type in ACCOUNT_CONTAINMENT | {"restore_account"} and target.id == admin.id:
         raise ServiceError(400, "Administrators cannot apply containment actions to their own account")
 
+    alert = None
+    if alert_id is not None:
+        alert = db.get(SecurityAlert, alert_id)
+        if alert is None:
+            raise ServiceError(404, "Alert not found")
+        if alert.employee_id != target.id and target.created_by_id != alert.employee_id:
+            raise ServiceError(400, "Alert does not belong to the target employee or an account they created")
+        if investigation_id is None:
+            investigation_id = alert.investigation_id
+        elif alert.investigation_id is not None and alert.investigation_id != investigation_id:
+            raise ServiceError(400, "Alert belongs to a different investigation")
     investigation = None
     if investigation_id is not None:
         investigation = db.get(AttackInvestigation, investigation_id)
@@ -132,17 +171,28 @@ def _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm
             raise ServiceError(404, "Investigation not found")
         if investigation.employee_id != target.id and target.created_by_id != investigation.employee_id:
             raise ServiceError(400, "Investigation does not belong to the target employee or an account they created")
+        if alert is None:
+            alert = db.scalar(select(SecurityAlert).where(SecurityAlert.investigation_id == investigation.id)
+                              .order_by(SecurityAlert.id.desc()))
     synthetic = bool(investigation and investigation.is_synthetic) or target.is_synthetic
 
+    code = target.employee_code
     details: dict = {}
+    effects: list[str] = []
     control: ResponseControl | None = None
     if action_type == "revoke_sessions":
-        details["sessions_revoked"] = _revoke_sessions(db, employee_id=target.id)
+        revoked = _revoke_sessions(db, employee_id=target.id)
+        if not revoked:
+            raise ServiceError(409, "No active sessions to revoke")
+        details["sessions_revoked"] = revoked
+        effects.append(f"{revoked} session record(s) of {code} marked revoked in this application's database")
     elif action_type == "lock_account":
         if target.status == "locked":
             raise ServiceError(409, "Account is already locked")
         target.status = "locked"
         details["sessions_revoked"] = _revoke_sessions(db, employee_id=target.id)
+        effects += [f"Account record {code} set to locked in this application's database",
+                    f"{details['sessions_revoked']} session record(s) marked revoked"]
     elif action_type == "restrict_access":
         if value:
             resource = value.strip()
@@ -158,6 +208,8 @@ def _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm
         details["removed_permissions"] = [{"resource": p.resource, "access_level": p.access_level} for p in sensitive]
         for p in sensitive:
             db.delete(p)
+        effects.append(f"{len(sensitive)} permission row(s) of {code} deleted from this application's access table: "
+                       + ", ".join(sorted(p.resource for p in sensitive)))
     elif action_type == "remove_privileges":
         removed, downgraded = [], []
         for p in list(target.permissions):
@@ -170,6 +222,10 @@ def _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm
         if not removed and not downgraded:
             raise ServiceError(409, "No elevated privileges to remove")
         details.update({"removed_permissions": removed, "downgraded": downgraded})
+        if removed:
+            effects.append(f"{len(removed)} permission row(s) of {code} deleted from this application's access table")
+        if downgraded:
+            effects.append(f"{len(downgraded)} permission row(s) of {code} changed from write to read")
     elif action_type in ("block_ip", "unblock_ip"):
         try:
             address = str(ipaddress.ip_address((value or "").strip()))
@@ -182,13 +238,18 @@ def _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm
                 raise ServiceError(409, f"{address} is already blocked")
             control = ResponseControl(kind="blocked_ip", value=address, reason=reason, created_by=admin.id, is_synthetic=synthetic)
             details.update({"ip": address, "sessions_revoked": _revoke_sessions(db, ip=address)})
+            effects += [f"{address} added to this application's block list (no firewall or network device is changed)",
+                        f"{details['sessions_revoked']} session record(s) from that address marked revoked"]
         else:
             if existing is None:
                 raise ServiceError(409, f"{address} is not blocked")
             existing.active, existing.released_at = False, utcnow()
             details["ip"] = address
+            effects.append(f"{address} removed from this application's block list")
     elif action_type == "restore_account":
         details = restore_employee(db, target)
+        effects += [f"Account record {code} set to active in this application's database",
+                    f"{len(details['restored_permissions'])} permission row(s) restored"]
     elif action_type == "resolve_investigation":
         if investigation is None:
             raise ServiceError(422, "investigation_id is required to resolve an investigation")
@@ -197,10 +258,11 @@ def _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm
         now = utcnow()
         alerts = db.scalars(select(SecurityAlert).where(SecurityAlert.investigation_id == investigation.id,
                                                         SecurityAlert.status.in_((*OPEN_ALERT_STATUSES, "contained")))).all()
-        for alert in alerts:
-            alert.status, alert.updated_at = "resolved", now
+        for resolved_alert in alerts:
+            resolved_alert.status, resolved_alert.updated_at = "resolved", now
         details = {"previous_status": investigation.status, "alerts_resolved": [a.id for a in alerts]}
         investigation.status, investigation.closed_at, investigation.updated_at = "resolved", now, now
+        effects.append(f"Investigation {investigation.id} and {len(alerts)} alert record(s) marked resolved in this application's database")
     else:  # isolate_system / release_system
         system = (value or "").strip()
         if system not in RESOURCES or is_self_service(system):
@@ -212,32 +274,45 @@ def _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm
                 raise ServiceError(409, f"{RESOURCES[system]['name']} is already isolated")
             control = ResponseControl(kind="isolated_system", value=system, reason=reason, created_by=admin.id, is_synthetic=synthetic)
             details["system"] = system
+            effects.append(f"{RESOURCES[system]['name']} flagged as isolated in this application; its permission check now denies everyone")
         else:
             if existing is None:
                 raise ServiceError(409, f"{RESOURCES[system]['name']} is not isolated")
             existing.active, existing.released_at = False, utcnow()
             details["system"] = system
+            effects.append(f"Isolation flag on {RESOURCES[system]['name']} cleared in this application")
 
-    action = ContainmentAction(investigation_id=investigation_id, employee_id=target.id, action_type=action_type,
-                               status="completed", reason=reason, performed_by=admin.id,
-                               details={**details, "scope": SCOPE_KEY})
+    action = ContainmentAction(investigation_id=investigation_id, alert_id=alert.id if alert else None, employee_id=target.id,
+                               action_type=action_type, status="completed", reason=reason, performed_by=admin.id,
+                               idempotency_key=idempotency_key, details={})
     db.add(action)
     db.flush()
     if control is not None:
         control.action_id = action.id
         db.add(control)
 
+    contained_alerts: list[int] = []
     if action_type in ACCOUNT_CONTAINMENT:
         if investigation is not None and investigation.status == "open":
             investigation.status = "contained"
             investigation.updated_at = utcnow()
-        for alert in db.scalars(select(SecurityAlert).where(SecurityAlert.employee_id == target.id,
-                                                            SecurityAlert.status.in_(OPEN_ALERT_STATUSES))):
-            alert.status = "contained"
-            alert.updated_at = utcnow()
+            effects.append(f"Investigation {investigation.id} status set to contained")
+        for open_alert in db.scalars(select(SecurityAlert).where(SecurityAlert.employee_id == target.id,
+                                                                 SecurityAlert.status.in_(OPEN_ALERT_STATUSES))):
+            open_alert.status = "contained"
+            open_alert.updated_at = utcnow()
+            contained_alerts.append(open_alert.id)
+        if contained_alerts:
+            effects.append(f"{len(contained_alerts)} alert record(s) status set to contained")
 
+    action.details = {
+        **details, "scope": SCOPE_KEY, "request": request, "effects": effects,
+        "result": RESULT_PREFIX + "; ".join(effects) + ".", "alerts_contained": contained_alerts,
+        "external_systems_contacted": [], "initiated_from_ip": ip,
+    }
     write_audit(db, f"containment_{action_type}", actor_id=admin.id, target_type="employee", target_id=target.id, ip=ip,
                 details={"action_id": action.id, "reason": reason, "investigation_id": investigation_id,
-                         "confirmed": confirm, "value": value})
+                         "alert_id": action.alert_id, "confirmed": confirm, "value": value, "scope": SCOPE_KEY,
+                         "result": action.details["result"], "idempotency_key": idempotency_key})
     db.commit()
     return action

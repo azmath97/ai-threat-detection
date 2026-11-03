@@ -92,9 +92,10 @@ def restore_state(request):
     with sqlite3.connect(db_path) as con:
         marks = {t: con.execute(f"select coalesce(max(id), 0) from {t}").fetchone()[0] for t in tables}
     yield
-    from backend.rate_limit import login_throttle
+    from backend.rate_limit import containment_limiter, login_throttle
 
     login_throttle.reset()
+    containment_limiter.reset()
     active = client.get("/api/simulation/status", headers=admin).json().get("active_run_id")
     if active:
         client.post(f"/api/simulation/runs/{active}/cancel", headers=admin)

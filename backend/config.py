@@ -38,6 +38,7 @@ class Settings:
     app_env: str
     login_max_failures: int
     login_lockout_seconds: int
+    containment_max_per_minute: int
     simulation_privileged_password: str
     password_hash_iterations: int
     correlation_window_minutes: int
@@ -78,6 +79,7 @@ def get_settings() -> Settings:
         app_env=_str("APP_ENV", "development").strip().lower(),
         login_max_failures=_int("LOGIN_MAX_FAILURES", 5),
         login_lockout_seconds=_int("LOGIN_LOCKOUT_SECONDS", 300),
+        containment_max_per_minute=_int("CONTAINMENT_MAX_PER_MINUTE", 30),
         simulation_privileged_password=_str("SIMULATION_PRIVILEGED_PASSWORD", "Synthetic#Priv2026"),
         password_hash_iterations=_int("PASSWORD_HASH_ITERATIONS", 260_000),
         correlation_window_minutes=_int("CORRELATION_WINDOW_MINUTES", 240),

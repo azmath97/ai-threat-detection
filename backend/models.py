@@ -199,17 +199,52 @@ class SecurityAlert(Base):
 
 
 class ContainmentAction(Base):
+    """An auditable simulated containment action. It records what was requested, by whom, for which alert or investigation,
+    what it did to this application's own records, and that no external system was involved."""
+
     __tablename__ = "containment_actions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     investigation_id: Mapped[int | None] = mapped_column(ForeignKey("attack_investigations.id", ondelete="SET NULL"), nullable=True, index=True)
+    alert_id: Mapped[int | None] = mapped_column(ForeignKey("security_alerts.id", ondelete="SET NULL"), nullable=True, index=True)
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"), index=True)
     action_type: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(16), default="completed")
     reason: Mapped[str] = mapped_column(String(500))
     performed_by: Mapped[int] = mapped_column(ForeignKey("employees.id"))
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+
+    performer: Mapped[Employee] = relationship(foreign_keys=[performed_by])
+
+    @property
+    def simulated(self) -> bool:
+        return True
+
+    @property
+    def scope(self) -> str | None:
+        return (self.details or {}).get("scope")
+
+    @property
+    def result(self) -> str | None:
+        return (self.details or {}).get("result")
+
+    @property
+    def effects(self) -> list[str]:
+        return list((self.details or {}).get("effects", []))
+
+    @property
+    def external_systems_contacted(self) -> list[str]:
+        return list((self.details or {}).get("external_systems_contacted", []))
+
+    @property
+    def performed_by_username(self) -> str:
+        return self.performer.username
+
+    @property
+    def status_label(self) -> str:
+        return "Simulation completed" if self.status == "completed" else self.status
 
 
 class AuditLog(Base):

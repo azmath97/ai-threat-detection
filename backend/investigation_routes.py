@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from sqlalchemy.orm import Session
 
 from backend import investigation_export, investigation_service, response_service
+from backend.containment_guard import containment_admin
 from backend.database import get_db
 from backend.event_service import write_audit
 from backend.models import AttackInvestigation
@@ -59,9 +60,14 @@ def export(investigation_id: int, request: Request, export_format: str = Query("
 
 
 @router.post("/{investigation_id}/resolve", response_model=ContainmentOut, status_code=status.HTTP_201_CREATED)
-def resolve(investigation_id: int, body: InvestigationResolve, request: Request, auth: AuthContext = Depends(require_admin),
-            db: Session = Depends(get_db)):
-    """Mark the investigation resolved. Needs a reason and explicit confirmation; recorded as an audited action."""
+def resolve(investigation_id: int, body: InvestigationResolve, request: Request, response: Response,
+            auth: AuthContext = Depends(containment_admin), db: Session = Depends(get_db)):
+    """Mark the investigation resolved in this application. Needs a reason and explicit confirmation; recorded as an audited
+    simulated action, and retries with the same `idempotency_key` return the original action (HTTP 200)."""
     inv = _get(db, investigation_id)
-    return response_service.apply_action(db, auth.employee, inv.employee, "resolve_investigation", body.reason, inv.id,
-                                         ip=resolve_ip(request, auth.employee), confirm=body.confirm)
+    action = response_service.apply_action(db, auth.employee, inv.employee, "resolve_investigation", body.reason, inv.id,
+                                           ip=resolve_ip(request, auth.employee), confirm=body.confirm,
+                                           idempotency_key=body.idempotency_key)
+    if getattr(action, "replayed", False):
+        response.status_code = status.HTTP_200_OK
+    return action

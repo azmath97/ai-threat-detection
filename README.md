@@ -1,16 +1,32 @@
 # AI-Based Insider Threat Detection System
 
-A cybersecurity case study. A fictional financial organisation, **Westbridge Bank**, runs an Employee Workspace
-Portal. A security team watches it through a Security Operations Centre (SOC) dashboard. An employee account can be
-compromised or misused, and the system must notice that **while it is happening** and before data leaves the bank.
+A **simulated threat-detection and response platform**: a cybersecurity case study, not a security product. A fictional
+financial organisation, **Westbridge Bank**, runs an Employee Workspace Portal. A security team watches it through a
+Security Operations Centre (SOC) dashboard. An employee account can be compromised or misused, and the system is built to
+notice that **while it is happening** and before the simulated data leaves.
 
-* **All data is synthetic.** There are no real credentials, personal data or banking data anywhere in the project.
+## Scope: what is real and what is simulated
+
+* **Detection is real code on synthetic events.** The rules, baseline, anomaly model, correlation and scoring run on events
+  stored in this project's own database. All data is synthetic; there are no real credentials, personal data or banking data.
+* **Containment is a simulation.** "Disable account", "Block IP", "Isolate system" and the other actions edit this
+  application's own records (an account's status, session rows, permission rows, a block list, isolation flags, alert and
+  investigation status), and this backend's own login and permission code then honours them. Nothing else happens. The
+  project does not block real network traffic, does not disable real accounts, does not quarantine real devices, does not
+  send email, does not contact a directory, firewall or endpoint agent, and does not protect a real bank. No such
+  integration exists or is configured.
+* **Every simulated action is recorded:** the alert and/or investigation it concerns, the requested action, who initiated it,
+  when, the result and the list of records it changed, plus an audit-log entry. The UI says "Simulate containment" and
+  "Simulation completed" for that reason.
+* It has not been validated for live use.
+
 * **One FastAPI backend and one SQLite database are the single source of truth.** The portal, the SOC dashboard and
   the simulation console only call the backend; none of them has its own data, scores or event system.
 * **Detection is hybrid:** an Isolation Forest anomaly model, configurable rules, event correlation, a bounded
   0-100 attack-confidence score, a separate data-exposure assessment and attack-stage classification.
-* **Containment is real inside the simulation:** disabling an account stops logins, blocking an IP stops sessions from
-  it, removing privileges removes permissions. It never touches a real network.
+* **Simulated containment has visible effects inside the application:** a simulated account disable stops logins to this
+  application, a simulated IP block makes its login code refuse that address, and removing privileges deletes permission
+  rows. It never touches a real network.
 
 ## Contents
 
@@ -67,7 +83,7 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | SOC read models | `soc_service.py`, `soc_routes.py` |
 | Simulation | `scenario_generator.py` (seeded plans), `simulation_runs.py` (background runs, status, stop), `simulation_service.py` (manual steps, reset), `simulation_routes.py` |
 | Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (289 tests) |
+| Tests | `tests/` (310 tests) |
 
 ## Technology stack
 
@@ -140,6 +156,7 @@ Copy-Item .env.example .env        # bash: cp .env.example .env
 | `TRUSTED_FRONTEND_KEY` | empty (off) | split hosting: shared secret (24+ characters) sent by the dashboards as `X-Frontend-Key`; requests carrying it are attributed to the employee's registered workstation IP |
 | `APP_ENV` | `development` | `production` refuses to start with the demo `SECRET_KEY` (needs 32+ random characters) |
 | `LOGIN_MAX_FAILURES`, `LOGIN_LOCKOUT_SECONDS` | `5`, `300` | failed sign-ins per employee ID before a temporary lockout (HTTP 429) |
+| `CONTAINMENT_MAX_PER_MINUTE` | `30` | simulated containment requests one administrator may submit per minute (HTTP 429 beyond it) |
 | `API_TIMEOUT_SECONDS` | `20` | how long the dashboards wait for the API (raise it for a free host that sleeps) |
 | `API_HOST`, `API_PORT`, `API_BASE_URL` | `127.0.0.1`, `8000`, `http://127.0.0.1:8000` | where the backend listens and where dashboards find it |
 | `CORRELATION_WINDOW_MINUTES` | `240` | correlation window |
@@ -333,6 +350,34 @@ response control and simulation run record, undoes containment applied to the af
 last-login time. The seeds and plan fingerprints of the removed runs are kept in the reset's audit entry. Real
 (non-synthetic) data is never touched. The reset is recorded in the audit log.
 
+## Demo script (about 10 minutes)
+
+Say at the start: *"This is a simulated threat-detection and response platform on synthetic data. The detection logic is real
+code; the containment buttons edit this application's own records and nothing else."* Then:
+
+1. `python app.py all`. Open the SOC Dashboard (8503) as `SEC-9011` and the Simulation Console (8502) in a second window.
+2. In the console pick **Compromised account campaign (full chain)**, *Fixed (reproducible)* seed `1`, pace *Demo*, press
+   **Start run**. Point out the run status and seed, and that the console only reports what the backend's detector produced.
+3. In the SOC dashboard watch *Security Overview*. The run raises a Critical alert only if the detector decides to (seed 1 does
+   on the data this project ships; other seeds and scenarios may stay below Critical, and the benign scenarios must).
+4. Open the investigation: show the evidence with event IDs and timestamps, the explanation, the missing evidence and the
+   alternative explanations. State that "confirmed" appears only for simulation ground truth.
+5. Open **Containment** on the investigation, press **Simulate containment** on "Disable account (simulated)", read the
+   confirmation panel ("Simulation only: this application's own records. No external system is contacted."), tick the
+   confirmation and press **Run simulation**. The message that follows starts "Simulation completed:" and lists the records
+   changed.
+6. Show the history row: requested action, who initiated it, the alert and investigation, the result. Then try to sign in to
+   the portal as the disabled employee: this application's login now returns "Account is locked". Say plainly that nothing
+   outside this application changed.
+7. Press **Run simulation** again on a retried request (or call the API twice with the same `idempotency_key`): no second
+   action appears. Show the audit log.
+8. Download the JSON report from the investigation page: its notice says the containment actions were simulations.
+9. Reset in the console (stop any active run first).
+
+Avoid saying "the attack was blocked" or "the account was disabled" (say "the simulated account record was set to locked").
+Avoid claiming "this protects the bank" and avoid quoting the benchmark figures as a guarantee; see Known limitations and
+`docs/detection-evaluation.md`.
+
 ## How it works, end to end
 
 1. **Sign in.** The portal posts the employee ID and password to `POST /api/auth/login`. The backend looks the employee
@@ -350,9 +395,10 @@ last-login time. The seeds and plan fingerprints of the removed runs are kept in
    and gets a risk assessment row. Nothing is scored in the browser.
 5. **Alert and investigation.** When the correlated confidence reaches the critical threshold, a `security_alerts` row is
    written (with evidence, exposure and recommended actions) and an investigation is opened or updated.
-6. **Response.** An administrator reviews the investigation in the SOC dashboard and applies containment. The backend
-   changes the simulated state and writes an audit log; the next login or request from the affected account or IP is
-   refused.
+6. **Response (simulated).** An administrator reviews the investigation in the SOC dashboard and chooses **Simulate
+   containment**. The backend edits this application's own records, records the alert/investigation, the requested action,
+   the administrator, the time and the result, and writes an audit log; the next login or request from the affected account
+   or IP is refused by this backend. No external system is involved.
 7. **Evidence.** The administrator downloads a JSON or CSV report that contains only that investigation's evidence.
 
 ### How the three screens stay in sync
@@ -749,21 +795,43 @@ events in a 4-hour window, attack-stage classification and a bounded 0-100 confi
 is designed to be before the last attack step. Unusual-but-innocent behaviour (new IP, late shift, large legitimate job)
 is tuned not to reach that threshold alone.
 
-### Response controls (what a security administrator can do)
+### Response controls (simulated containment an administrator can run)
 
-Every action needs a security-administrator session, a written reason and, for disruptive actions, `confirm: true`. Each
-records who, when and why, changes backend state and writes an audit log. Failures are audited as `containment_failed`.
+Every action is a **simulation** against this application's own records (see [Scope](#scope-what-is-real-and-what-is-simulated)).
+It needs a security-administrator session, a written reason and, for disruptive actions, `confirm: true`.
 
-| Action | Effect inside the simulated environment |
+**What is recorded** (table `containment_actions`, shown in the Response Centre, the investigation page, the audit log and the
+evidence export): the alert (`alert_id`) and/or investigation the action concerns (give either; if you give only an
+investigation, its alert is recorded), the requested action, the employee, who initiated it (`performed_by`), when
+(`created_at`, UTC), the result (`status` `completed`, shown as "Simulation completed"), the human-readable `result` and
+`effects` (exactly which records changed), `scope` = `simulated_application_state` and `external_systems_contacted` = `[]`.
+Failures are audited as `containment_failed` with the same identifiers.
+
+**Safeguards.**
+* *Unauthorised:* employees get 403 and unauthenticated callers 401; an employee's attempt is audited as `containment_unauthorized`.
+  Administrators cannot contain their own account, and disruptive actions need `confirm: true` (checked in the backend).
+* *Repeated:* at most `CONTAINMENT_MAX_PER_MINUTE` (30) requests per administrator per minute, then 429 with `Retry-After`
+  (audited as `containment_rate_limited`); the limiter is in memory and per process.
+* *Idempotent:* send an `idempotency_key` (8-64 characters of letters, digits, `_`, `-`) and a retry of the same request returns the
+  original action with HTTP 200 and `replayed: true` (audited as `containment_replayed`) instead of acting again; reusing a key for a
+  different request is 409. The dashboard sends one key per confirmation, so a double click cannot repeat an action. Without a
+  key, a request that would change nothing (locking a locked account, revoking when no session is active, blocking a blocked
+  address, resolving a resolved investigation) is refused with 409 and creates no duplicate action.
+
+| Action | Effect in this application's records (nothing external) |
 |---|---|
-| Disable employee account (`lock_account`) | status becomes locked, open sessions are revoked, new logins return 403 |
-| Revoke active sessions (`revoke_sessions`) | every open session of the employee is ended immediately |
-| Block source IP (`block_ip`) | logins and requests from that IP are refused and its open sessions are revoked |
-| Remove unauthorised privileges (`remove_privileges`) | write access is downgraded to read; on an account created during an incident (such as `svc.backupNN`) every permission is deleted |
-| Restrict access to a resource (`restrict_access`) | removes the employee's confidential and restricted permissions, or only the chosen resource |
-| Isolate a system (`isolate_system`) | that resource denies every employee until it is released |
-| Resolve investigation (`resolve_investigation`) | marks it resolved with a reason (a later critical alert opens a new one) |
-| Restore account, unblock IP, release system | undo the three disruptive actions; no confirmation needed |
+| Disable account, simulated (`lock_account`) | the account record's status becomes locked and its session rows are revoked; this backend then returns 403 for new logins |
+| Revoke sessions, simulated (`revoke_sessions`) | the employee's open session rows are marked revoked (409 if none are active) |
+| Block IP in this application, simulated (`block_ip`) | the address is added to this application's block list; its login code refuses the address and that address's session rows are revoked. No firewall or network device is involved |
+| Remove privileges, simulated (`remove_privileges`) | write permission rows become read; on an account created during an incident (such as `svc.backupNN`) every permission row is deleted |
+| Restrict sensitive access, simulated (`restrict_access`) | the employee's confidential and restricted permission rows, or only the chosen resource's, are deleted |
+| Isolate system record, simulated (`isolate_system`) | the resource is flagged isolated; the permission check denies every employee until it is released |
+| Resolve investigation (`resolve_investigation`) | marks the investigation and its alerts resolved with a reason (a later critical alert opens a new one) |
+| Restore account, unblock IP, release system (simulated) | undo the disruptive actions; no confirmation needed |
+
+Security events, investigation evidence and risk assessments are never modified by containment (a test compares table digests
+before and after every action type). Backend modules import no network, mail, subprocess or cloud client (also tested), so
+containment cannot reach an external service.
 
 ### What is deliberately not covered
 
@@ -771,8 +839,9 @@ records who, when and why, changes backend state and writes an audit log. Failur
   further attempts get HTTP 429 for `LOGIN_LOCKOUT_SECONDS` (300), even with the right password, and the lockout is
   audited. It is in memory (lost on restart, per process) and per account, so an attacker can also lock a victim out for
   a few minutes. Brute force is additionally *detected* by the burst rules.
-* Containment only changes application state. A real deployment would connect it to a firewall, identity provider and
-  endpoint agents; no such integration exists or is configured here.
+* Containment only changes this application's own state. A real deployment would need authorised integrations with a firewall,
+  identity provider and endpoint agents, plus review of what automated response is acceptable; no such integration exists or
+  is configured here, and nothing in this project should be described as protecting a real organisation.
 * The model learns from synthetic data; production use would need real baselines, tuning and review of false positives.
 * Detection needs events: an attacker who never touches the application produces nothing to analyse.
 
@@ -812,7 +881,7 @@ changed, so filters and navigation are kept.
 | Employee Risk Monitor | employees ranked by behavioural and rule evidence only (no names or demographics) |
 | Attack Timeline | the eight stages built from correlated events, current stage highlighted |
 | Attack Graph | accounts, IPs, sessions, systems, privileged accounts and external destinations from stored events |
-| Response Centre | recommended containment, active controls, history, manual response |
+| Response Centre | recommended simulated containment ("Simulate containment"), active simulated controls, history with results, manual simulated response |
 | Audit Logs | alerts, investigation updates, containment, administrator actions, failed responses |
 
 The risk monitor deliberately ranks only by activity evidence; names, demographics or other personal traits are never
@@ -865,7 +934,7 @@ Interactive documentation: `/docs`. Send `Authorization: Bearer <token>` with th
 | GET / POST / PATCH | `/api/investigations[/{id}]` | admin | investigations (PATCH only reopens a resolved one) |
 | GET | `/api/investigations/{id}/explanation`, `/evidence`, `/export` | admin | explanation, preserved evidence, report download |
 | POST | `/api/investigations/{id}/resolve` | admin | `reason` + `confirm: true` |
-| GET / POST | `/api/containment` | admin | `revoke_sessions`, `lock_account`, `restrict_access`, `remove_privileges`, `block_ip`, `isolate_system`, `restore_account`, `unblock_ip`, `release_system`, `resolve_investigation` (`confirm` for disruptive ones) |
+| GET / POST | `/api/containment` | admin (POST: containment guard) | simulated actions: `revoke_sessions`, `lock_account`, `restrict_access`, `remove_privileges`, `block_ip`, `isolate_system`, `restore_account`, `unblock_ip`, `release_system`, `resolve_investigation`; body takes `employee_id`, `action_type`, `reason`, `investigation_id`, `alert_id`, `target`, `confirm`, `idempotency_key`; 201 on a new action, 200 with `replayed: true` on a retry, 409 for a no-op or key clash, 429 when rate limited |
 | GET | `/api/soc/version`, `/overview`, `/confidence-history`, `/events`, `/employees`, `/investigations[/{id}]`, `/scopes`, `/timeline`, `/graph`, `/response`, `/audit` | admin | SOC read models |
 | GET | `/api/dashboard/stats`, `/api/audit-logs` | admin | KPIs, audit trail |
 | GET / POST | `/api/detection/status`, `/reload`, `/retrain` | admin | model, thresholds, rules |
@@ -886,7 +955,7 @@ Timestamps are stored in UTC and returned as `timestamp` (UTC) and `timestamp_lo
 | `security_alerts` | critical alerts with evidence, exposure, first and triggering event, recommended actions |
 | `attack_investigations` | case file and status linked to the alert |
 | `investigation_evidence` | append-only evidence copies with SHA-256 hashes |
-| `containment_actions` | action, reason, performing administrator, time, status |
+| `containment_actions` | simulated action: type, alert and investigation, employee, reason, initiating administrator, time, status, result and effects (in `details`), idempotency key |
 | `response_controls` | the active blocks, isolations and restrictions the enforcement points consult |
 | `audit_logs` | actor, action, target, IP, details, time |
 | `simulation_runs` | one row per scenario run: scenario, seed and seed mode, status, parameters, full plan and its SHA-256, per-action results, progress, error, timestamps; events and investigations reference it through `simulation_run_id` |
@@ -906,7 +975,7 @@ ml/detect/                   window builder, features, models, hybrid risk, benc
 docs/                        cert-dataset.md, detection-evaluation.md, detection-results/
 docs/cert-dataset.md         CERT dataset setup, field mapping, label rules, caveats
 frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       289 pytest tests
+tests/                       310 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
 requirements.txt  .env.example
 ```
@@ -914,7 +983,7 @@ requirements.txt  .env.example
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 289 tests, about two minutes
+python -m pytest tests -q          # 310 tests, about two minutes
 ```
 
 The suite uses a temporary database and a separate backend process, and an autouse fixture resets the simulation and
@@ -932,6 +1001,11 @@ removes rows each test creates. It covers:
 * **Detection, ML, SOC and investigation workflow:** normal activity, unfamiliar IP, restricted access, large export,
   failed logins, privileged account creation, external transfer, a complete attack, duplicate events, false positives,
   evidence preservation and tamper detection, containment enforcement and report export.
+* **Simulated containment** (`tests/test_containment_simulation.py`): each action records the alert and investigation, the
+  initiator, time and result; only this application's tables change (digest comparison before and after every action) and
+  evidence tables never do; socket, DNS, SMTP, HTTP and subprocess calls fail the test if attempted, and the backend imports no
+  such clients; idempotent retries, key clashes, no-op refusals, rate limiting and audited unauthorised requests; labels,
+  notices and the README are scanned for claims of real enforcement.
 * **Scenario generator and runs** (`tests/test_simulation_runs.py`): same seed gives the same plan, different seeds vary
   timing, volume, order and noise; ordering constraints hold; only documentation addresses and `.invalid` destinations;
   every scenario runs and stores its seed, plan and status; benign scenarios never alert; malicious scenarios leave their
@@ -950,8 +1024,9 @@ removes rows each test creates. It covers:
 * **Detection quality is modest and mostly measured on synthetic data.** On the held-out CERT r4.2 users the best unsupervised
   detector has F1 about 0.2 at a 0.3 % window false-positive rate, and the supervised reference shows what labels would add. The
   benchmark's early-warning evidence covers only incidents that span many days. See docs/detection-evaluation.md.
-* **Simulated containment.** Blocking, isolating, locking and privilege removal change application state only; there is no
-  firewall, directory or endpoint integration, and the SOC dashboard says so on the Response Centre page.
+* **Simulated containment.** Blocking, isolating, locking and privilege removal change this application's records only; there is
+  no firewall, directory, email or endpoint integration, and the SOC dashboard says so on every page and on the Response
+  Centre. The README and UI use "simulate" and "Simulation completed" for that reason.
 * **Source IPs:** the backend trusts only the TCP peer. On one machine every client is loopback, so
   `MAP_LOOPBACK_TO_WORKSTATION` attributes it to the employee's registered workstation IP; with split hosting the
   shared `TRUSTED_FRONTEND_KEY` does the same for requests from your own dashboards. `X-Forwarded-For` is ignored. Anyone

@@ -177,6 +177,38 @@ def test_soc_dashboard_is_restricted_to_security_administrators_and_loads_every_
     assert not at.exception
 
 
+def test_response_centre_runs_simulated_containment_with_a_confirmation_and_records_the_result(backend, monkeypatch):
+    admin = backend.login("SEC-9011", ADMIN_PASSWORD)
+    started = requests.post(f"{backend.url}/api/simulation/runs", headers=admin, timeout=15, json={
+        "scenario": "compromised_account_campaign", "seed": 1, "pace": "instant"})
+    assert started.status_code == 202
+    deadline = time.time() + 60
+    while backend.get("/api/simulation/status", admin)["active_run_id"] and time.time() < deadline:
+        time.sleep(0.2)
+    assert backend.get("/api/soc/overview", admin)["kpis"]["critical_alerts"] >= 1
+
+    at = _sign_in(_run_app("frontend/soc_dashboard.py", backend, monkeypatch), "SEC-9011", ADMIN_PASSWORD)
+    assert not at.exception and "SIMULATED THREAT-DETECTION AND RESPONSE PLATFORM" in _page_text(at)
+    at = at.button(key="nav_Response Centre").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    labels = [b.label for b in at.button]
+    assert "Simulate containment" in labels and not any(l in ("Review", "Execute action") for l in labels)
+    at = next(b for b in at.button if b.label == "Simulate containment").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    text = _page_text(at)
+    assert "Confirm simulated containment" in text and "No external system is contacted" in text
+    before = backend.get("/api/containment", admin)
+    at = next(c for c in at.checkbox if c.label.startswith("I confirm that I want to run this simulated action")).check().run()
+    at = next(b for b in at.button if b.label == "Run simulation").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    after = backend.get("/api/containment", admin)
+    assert len(after) == len(before) + 1
+    new = after[0]
+    assert new["result"].startswith("Simulation completed: ") and new["simulated"] and new["idempotency_key"]
+    assert new["external_systems_contacted"] == [] and new["performed_by_username"] == "soc.admin"
+    requests.post(f"{backend.url}/api/simulation/reset", headers=admin, timeout=30).raise_for_status()
+
+
 def test_simulation_console_drives_an_attack_that_the_soc_then_shows(backend, monkeypatch):
     import time
 

@@ -1,0 +1,22 @@
+track,model,role,level,precision,recall,f1,false_positive_rate,false_negative_rate,tp,fp,fn,tn,roc_auc,average_precision,threshold,threshold_kind
+unit_scenarios,baseline_fixed_rules,"simple baseline rules (fixed thresholds, no model)",window,0.0714,0.0833,0.0769,0.0691,0.9167,1,13,11,175,0.9107,0.3484,1.0,fixed
+unit_scenarios,baseline_fixed_rules,"simple baseline rules (fixed thresholds, no model)",event,0.3824,0.6991,0.4943,0.0703,0.3009,481,777,207,10278,,,1.0,fixed
+unit_scenarios,baseline_fixed_rules,"simple baseline rules (fixed thresholds, no model)",user,0.3333,0.5,0.4,1.0,0.5,1,2,1,0,,,1.0,fixed
+unit_scenarios,robust_z_own,simple baseline: own-history z-scores,window,1.0,0.0833,0.1538,0.0,0.9167,1,0,11,188,0.711,0.2376,0.9908375,validation_quantile
+unit_scenarios,robust_z_own,simple baseline: own-history z-scores,event,0.9007,0.6991,0.7872,0.0048,0.3009,481,53,207,11002,,,0.9908375,validation_quantile
+unit_scenarios,robust_z_own,simple baseline: own-history z-scores,user,1.0,0.5,0.6667,0.0,0.5,1,0,1,2,,,0.9908375,validation_quantile
+unit_scenarios,existing_iforest_raw,existing detector: Isolation Forest on raw volumes,window,0.0,0.0,0.0,0.0053,1.0,0,1,12,187,0.6073,0.0923,0.9975,validation_quantile
+unit_scenarios,existing_iforest_raw,existing detector: Isolation Forest on raw volumes,event,0.0,0.0,0.0,0.0062,1.0,0,69,688,10986,,,0.9975,validation_quantile
+unit_scenarios,existing_iforest_raw,existing detector: Isolation Forest on raw volumes,user,0.0,0.0,0.0,0.5,1.0,0,1,2,1,,,0.9975,validation_quantile
+unit_scenarios,iforest_deviation,improved: Isolation Forest on deviation features,window,0.5,0.1667,0.25,0.0106,0.8333,2,2,10,186,0.8152,0.2978,0.9966666666666667,validation_quantile
+unit_scenarios,iforest_deviation,improved: Isolation Forest on deviation features,event,0.677,0.7006,0.6886,0.0208,0.2994,482,230,206,10825,,,0.9966666666666667,validation_quantile
+unit_scenarios,iforest_deviation,improved: Isolation Forest on deviation features,user,0.6667,1.0,0.8,0.5,0.0,2,1,0,1,,,0.9966666666666667,validation_quantile
+unit_scenarios,lof_deviation,improved alternative: Local Outlier Factor,window,0.4211,0.6667,0.5161,0.0585,0.3333,8,11,4,177,0.8291,0.33,0.9975041666666667,validation_quantile
+unit_scenarios,lof_deviation,improved alternative: Local Outlier Factor,event,0.3728,0.9331,0.5328,0.0977,0.0669,642,1080,46,9975,,,0.9975041666666667,validation_quantile
+unit_scenarios,lof_deviation,improved alternative: Local Outlier Factor,user,1.0,1.0,1.0,0.0,0.0,2,0,0,2,,,0.9975041666666667,validation_quantile
+unit_scenarios,rules_correlation,"improved: rules + correlation, no model",window,0.5,0.5833,0.5385,0.0372,0.4167,7,7,5,181,0.7504,0.6336,0.17781678685771654,validation_quantile
+unit_scenarios,rules_correlation,"improved: rules + correlation, no model",event,0.4358,0.9084,0.5891,0.0732,0.0916,625,809,63,10246,,,0.17781678685771654,validation_quantile
+unit_scenarios,rules_correlation,"improved: rules + correlation, no model",user,0.6667,1.0,0.8,0.5,0.0,2,1,0,1,,,0.17781678685771654,validation_quantile
+unit_scenarios,hybrid,improved: rules + correlation + anomaly model,window,0.5833,0.5833,0.5833,0.0266,0.4167,7,5,5,183,0.7469,0.5997,0.29101799646878324,validation_quantile
+unit_scenarios,hybrid,improved: rules + correlation + anomaly model,event,0.4682,0.9084,0.6179,0.0642,0.0916,625,710,63,10345,,,0.29101799646878324,validation_quantile
+unit_scenarios,hybrid,improved: rules + correlation + anomaly model,user,1.0,1.0,1.0,0.0,0.0,2,0,0,2,,,0.29101799646878324,validation_quantile

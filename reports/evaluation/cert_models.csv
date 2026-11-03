@@ -1,0 +1,25 @@
+track,model,role,level,precision,recall,f1,false_positive_rate,false_negative_rate,tp,fp,fn,tn,roc_auc,average_precision,threshold,threshold_kind
+cert,baseline_fixed_rules,"simple baseline rules (fixed thresholds, no model)",window,0.0323,0.1811,0.0548,0.0156,0.8189,23,689,104,43450,0.8019,0.0153,1.0,fixed
+cert,baseline_fixed_rules,"simple baseline rules (fixed thresholds, no model)",event,0.0019,0.1932,0.0039,0.0215,0.8068,176,90301,735,4106266,,,1.0,fixed
+cert,baseline_fixed_rules,"simple baseline rules (fixed thresholds, no model)",user,0.32,0.7273,0.4444,0.0627,0.2727,8,17,3,254,,,1.0,fixed
+cert,robust_z_own,simple baseline: own-history z-scores,window,0.0152,0.0236,0.0185,0.0044,0.9764,3,194,124,43945,0.8304,0.0185,0.9916960069214963,validation_quantile
+cert,robust_z_own,simple baseline: own-history z-scores,event,0.0016,0.0384,0.003,0.0053,0.9616,35,22186,876,4174381,,,0.9916960069214963,validation_quantile
+cert,robust_z_own,simple baseline: own-history z-scores,user,0.1194,0.7273,0.2051,0.2177,0.2727,8,59,3,212,,,0.9916960069214963,validation_quantile
+cert,existing_iforest_raw,existing detector: Isolation Forest on raw volumes,window,0.0192,0.0236,0.0212,0.0035,0.9764,3,153,124,43986,0.8967,0.0199,0.9923707326451893,validation_quantile
+cert,existing_iforest_raw,existing detector: Isolation Forest on raw volumes,event,0.0012,0.0329,0.0023,0.0059,0.9671,30,24698,881,4171869,,,0.9923707326451893,validation_quantile
+cert,existing_iforest_raw,existing detector: Isolation Forest on raw volumes,user,0.4545,0.4545,0.4545,0.0221,0.5455,5,6,6,265,,,0.9923707326451893,validation_quantile
+cert,iforest_deviation,improved: Isolation Forest on deviation features,window,0.1361,0.1811,0.1554,0.0033,0.8189,23,146,104,43993,0.9574,0.076,0.9970090964803712,validation_quantile
+cert,iforest_deviation,improved: Isolation Forest on deviation features,event,0.009,0.2217,0.0173,0.0053,0.7783,202,22197,709,4174370,,,0.9970090964803712,validation_quantile
+cert,iforest_deviation,improved: Isolation Forest on deviation features,user,0.2895,1.0,0.449,0.0996,0.0,11,27,0,244,,,0.9970090964803712,validation_quantile
+cert,lof_deviation,improved alternative: Local Outlier Factor,window,0.0095,0.0551,0.0162,0.0165,0.9449,7,729,120,43410,0.7976,0.0095,0.9958683333333334,validation_quantile
+cert,lof_deviation,improved alternative: Local Outlier Factor,event,0.0007,0.0582,0.0013,0.0187,0.9418,53,78587,858,4117980,,,0.9958683333333334,validation_quantile
+cert,lof_deviation,improved alternative: Local Outlier Factor,user,0.1266,0.9091,0.2222,0.2546,0.0909,10,69,1,202,,,0.9958683333333334,validation_quantile
+cert,rules_correlation,"improved: rules + correlation, no model",window,0.1493,0.1575,0.1533,0.0026,0.8425,20,114,107,44025,0.9589,0.0626,0.5121822847257105,validation_quantile
+cert,rules_correlation,"improved: rules + correlation, no model",event,0.0112,0.1625,0.021,0.0031,0.8375,148,13065,763,4183502,,,0.5121822847257105,validation_quantile
+cert,rules_correlation,"improved: rules + correlation, no model",user,0.2963,0.7273,0.4211,0.0701,0.2727,8,19,3,252,,,0.5121822847257105,validation_quantile
+cert,hybrid,improved: rules + correlation + anomaly model,window,0.1582,0.1969,0.1754,0.003,0.8031,25,133,102,44006,0.9603,0.0714,0.5128377113263293,validation_quantile
+cert,hybrid,improved: rules + correlation + anomaly model,event,0.0117,0.1998,0.0221,0.0037,0.8002,182,15395,729,4181172,,,0.5128377113263293,validation_quantile
+cert,hybrid,improved: rules + correlation + anomaly model,user,0.2667,0.7273,0.3902,0.0812,0.2727,8,22,3,249,,,0.5128377113263293,validation_quantile
+cert,supervised_gbm_reference,"reference ceiling: supervised, uses labels",window,0.1616,0.2913,0.2079,0.0043,0.7087,37,192,90,43947,0.8807,0.3031,0.4189635211461942,validation_quantile
+cert,supervised_gbm_reference,"reference ceiling: supervised, uses labels",event,0.0181,0.3008,0.0341,0.0035,0.6992,274,14885,637,4181682,,,0.4189635211461942,validation_quantile
+cert,supervised_gbm_reference,"reference ceiling: supervised, uses labels",user,0.3333,0.5455,0.4138,0.0443,0.4545,6,12,5,259,,,0.4189635211461942,validation_quantile

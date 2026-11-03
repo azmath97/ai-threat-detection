@@ -1,0 +1,42 @@
+{
+  "generated_at": "2026-11-03T17:58:04.210370+00:00",
+  "seconds": 299,
+  "partition": "test",
+  "command": "python -m ml.detect.run_evaluation --cert-processed data/processed/cert_r4.2 --out reports/evaluation --partition test --final",
+  "protocol": {
+    "name": "forward-chaining-v2",
+    "seed": 42,
+    "target_fpr": 0.005,
+    "fpr_points": [
+      0.001,
+      0.005,
+      0.01
+    ],
+    "train_end_fraction": 0.45,
+    "validation_end_fraction": 0.55,
+    "bootstrap_resamples": 300,
+    "min_supervised_positives": 20,
+    "notes": []
+  },
+  "software": {
+    "python": "3.12.0",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "numpy": "2.4.6",
+    "pandas": "2.2.2",
+    "scikit-learn": "1.7.2",
+    "scipy": "1.16.2"
+  },
+  "git": {
+    "commit": "f9824d844144c2e052975f8c5af074ba32d24e3b",
+    "uncommitted_changes": true
+  },
+  "feature_count": 101,
+  "hybrid_config_sha256": "372b1f9a8de8f637b21c614ec1557b6a3272b185496a24e3196e0da4fcd3822e",
+  "frozen_config_check": "yes",
+  "notes": [
+    "The CERT test users were already evaluated once in the earlier benchmark (whole timeline, user-disjoint split). This protocol re-uses the same frozen configuration on a later time slice of those users, so it is not a fresh, never-seen test set. No rule, feature or weight was changed.",
+    "The synthetic track uses a new generator seed, so its test users and incidents were never seen during development.",
+    "Fitting (peer baseline, destination statistics, models, baseline-rule thresholds) used the train partition; thresholds used benign validation windows only; the evaluated partition's labels were blanked before fitting.",
+    "Time cutoffs are fractions of each dataset's window date range (CERT 45 % / 52 %, synthetic 45 % / 65 %); incidents that straddle a cutoff are listed and excluded rather than half-used. The synthetic generator was run with threat_start_fraction 0.30 so attacks occur across most of the timeline (its default of 0.55 would leave no attacks in a time-ordered training period)."
+  ]
+}

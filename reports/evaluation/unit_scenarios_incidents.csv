@@ -1,0 +1,15 @@
+track,model,entity_id,scenario,events,detected,delay_hours,events_after_alert,share_after_alert,alert_before_last_event
+unit_scenarios,existing_iforest_raw,S0038,gradual_data_collection,207,False,,,,
+unit_scenarios,existing_iforest_raw,S0039,bulk_export,481,False,,,,
+unit_scenarios,iforest_deviation,S0038,gradual_data_collection,207,True,350.4825,0.0,0.0,False
+unit_scenarios,iforest_deviation,S0039,bulk_export,481,True,13.872222222222222,0.0,0.0,False
+unit_scenarios,lof_deviation,S0038,gradual_data_collection,207,True,110.4825,144.0,0.6956521739130435,True
+unit_scenarios,lof_deviation,S0039,bulk_export,481,True,13.872222222222222,0.0,0.0,False
+unit_scenarios,robust_z_own,S0038,gradual_data_collection,207,False,,,,
+unit_scenarios,robust_z_own,S0039,bulk_export,481,True,13.872222222222222,0.0,0.0,False
+unit_scenarios,rules_correlation,S0038,gradual_data_collection,207,True,182.4825,120.0,0.5797101449275363,True
+unit_scenarios,rules_correlation,S0039,bulk_export,481,True,13.872222222222222,0.0,0.0,False
+unit_scenarios,hybrid,S0038,gradual_data_collection,207,True,182.4825,120.0,0.5797101449275363,True
+unit_scenarios,hybrid,S0039,bulk_export,481,True,13.872222222222222,0.0,0.0,False
+unit_scenarios,baseline_fixed_rules,S0038,gradual_data_collection,207,False,,,,
+unit_scenarios,baseline_fixed_rules,S0039,bulk_export,481,True,13.872222222222222,0.0,0.0,False

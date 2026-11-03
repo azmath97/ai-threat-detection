@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from ml.cert.schema import DatasetError
+from ml.detect.guards import assert_cert_track_is_cert_only
 from ml.detect.windows import (
     DomainContext,
     aggregate_other,
@@ -19,15 +20,17 @@ from ml.detect.windows import (
     prepare_frame,
 )
 
-WEB_COLUMNS = ["event_id", "timestamp_utc", "entity_id", "destination"]
+WEB_COLUMNS = ["event_id", "timestamp_utc", "entity_id", "destination", "source", "is_synthetic"]
 OTHER_COLUMNS = ["event_id", "timestamp_utc", "entity_id", "host", "event_type", "activity", "auth_result", "destination", "resource",
-                 "bytes", "attachment_count", "recipient_count", "external_recipient_count", "removable_media"]
+                 "bytes", "attachment_count", "recipient_count", "external_recipient_count", "removable_media", "source", "is_synthetic"]
 
 
 def iter_complete_days(path: Path, columns: list[str], chunk_rows: int = 1_000_000):
     """Yield prepared blocks that contain only complete days (events are time ordered; verified by prepare)."""
     carry = None
     for chunk in pd.read_csv(path, usecols=columns, chunksize=chunk_rows):
+        assert_cert_track_is_cert_only(chunk)
+        chunk = chunk.drop(columns=[c for c in ("source", "is_synthetic") if c in chunk])
         chunk["_d"] = chunk["timestamp_utc"].str.slice(0, 10)
         frame = chunk if carry is None else pd.concat([carry, chunk], ignore_index=True)
         last = frame["_d"].iloc[-1]
@@ -72,7 +75,9 @@ def build_cert_windows(processed: str | Path, *, chunk_rows: int = 1_000_000, lo
     for kind in ("logon", "device", "file", "email"):
         path = processed / f"events_{kind}.csv.gz"
         if path.exists():
-            frames.append(pd.read_csv(path, usecols=OTHER_COLUMNS))
+            part = pd.read_csv(path, usecols=OTHER_COLUMNS)
+            assert_cert_track_is_cert_only(part)
+            frames.append(part.drop(columns=["source", "is_synthetic"]))
     log("non-web windows ...")
     other = aggregate_other(prepare_frame(pd.concat(frames, ignore_index=True))) if frames else pd.DataFrame()
     return combine_windows(web, other)

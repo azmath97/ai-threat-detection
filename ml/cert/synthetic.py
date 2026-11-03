@@ -72,6 +72,7 @@ class SyntheticConfig:
     lookalike_fraction: float = 0.20       # share of users who get one benign lookalike
     missing_rate: float = 0.03             # per optional field, per event
     typo_logon_rate: float = 0.02          # benign failed-then-successful logons
+    threat_start_fraction: float = 0.55    # injected scenarios start between this fraction of the days and (days - 25); lower = spread earlier
 
 
 def _pick_hour(rng: random.Random, weights: list[float]) -> float:
@@ -294,10 +295,11 @@ def generate(out: str | Path, cfg: SyntheticConfig | None = None, *, profile_pat
             if day.weekday() < 5:
                 builder.normal_day(user, day, extra_files=power * 10, night=night)
         if scenario in threat_names:
-            first = builder.start + timedelta(days=rng.randint(int(cfg.days * 0.55), max(int(cfg.days * 0.55), cfg.days - 25)))
+            lo = int(cfg.days * cfg.threat_start_fraction)
+            first = builder.start + timedelta(days=rng.randint(lo, max(lo, cfg.days - 25)))
             builder.threat(scenario, user, first)
         elif scenario in look_names and scenario not in ("approved_odd_hours", "frequent_authorised_access"):
-            builder.lookalike(scenario, user, builder.start + timedelta(days=rng.randint(int(cfg.days * 0.5), cfg.days - 5)))
+            builder.lookalike(scenario, user, builder.start + timedelta(days=rng.randint(int(cfg.days * min(0.5, cfg.threat_start_fraction)), cfg.days - 5)))
         elif scenario:
             builder.meta.extend({"event_id": r["event_id"], "scenario": scenario, "insider_user": user["user_id"], "incident_file": "",
                                  "incident_start": "", "incident_end": ""} for r in builder.rows if r["entity_id"] == user["entity_id"])

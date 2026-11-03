@@ -1,0 +1,1 @@
+{"evaluated_at": "2026-11-03T17:58:04.210370+00:00", "hybrid_config_sha256": "372b1f9a8de8f637b21c614ec1557b6a3272b185496a24e3196e0da4fcd3822e", "command": "python -m ml.detect.run_evaluation --cert-processed data/processed/cert_r4.2 --out reports/evaluation --partition test --final"}

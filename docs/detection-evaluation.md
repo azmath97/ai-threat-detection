@@ -227,3 +227,73 @@ python -m pytest tests/test_detection_pipeline.py tests/test_detection_states.py
 ```
 
 The first CERT run builds the windows (two passes over `http.csv`, about 10 minutes) and caches them next to the data.
+
+## 10. Rigorous evaluation protocol (one command)
+
+`ml/detect/run_evaluation.py` re-evaluates the detectors under a stricter protocol than section 5 and writes one report per
+run. It supersedes nothing: section 6 is the earlier whole-timeline benchmark.
+
+```powershell
+python -m ml.detect.run_evaluation --cert-processed data/processed/cert_r4.2 --out reports/evaluation --partition test --final
+python -m ml.detect.run_evaluation --out data/processed/eval_dev --partition validation      # development run, not a result
+python -m pytest tests/test_evaluation_protocol.py -q
+```
+
+The committed output of the first command is in [reports/evaluation/](../reports/evaluation) (`report.md`, `results.json`,
+`manifest.json`, per-track CSVs). Its manifest records the git commit and states that the working tree had uncommitted
+changes when it ran (these tests and docs were added after); the frozen-hybrid check in it reads "yes".
+
+**Protocol.** Users are split into disjoint train/validation/test sets, *and* time is cut with forward-chaining cutoffs
+(CERT 45 % / 52 % of the window range: train to 2010-08-15, validation to 2010-09-19, test after that). An incident belongs
+to one user; incidents that straddle a cutoff are excluded and listed, not half-used. Peer baselines, destination
+statistics, models and baseline-rule thresholds are fitted on train windows; alert thresholds are the benign validation
+quantile at 0.5 % FPR; the evaluated partition's labels are blanked before fitting (`blind_partition`), and a test checks
+that corrupting them changes nothing. The test partition needs `--final` and runs once per output directory.
+
+**Three tracks, never combined.** (A) held-out CERT r4.2 with dataset ground truth; (B) project-generated synthetic scenarios
+(fresh seed 2026, 600 users, 150 days, attacks starting from 30 % of the timeline so that training has positives); (C) 40-user
+hand-built unit scenarios (bulk export, gradual collection, a one-off legitimate large transfer, a user who routinely sends
+large transfers). Each has its own thresholds and tables; the report states "no combined score".
+
+**Compared:** the existing detector (Isolation Forest on raw volumes), simple baselines (four fixed rules with
+benign-train-quantile thresholds; own-history robust z-scores), Isolation Forest and LOF on deviation features, rules +
+correlation, the frozen hybrid, and the supervised reference (a ceiling that uses labels). Metrics are given at window,
+event and user level, with confusion matrices, recall at fixed FPRs, per-scenario recall and incidents detected, detection
+delay with the share of an incident's events after the first alert, benign-lookalike false alerts and user-bootstrap
+intervals.
+
+**What the first test run showed** (window level, 0.5 % validation-FPR operating point; read the report for the rest):
+
+| Window-level F1 | CERT (12 incidents) | Synthetic (B) | Unit (C) |
+|---|---|---|---|
+| existing raw Isolation Forest | 0.021 | 0.147 | 0.000 |
+| fixed-rule baseline | 0.055 | 0.319 | 0.077 |
+| Isolation Forest, deviation features | 0.155 | 0.209 | 0.250 |
+| hybrid (frozen) | 0.175 | 0.426 | 0.583 |
+| rules + correlation only | 0.153 | 0.477 | 0.538 |
+| supervised reference | 0.208 | 0.390 | n/a (no training positives) |
+
+These are three different datasets, shown side by side only to compare models inside each column; they are not a score.
+
+* On CERT the hybrid and the deviation Isolation Forest are clearly better than the original model, but precision is low
+  (hybrid 0.158) and the hybrid missed both scenario-3 incidents (0/2) that the fixed-rule baseline and the deviation
+  Isolation Forest caught. Its recall of 0.197 means most malicious days are still missed; incidents detected were 3/6, 3/4
+  and 0/2 for scenarios 1, 2 and 3.
+* On the synthetic track the hybrid detected bulk export 2/2 with no false alerts on the 3 legitimate large transfers, while
+  the fixed-rule baseline and LOF alerted on all 3. Rules + correlation alone scored a higher F1 than the hybrid, so the
+  anomaly model did not help on this track.
+* In the unit track the hybrid detected both malicious users, and the bulk export alert came at the end of that day
+  (0 % of the incident's events after it), so single-day exfiltration is still not caught early.
+* The supervised reference is not an upper bound everywhere (it scored lower than the hybrid on the synthetic track), so
+  the "ceiling" wording describes its role, not a guarantee.
+
+**Caveats that matter.** The CERT test users were already evaluated once in section 6, so this is the same frozen
+configuration on a later time slice of the same users, not a fresh unseen set. The synthetic and unit tracks are the
+project's own generators and reflect its assumptions. CERT r4.2 is a synthetic "dense needles" release. The short CERT
+validation period (3,434 evaluable windows) makes thresholds noisy: the observed test FPR ranged from 0.3 % to 1.7 %
+across models against a 0.5 % target. Small incident counts give wide intervals. Nothing here validates the system for live
+banking use.
+
+**Leakage tests** (`tests/test_evaluation_protocol.py`) fail if an answer-key, label or identity column reaches a model, if
+a feature copies the label, if a synthetic or other-source record appears in the CERT event files, if train, validation and
+test users overlap or the cutoffs are out of order, or if the evaluated partition's labels influence fitting or thresholds.

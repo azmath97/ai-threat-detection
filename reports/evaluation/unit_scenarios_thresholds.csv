@@ -1,0 +1,8 @@
+track,model,kind,value,target_fpr,fpr_0.001,fpr_0.005,fpr_0.01
+unit_scenarios,baseline_fixed_rules,fixed,1.0,,,,
+unit_scenarios,robust_z_own,validation_quantile,0.9908375,0.005,0.995,0.9908375,0.9875166666666667
+unit_scenarios,existing_iforest_raw,validation_quantile,0.9975,0.005,0.9975,0.9975,0.9941833333333333
+unit_scenarios,iforest_deviation,validation_quantile,0.9966666666666667,0.005,0.9976691666666666,0.9966666666666667,0.9916666666666667
+unit_scenarios,lof_deviation,validation_quantile,0.9975041666666667,0.005,1.0,0.9975041666666667,0.9950249999999999
+unit_scenarios,rules_correlation,validation_quantile,0.17781678685771654,0.005,0.19298419364995317,0.17781678685771654,0.14639282416374733
+unit_scenarios,hybrid,validation_quantile,0.29101799646878324,0.005,0.3245934003755564,0.29101799646878324,0.2384272507355852

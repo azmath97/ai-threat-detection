@@ -1,0 +1,25 @@
+track,model,role,level,precision,recall,f1,false_positive_rate,false_negative_rate,tp,fp,fn,tn,roc_auc,average_precision,threshold,threshold_kind
+synthetic,baseline_fixed_rules,"simple baseline rules (fixed thresholds, no model)",window,0.3667,0.2821,0.3188,0.0033,0.7179,11,19,28,5701,0.9506,0.326,1.0,fixed
+synthetic,baseline_fixed_rules,"simple baseline rules (fixed thresholds, no model)",event,0.453,0.8362,0.5877,0.0058,0.1638,3067,3703,601,629713,,,1.0,fixed
+synthetic,baseline_fixed_rules,"simple baseline rules (fixed thresholds, no model)",user,0.3636,0.7273,0.4848,0.0828,0.2727,8,14,3,155,,,1.0,fixed
+synthetic,robust_z_own,simple baseline: own-history z-scores,window,0.4444,0.3077,0.3636,0.0026,0.6923,12,15,27,5705,0.8175,0.328,0.9924499783187757,validation_quantile
+synthetic,robust_z_own,simple baseline: own-history z-scores,event,0.4986,0.8487,0.6281,0.0049,0.1513,3113,3131,555,630285,,,0.9924499783187757,validation_quantile
+synthetic,robust_z_own,simple baseline: own-history z-scores,user,0.4286,0.8182,0.5625,0.071,0.1818,9,12,2,157,,,0.9924499783187757,validation_quantile
+synthetic,existing_iforest_raw,existing detector: Isolation Forest on raw volumes,window,0.1724,0.1282,0.1471,0.0042,0.8718,5,24,34,5696,0.7372,0.1351,0.9941150963265811,validation_quantile
+synthetic,existing_iforest_raw,existing detector: Isolation Forest on raw volumes,event,0.3194,0.2396,0.2738,0.003,0.7604,879,1873,2789,631543,,,0.9941150963265811,validation_quantile
+synthetic,existing_iforest_raw,existing detector: Isolation Forest on raw volumes,user,0.3125,0.4545,0.3704,0.0651,0.5455,5,11,6,158,,,0.9941150963265811,validation_quantile
+synthetic,iforest_deviation,improved: Isolation Forest on deviation features,window,0.1667,0.2821,0.2095,0.0096,0.7179,11,55,28,5665,0.8912,0.273,0.996823390943443,validation_quantile
+synthetic,iforest_deviation,improved: Isolation Forest on deviation features,event,0.2535,0.6437,0.3637,0.011,0.3563,2361,6953,1307,626463,,,0.996823390943443,validation_quantile
+synthetic,iforest_deviation,improved: Isolation Forest on deviation features,user,0.4211,0.7273,0.5333,0.0651,0.2727,8,11,3,158,,,0.996823390943443,validation_quantile
+synthetic,lof_deviation,improved alternative: Local Outlier Factor,window,0.2373,0.7179,0.3567,0.0157,0.2821,28,90,11,5630,0.9454,0.4761,0.9974205538004088,validation_quantile
+synthetic,lof_deviation,improved alternative: Local Outlier Factor,event,0.2219,0.9591,0.3604,0.0195,0.0409,3518,12335,150,621081,,,0.9974205538004088,validation_quantile
+synthetic,lof_deviation,improved alternative: Local Outlier Factor,user,0.3667,1.0,0.5366,0.1124,0.0,11,19,0,150,,,0.9974205538004088,validation_quantile
+synthetic,rules_correlation,"improved: rules + correlation, no model",window,0.3407,0.7949,0.4769,0.0105,0.2051,31,60,8,5660,0.9443,0.53,0.2534555282682149,validation_quantile
+synthetic,rules_correlation,"improved: rules + correlation, no model",event,0.2653,0.9741,0.417,0.0156,0.0259,3573,9896,95,623520,,,0.2534555282682149,validation_quantile
+synthetic,rules_correlation,"improved: rules + correlation, no model",user,0.5,1.0,0.6667,0.0651,0.0,11,11,0,158,,,0.2534555282682149,validation_quantile
+synthetic,hybrid,improved: rules + correlation + anomaly model,window,0.3133,0.6667,0.4262,0.01,0.3333,26,57,13,5663,0.9263,0.4676,0.41566993873228103,validation_quantile
+synthetic,hybrid,improved: rules + correlation + anomaly model,event,0.2777,0.9477,0.4296,0.0143,0.0523,3476,9039,192,624377,,,0.41566993873228103,validation_quantile
+synthetic,hybrid,improved: rules + correlation + anomaly model,user,0.6875,1.0,0.8148,0.0296,0.0,11,5,0,164,,,0.41566993873228103,validation_quantile
+synthetic,supervised_gbm_reference,"reference ceiling: supervised, uses labels",window,0.3947,0.3846,0.3896,0.004,0.6154,15,23,24,5697,0.7005,0.3437,0.0003101911106127952,validation_quantile
+synthetic,supervised_gbm_reference,"reference ceiling: supervised, uses labels",event,0.4263,0.8514,0.5681,0.0066,0.1486,3123,4203,545,629213,,,0.0003101911106127952,validation_quantile
+synthetic,supervised_gbm_reference,"reference ceiling: supervised, uses labels",user,0.3667,1.0,0.5366,0.1124,0.0,11,19,0,150,,,0.0003101911106127952,validation_quantile

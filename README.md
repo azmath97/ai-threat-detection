@@ -67,7 +67,7 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | SOC read models | `soc_service.py`, `soc_routes.py` |
 | Simulation | `simulation_service.py`, `simulation_routes.py` |
 | Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (196 tests) |
+| Tests | `tests/` (221 tests) |
 
 ## Technology stack
 
@@ -515,6 +515,18 @@ completed*. Model outputs are never shown as confirmed; "confirmed" exists only 
 and the live engine's confidence components are itemised on the investigation page together with the caveat that one event can
 inform more than one component.
 
+### Rigorous evaluation (one command)
+
+`python -m ml.detect.run_evaluation --cert-processed data/processed/cert_r4.2 --out reports/evaluation --partition test --final`
+re-evaluates every detector with user-disjoint **and** time-ordered splits, fitting and calibrating on train/validation only,
+and writes `report.md`, `results.json`, `manifest.json` and per-track CSVs to [reports/evaluation/](reports/evaluation). It
+reports three separate tracks (held-out CERT, project-generated synthetic scenarios, hand-built unit scenarios) and
+deliberately gives no combined score. Compared with the original raw-volume Isolation Forest, the deviation-feature models and
+the hybrid are better on all three tracks, but CERT precision stays low (hybrid window-level F1 0.175, original 0.021, supervised
+reference 0.208), and the hybrid missed both scenario-3 incidents. The CERT test users were already used once in the earlier
+benchmark, so this is a later time slice of the same users, not a fresh set. Details, caveats and the leakage tests are in
+[docs/detection-evaluation.md](docs/detection-evaluation.md#10-rigorous-evaluation-protocol-one-command).
+
 ## Detection rules in detail
 
 The rules are data, not code: `backend/detection_rules.json` (18 rules, hot-reloadable). Every rule has a *severity*
@@ -843,7 +855,7 @@ ml/detect/                   window builder, features, models, hybrid risk, benc
 docs/                        cert-dataset.md, detection-evaluation.md, detection-results/
 docs/cert-dataset.md         CERT dataset setup, field mapping, label rules, caveats
 frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       196 pytest tests
+tests/                       221 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
 requirements.txt  .env.example
 ```
@@ -851,7 +863,7 @@ requirements.txt  .env.example
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 196 tests, about two minutes
+python -m pytest tests -q          # 221 tests, about two minutes
 ```
 
 The suite uses a temporary database and a separate backend process, and an autouse fixture resets the simulation and

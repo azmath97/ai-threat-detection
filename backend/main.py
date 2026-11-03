@@ -406,6 +406,9 @@ def detection_status(_: AuthContext = Depends(require_admin)):
     """ML model state (Isolation Forest or fallback), thresholds and rule configuration."""
     s = get_settings()
     return {
+        "data_notice": ("All training and evaluation data is synthetic: project-generated sessions and, for external "
+                        "benchmarking, the CERT Insider Threat Test Dataset (synthetic users and synthetic malicious actors). "
+                        "None of it is real banking data."),
         "model": get_detector().status(),
         "thresholds": {"suspicious": s.threat_suspicious_threshold, "high_risk": s.threat_high_threshold,
                        "critical": s.threat_critical_threshold, "alert_min_severity": s.alert_min_severity},

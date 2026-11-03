@@ -594,7 +594,8 @@ def page_risk() -> None:
                   "last": "Last suspicious activity", "stage": "Current stage", "inv": "Investigation", "type": "Account type"},
                  result_column="severity")
         st.caption("Scores come from the detection engine (anomaly model, rules, correlation and baseline). "
-                   "No names or personal characteristics are used.")
+                   "No names or personal characteristics are used. All data here, and every benchmark used to evaluate the "
+                   "model (project-generated sessions, the CERT Insider Threat Test Dataset), is synthetic; none of it is real banking data.")
 
     live(render)
 

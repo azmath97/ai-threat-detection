@@ -9,6 +9,7 @@ requests>=2.31            # dashboards -> backend
 streamlit>=1.50           # Employee Portal, Simulation Console, SOC Dashboard (pulls in pandas itself)
 plotly>=5.20
 numpy>=1.26
+pandas>=2.0               # CERT dataset preparation (ml/cert); also required by Streamlit
 scikit-learn>=1.4
 joblib>=1.3
 

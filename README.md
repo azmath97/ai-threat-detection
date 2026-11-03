@@ -67,7 +67,7 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | SOC read models | `soc_service.py`, `soc_routes.py` |
 | Simulation | `simulation_service.py`, `simulation_routes.py` |
 | Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (147 tests) |
+| Tests | `tests/` (180 tests) |
 
 ## Technology stack
 
@@ -449,10 +449,30 @@ gives ROC-AUC, false-positive rate and recall at the chosen threshold (and recal
 just the score distribution when they do not. `tests/test_hardening.py` runs it on a CSV generated from the synthetic
 generators, which proves the plumbing only, not real-world accuracy.
 
-**Using a public insider-threat dataset needs you.** The CERT insider-threat datasets (Carnegie Mellon SEI) are not
-included and are not downloaded by this project: obtain one yourself under its terms, convert its logon, file, device
-and email records and its answer key into the CSV above (mapping its resources onto the catalogue ids), and run the
-command. Do not commit the downloaded files. Until that is done, **no figure in this README comes from real data.**
+### The CERT Insider Threat Test Dataset (external benchmark) and a separate synthetic supplement
+
+The project has a repeatable pipeline for the **CERT Insider Threat Test Dataset, release r4.2** (Carnegie Mellon
+University SEI CERT Division with ExactData, LLC; CC BY 4.0; <https://sei.cmu.edu/library/insider-threat-test-dataset/>).
+**It is synthetic** (generated background users plus synthetic malicious actors) and is *not* real banking data; no
+figure derived from it describes a real organisation. It is not included in the repository and is never committed or
+uploaded: you download it yourself, verify the checksums and process it locally. Full instructions, the exact file
+layout, the source-field mapping, the label rules and the caveats are in [docs/cert-dataset.md](docs/cert-dataset.md).
+
+```powershell
+python -m ml.cert.validate  --source data/external/cert/r4.2 --answers data/external/cert/answers-extract/answers
+python -m ml.cert.prepare   --source data/external/cert/r4.2 --answers data/external/cert/answers-extract/answers --out data/processed/cert_r4.2
+python -m ml.cert.synthetic --out data/processed/synthetic_test --seed 42 --profile data/processed/cert_r4.2/cert_profile.json
+```
+
+What the pipeline guarantees: the original files are never modified; events, ground-truth labels, evaluation metadata and
+display fields are stored separately; labels follow the official answer key event by event (a malicious user's other
+events are *not* labelled malicious, and events the key lists under another account are treated as ambiguous and
+excluded from metrics); users are split into train/validation/test as whole users; `ml/cert/leakage.py` rejects labels,
+identities, answer-key fields and synthetic events as model inputs; and a synthetic supplement (`source = synthetic_test`,
+fixed seed or recorded random seed, manifest with the reason for every scenario) is kept apart from the CERT test set.
+This step prepares data only: **the application's detector has not been trained or evaluated on CERT**, because
+r4.2 has no IP addresses, authentication results or record counts, so a CERT-specific feature builder is still needed.
+Until a CERT evaluation is run and reported, no figure in this README comes from CERT or any real data.
 
 ## Detection rules in detail
 
@@ -776,9 +796,11 @@ app.py                       launcher (loads .env, starts backend and dashboards
 backend/                     FastAPI app, models, detection, correlation, investigation, response, SOC read models
   detection_rules.json       configurable rules, weights and parameters
 data/                        demo_accounts.py (credentials), seed_data.py (history), the SQLite file (git-ignored)
-ml/                          features.py, synthetic_data.py, train_model.py, anomaly_detector.py, artifacts/ (git-ignored)
+ml/                          features.py, synthetic_data.py, train_model.py, anomaly_detector.py, evaluate_dataset.py, artifacts/ (git-ignored)
+ml/cert/                     CERT r4.2 pipeline: schema, validate, prepare, labels, split, leakage, synthetic supplement
+docs/cert-dataset.md         CERT dataset setup, field mapping, label rules, caveats
 frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       147 pytest tests
+tests/                       180 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
 requirements.txt  .env.example
 ```
@@ -786,7 +808,7 @@ requirements.txt  .env.example
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 147 tests, about one minute
+python -m pytest tests -q          # 180 tests, about two minutes
 ```
 
 The suite uses a temporary database and a separate backend process, and an autouse fixture resets the simulation and

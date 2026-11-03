@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend import baseline as baseline_service
-from backend import controls, detection_engine, investigation_service, threat_engine
+from backend import controls, detection_engine, investigation_service, run_context, threat_engine
 from backend.catalog import ACCESS_LEVEL_RANK, ACTION_REQUIRED_LEVEL, ACTION_TO_EVENT, SEVERITY_LABELS, SEVERITY_RANK, STAGE_LABELS, is_self_service
 from backend.config import get_settings
 from backend.database import utcnow
@@ -116,6 +116,7 @@ def record_event(
         is_synthetic=synthetic,
         scenario=scenario,
         request_id=request_id,
+        simulation_run_id=run_context.current_run_id(),
         details={**(details or {}), **({"synthetic": True} if synthetic else {})},
         timestamp=occurred_at or utcnow(),
     )

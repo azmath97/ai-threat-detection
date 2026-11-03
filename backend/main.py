@@ -83,6 +83,12 @@ logger = logging.getLogger("insider_threat")
 async def lifespan(_app: FastAPI):
     validate_for_environment()
     init_db()
+    from backend import simulation_runs
+
+    with SessionLocal() as db:
+        interrupted = simulation_runs.recover_interrupted(db)
+    if interrupted:
+        logger.warning("Marked %s interrupted simulation run(s) as failed", interrupted)
     detector = ensure_model()  # loads the saved Isolation Forest (trains one on first start); falls back if unavailable
     logger.info("Anomaly detection mode: %s", detector.status()["mode"])
     if get_settings().auto_seed:

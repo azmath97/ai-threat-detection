@@ -76,6 +76,8 @@ def describe(e: SecurityEvent) -> str:
         return f"Administrative action by {who} on {_name(e.resource)} ({e.outcome})"
     if e.event_type == "permission_change_attempt":
         return f"Permission change attempt by {who} ({e.outcome})"
+    if e.event_type == "file_download" and (e.details or {}).get("channel") == "removable_media" and e.outcome != "denied":
+        return f"{who} copied {_name(e.resource)}{n} to removable media ({(e.details or {}).get('device', 'device')})"
     verb = {"resource_access": "viewed", "file_download": "downloaded", "data_export": "exported"}.get(e.event_type, e.event_type)
     if e.outcome == "denied":
         return f"{who} was denied access to {_name(e.resource)} ({verb} attempt)"

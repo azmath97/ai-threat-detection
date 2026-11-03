@@ -44,8 +44,12 @@ def test_each_state_has_its_own_condition():
 def test_states_and_audit_follow_a_simulated_attack_through_containment(client, admin):
     employees = client.get("/api/employees", headers=admin).json()
     david = next(e["id"] for e in employees if e["username"] == "david.kumar")
-    run = client.post("/api/simulation/run", headers=admin, json={"target_employee_id": david, "records": 8000})
-    assert run.status_code == 200
+    from conftest import run_steps
+
+    from backend.simulation_service import STEP_IDS
+
+    done = run_steps(client, admin, "david.kumar", STEP_IDS, records=8000)
+    assert all(r["status"] == "completed" for r in done)
     threats = client.get("/api/soc/overview", headers=admin).json()["threats"]
     row = next(t for t in threats if t["employee_id"] == "EMP-1004")
     states = {s["state"]: s for s in row["states"]}

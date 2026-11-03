@@ -65,9 +65,9 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | Detection | `detection_engine.py`, `detection_rules.json`, `rules.py`, `baseline.py`, `correlation_engine.py`, `threat_engine.py`, `data_exposure.py`, `ml/` |
 | Investigation and response | `investigation_service.py`, `investigation_explainer.py`, `investigation_export.py`, `investigation_routes.py`, `response_service.py`, `controls.py` |
 | SOC read models | `soc_service.py`, `soc_routes.py` |
-| Simulation | `simulation_service.py`, `simulation_routes.py` |
+| Simulation | `scenario_generator.py` (seeded plans), `simulation_runs.py` (background runs, status, stop), `simulation_service.py` (manual steps, reset), `simulation_routes.py` |
 | Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (221 tests) |
+| Tests | `tests/` (289 tests) |
 
 ## Technology stack
 
@@ -245,16 +245,63 @@ Things to know before relying on layout B:
 ## How to simulate an attack
 
 The simulation runs through the **same** authentication, permission checks, event collection and detection engine as a
-normal employee. It is only available to the security administrator and clearly marked as synthetic.
+normal employee. It is only available to the security administrator and clearly marked as synthetic. A seeded
+**scenario generator** (`backend/scenario_generator.py`) plans each run; a background runner
+(`backend/simulation_runs.py`) submits the planned actions one by one through the backend's ingestion functions
+(`authenticate`, `access_resource`, `record_event`, the same ones the API routes call). The simulator never writes an alert, a
+risk score or an investigation: those come only from the detection pipeline, so a run's outcome is whatever the detector
+decides.
+
+**Scenarios**
+
+| Scenario | What it does |
+|---|---|
+| Benign employee activity | a normal session from a familiar address |
+| Benign high-volume file transfer | a legitimate large export from a resource the employee is entitled to (a lookalike for bulk export) |
+| Gradual collection followed by staging | one session of growing downloads from several classified resources, then a large consolidated export; no external transfer |
+| Bulk export | a compromised account (usually from an unfamiliar address) probes classified resources and exports a very large set |
+| Suspicious external transfer | a collection step, then an attempted or confirmed transfer to a synthetic destination (recorded separately from the collection) |
+| Removable-media activity | records copied to a simulated USB device, from routine to large volumes |
+| Multiple low-severity signals | an unfamiliar address, a couple of failed logins, a denied low-level request and a modest download that are each minor but suspicious together |
+| Compromised account campaign (full chain) | login, restricted probing, export, failed admin logins, privileged-account attempt, external transfer; which stages happen and in what order varies by seed |
+
+**What is randomised.** Within bounds and from the seed: the employee (if you do not pick one), event timing (gaps of
+0.25 to 2.2 s), volumes, which resources are touched, the order of actions that have no dependency, whether a session is
+closed, the simulated external address and destination, and 1 to 3 other employees whose benign activity is interleaved
+as background noise. Ordering rules always hold (sign in before acting, create an account before using it, collect before
+transferring, nothing after a logout). Failed logins use the real login code with a password that can never be valid.
+
+**Seeds.** *Random (demo)* draws a new seed per run; *Fixed (reproducible)* replays: the same seed, scenario and employee
+give an identical plan (its SHA-256 is stored) and the same sequence of events. Each run stores its seed, seed mode,
+parameters, full plan, per-action results and status in `simulation_runs`; every event and investigation it creates carries
+the run id (`security_events.simulation_run_id`, `attack_investigations.simulation_run_id`).
+
+**Status and controls.** A run is *queued, running, completed, failed* or *cancelled*. **Start run** begins one; **Stop run**
+ends it between actions (events already stored are kept as evidence and the run's sessions are closed); **Reset** is refused
+while a run is active. Only one run can be active at a time (a unique database slot enforces this), a repeated request with
+the same idempotency key returns the original run (the console sends one key per start intent, so reruns and double clicks
+cannot duplicate a run), and a run interrupted by a backend restart is marked failed on startup. A new run on an employee
+who still has flagged simulated events inside the correlation window, or an open investigation, from an earlier run is
+refused with an explanation, so runs never share an investigation; choose another employee or reset. Manual steps are
+disabled during a run.
+
+**Safety.** Everything is synthetic: external addresses come from the RFC 5737 documentation ranges (`192.0.2.0/24`,
+`198.51.100.0/24`, `203.0.113.0/24`), destinations end in the reserved `.invalid` top level, and removable media is a label.
+The simulator makes no network connection, performs no name lookup, scans nothing and sends nothing; a test fails if it
+tries. Containment still bites: if an administrator locks the account or revokes a session mid-run, the remaining actions
+are recorded as blocked.
 
 **With the dashboards** (best for a demo)
 
 1. Open the SOC Dashboard (http://127.0.0.1:8503), sign in as `SEC-9011` and stay on *Security Overview*.
 2. Open the Simulation Console (http://127.0.0.1:8502), sign in as `SEC-9011`.
-3. Choose the scenario and account (default: `EMP-1004`), the attacker's source IP and the number of records, then press
-   **Run complete scenario**, or run the steps one at a time.
-4. Watch the SOC dashboard: the confidence meter rises, a **Critical** alert and an investigation appear, and the
-   timeline, graph and Response Centre fill in. The alert comes at the large-export step, before the external transfer.
+3. Choose a scenario, an employee (or *Chosen by the seed*), the seed mode, pace (*Demo* spreads the actions over up to 25 s;
+   *Instant* does not wait) and the number of background employees, then press **Start run**. The run panel shows its
+   status, progress, seed, plan fingerprint and what the detector produced (highest level, rules fired, whether an alert
+   was raised). The individual stages can also be triggered by hand under *Individual steps*.
+4. Watch the SOC dashboard. Malicious scenarios can raise a Critical alert and an investigation, but none is guaranteed:
+   benign scenarios stay Normal or at most Suspicious, and the same malicious scenario reaches different levels for
+   different seeds.
 
 **With the API**
 
@@ -263,23 +310,27 @@ $base = "http://127.0.0.1:8000"
 $login = '{"employee_id":"SEC-9011","password":"Sentinel#Vault2026"}'
 $tok = (Invoke-RestMethod "$base/api/auth/login" -Method Post -ContentType application/json -Body $login).access_token
 $h = @{ Authorization = "Bearer $tok" }
-$employees = Invoke-RestMethod "$base/api/employees" -Headers $h
-$david = ($employees | Where-Object username -eq "david.kumar").id
-$body = @{ target_employee_id = $david; source_ip = "185.220.101.45"; records = 8000 } | ConvertTo-Json
-Invoke-RestMethod "$base/api/simulation/run" -Method Post -Headers $h -ContentType application/json -Body $body
+$body = @{ scenario = "bulk_export"; seed = 42; pace = "instant"; idempotency_key = [guid]::NewGuid().ToString("N") } | ConvertTo-Json
+$run = Invoke-RestMethod "$base/api/simulation/runs" -Method Post -Headers $h -ContentType application/json -Body $body
+Invoke-RestMethod "$base/api/simulation/runs/$($run.id)" -Headers $h                        # status, plan, results, observed outcome
+Invoke-RestMethod "$base/api/simulation/runs/$($run.id)/cancel" -Method Post -Headers $h    # stop a running run
 ```
 
-Run one step with `POST /api/simulation/steps` (`{"target_employee_id": .., "step": "large_export", "records": 8000}`).
+Omit `seed` for a random one and `target_employee_id` to let the seed choose an eligible employee. Other optional fields:
+`records` (primary transfer volume), `source_ip` (external address for the scenarios that use one) and `noise` (0 to 3
+background employees). Individual stages remain available at `POST /api/simulation/steps`
+(`{"target_employee_id": .., "step": "large_export", "records": 8000}`).
 Run it on an account nobody is using: genuine activity during the run is scored in the same window.
-The seven steps are explained in [The simulated attack, step by step](#the-simulated-attack-step-by-step).
+The stages are explained in [The simulated attack, step by step](#the-simulated-attack-step-by-step).
 
 ## How to reset the simulation
 
-* Simulation Console: tick *Confirm reset*, press **Reset simulation**.
-* API: `POST /api/simulation/reset` (administrator).
+* Simulation Console: tick *Confirm reset*, press **Reset simulation** (disabled while a run is active; stop it first).
+* API: `POST /api/simulation/reset` (administrator; 409 while a run is active).
 
-Reset removes every synthetic event, session, alert, investigation (with its evidence), assessment, privileged account
-and response control, undoes containment applied to the affected employees and restores their last-login time. Real
+Reset removes every synthetic event, session, alert, investigation (with its evidence), assessment, privileged account,
+response control and simulation run record, undoes containment applied to the affected employees and restores their
+last-login time. The seeds and plan fingerprints of the removed runs are kept in the reset's audit entry. Real
 (non-synthetic) data is never touched. The reset is recorded in the audit log.
 
 ## How it works, end to end
@@ -529,7 +580,7 @@ benchmark, so this is a later time slice of the same users, not a fresh set. Det
 
 ## Detection rules in detail
 
-The rules are data, not code: `backend/detection_rules.json` (18 rules, hot-reloadable). Every rule has a *severity*
+The rules are data, not code: `backend/detection_rules.json` (19 rules, hot-reloadable). Every rule has a *severity*
 between 0 and 1 and, where relevant, an attack *stage*. A rule only counts as evidence if its severity is at least
 `min_evidence_severity` (0.10); weaker flags are kept on the event for context but do not add to the score.
 
@@ -548,6 +599,7 @@ between 0 and 1 and, where relevant, an attack *stage*. A rule only counts as ev
 | `rapid_enumeration` | 0.30 | Sensitive Resource Access | 5 or more classified resources touched within 10 minutes |
 | `large_export` | 0.42 | Collection | export or download over `max(500, 3 x the employee's largest historical session download)` |
 | `data_export` | 0.08 | none | any ordinary export (context only) |
+| `removable_media_copy` | 0.34 (halved below the bulk threshold) | Collection | records of a classified resource copied to removable media (`details.channel = removable_media`); fires once per correlation window |
 | `unusual_outbound_transfer` | 0.38 | Collection | an external transfer by an employee with no earlier transfers, or one at or above the large-export threshold |
 | `external_transfer_confirmed` | 0.72 | Exfiltration | an external transfer that succeeded with status `confirmed` |
 | `permission_change_attempt` | 0.40 | Privilege Escalation | a permission-change event, or a denied administrative action |
@@ -638,13 +690,14 @@ A large export alone is reported as an export, **never** as exfiltration.
 
 ## The simulated attack, step by step
 
-Target default `EMP-1004` (David Kumar, IT administrator), attacker IP `185.220.101.45`, device
-`SimulatedAttackerToolkit/1.0 (Linux x86_64; synthetic)`, external destination `files.exfil-sim.example.invalid`.
-The attacker uses the target's stolen password through the normal login code path.
+These are the stages an administrator can trigger by hand under *Individual steps* (`POST /api/simulation/steps`) and that
+the *Compromised account campaign* scenario draws from. Defaults for the manual steps: attacker address `203.0.113.45` (an
+RFC 5737 documentation address), device `SimulatedAttackerToolkit/1.0 (Linux x86_64; synthetic)`, external destination
+`files.exfil-sim.example.invalid`. The attacker uses the target's stolen password through the normal login code path.
 
 | # | Step | What the backend records | Why it is suspicious | Stage |
 |---|---|---|---|---|
-| 1 | Login from unfamiliar IP | `login` from `185.220.101.45` | IP is not in the employee's baseline; weak on its own | Initial Access |
+| 1 | Login from unfamiliar IP | `login` from the simulated external address | IP is not in the employee's baseline; weak on its own | Initial Access |
 | 2 | Access restricted resources | `resource_access` on HR, payroll, IT admin console, audit, loans; results `success` or `denied` by the real permission check | denied restricted probes and rapid enumeration across departments | Sensitive Resource Access |
 | 3 | Large export | `data_export` or `file_download` of the chosen number of records (default 25,000) from the most sensitive resource the account can reach | far above the employee's history | Collection |
 | 4 | Failed administrator logins | five `login_failed` events against the admin console | password guessing; `failed_login_burst` and `admin_console_login_failed` | Credential Misuse |
@@ -652,22 +705,18 @@ The attacker uses the target's stolen password through the normal login code pat
 | 6 | Login with the new account | `login` as `svc.backupNN` | new account used within 24 hours; attributed to the employee that created it | Lateral Movement |
 | 7 | External data transfer | `external_transfer` to the external destination, status `confirmed` | records leave the organisation | Exfiltration |
 
-The second scenario, `finance_data_theft` (Alice Morgan), runs steps 1 to 4 and 7: a standard employee cannot create
-accounts, restricted access is denied by the backend and exports are limited to her own data.
+The campaign scenario draws which of these stages happen (login always first), their order (account creation always
+precedes the login with it; a transfer always follows an export), the export size, the number of failed administrator
+logins (3 to 8) and which 3 to 5 resources are probed from the run's seed, so the stored seed replays the same campaign.
+Every stage still goes through the real login, permission checks, event pipeline and detection engine, so a stage the
+account is not entitled to is denied (a standard employee cannot create accounts, and restricted access is denied by the
+backend), and a campaign that never reaches an export or a transfer is scored accordingly. It varies the sequence; it is
+still a scripted simulation, not an adaptive attacker.
 
-The two scenarios above are fixed, so they are predictable by design (they are what the tests and the demo rely on). The
-third, **`randomized_campaign`**, is not: each run draws, from a seed, which stages happen (login always first), their
-order (account creation always precedes the login with it; a transfer always follows an export), the export size
-(0.4x to 1.6x the chosen record count, at least 500), the number of failed administrator logins (3 to 8) and which 3 to 5
-resources are probed. The seed is returned by `POST /api/simulation/run` (`"seed"`, `"plan"`) and can be sent back to
-replay the same campaign. Every stage still goes through the real login, permission checks, event pipeline and detection
-engine, so a stage the account is not entitled to is denied exactly as in the fixed scenarios, and a campaign that never
-reaches an export or a transfer is scored accordingly. It varies the sequence; it is still a scripted simulation, not an
-adaptive attacker.
-
-The critical alert appears by step 3 or 4, **before step 7**. Step 7 is stored as its own `external_transfer` event with
+When a run reaches a critical alert it is normally by the export or the failed administrator logins, **before the external
+transfer**, but that depends on the stages drawn. The external transfer is stored as its own `external_transfer` event with
 the records counted separately from the earlier export, so the exposure shows `confirmed_export` first and
-`confirmed_external_transfer` only after step 7.
+`confirmed_external_transfer` only after a confirmed transfer.
 
 ## How attacks are prevented, contained and what is not prevented
 
@@ -820,7 +869,8 @@ Interactive documentation: `/docs`. Send `Authorization: Bearer <token>` with th
 | GET | `/api/soc/version`, `/overview`, `/confidence-history`, `/events`, `/employees`, `/investigations[/{id}]`, `/scopes`, `/timeline`, `/graph`, `/response`, `/audit` | admin | SOC read models |
 | GET | `/api/dashboard/stats`, `/api/audit-logs` | admin | KPIs, audit trail |
 | GET / POST | `/api/detection/status`, `/reload`, `/retrain` | admin | model, thresholds, rules |
-| GET / POST | `/api/simulation/scenarios`, `/status`, `/steps`, `/run`, `/reset` | admin, simulation enabled | attack simulation (`records` sets the export size; `scenario: randomized_campaign` with an optional `seed` randomises the run) |
+| GET / POST | `/api/simulation/scenarios`, `/status`, `/steps`, `/reset` | admin, simulation enabled | scenario catalogue (with per-employee eligibility), simulation state, manual single steps, reset (409 while a run is active) |
+| POST / GET | `/api/simulation/runs`, `/runs/{id}`, `POST /runs/{id}/cancel` | admin, simulation enabled | start a seeded scenario run (202; `scenario`, optional `target_employee_id`, `seed`, `records`, `source_ip`, `noise`, `pace`, `idempotency_key`), poll its status, plan, results and observed outcome, stop it; 409 if a run is active or the employee's earlier evidence would be mixed in |
 
 Timestamps are stored in UTC and returned as `timestamp` (UTC) and `timestamp_local`.
 
@@ -839,6 +889,7 @@ Timestamps are stored in UTC and returned as `timestamp` (UTC) and `timestamp_lo
 | `containment_actions` | action, reason, performing administrator, time, status |
 | `response_controls` | the active blocks, isolations and restrictions the enforcement points consult |
 | `audit_logs` | actor, action, target, IP, details, time |
+| `simulation_runs` | one row per scenario run: scenario, seed and seed mode, status, parameters, full plan and its SHA-256, per-action results, progress, error, timestamps; events and investigations reference it through `simulation_run_id` |
 
 All tables have timestamps and indexes on their lookup columns (employee, time, status and severity).
 
@@ -855,7 +906,7 @@ ml/detect/                   window builder, features, models, hybrid risk, benc
 docs/                        cert-dataset.md, detection-evaluation.md, detection-results/
 docs/cert-dataset.md         CERT dataset setup, field mapping, label rules, caveats
 frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       221 pytest tests
+tests/                       289 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
 requirements.txt  .env.example
 ```
@@ -863,7 +914,7 @@ requirements.txt  .env.example
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 221 tests, about two minutes
+python -m pytest tests -q          # 289 tests, about two minutes
 ```
 
 The suite uses a temporary database and a separate backend process, and an autouse fixture resets the simulation and
@@ -881,6 +932,11 @@ removes rows each test creates. It covers:
 * **Detection, ML, SOC and investigation workflow:** normal activity, unfamiliar IP, restricted access, large export,
   failed logins, privileged account creation, external transfer, a complete attack, duplicate events, false positives,
   evidence preservation and tamper detection, containment enforcement and report export.
+* **Scenario generator and runs** (`tests/test_simulation_runs.py`): same seed gives the same plan, different seeds vary
+  timing, volume, order and noise; ordering constraints hold; only documentation addresses and `.invalid` destinations;
+  every scenario runs and stores its seed, plan and status; benign scenarios never alert; malicious scenarios leave their
+  expected evidence while their outcome level varies and is decided by the detector; one active run, idempotent
+  submissions, stop, failure and restart recovery; runs do not share investigations; no network operation is attempted.
 
 ## Known limitations
 
@@ -909,5 +965,11 @@ removes rows each test creates. It covers:
 * **Evidence retention.** Nothing deletes real events, but *Reset simulation* deletes synthetic events and investigations,
   by design.
 * **Genuine activity during a run** is scored in the same correlation window as the simulated attack.
+* **Scenario runs are scripted, bounded generators, not adaptive attackers.** Randomisation changes timing, volumes, ordering
+  and background noise within fixed rules; it does not react to detections (apart from actions being blocked by containment).
+  Runs execute on a thread inside the backend process (one at a time), so they do not survive a restart (they are marked
+  failed) and need a single backend worker. The runner calls the backend's ingestion functions in-process rather than over
+  HTTP, which is the same persistence and detection path the API routes use but not the HTTP layer itself. The removable-media
+  rule is new and has not been evaluated on the CERT benchmark.
 * **Tables are static HTML** (no client-side sorting or export); charts are Plotly.
 * Times use `DISPLAY_TIMEZONE` (default `Asia/Kolkata`); business hours are 07:00-19:00 in that zone.

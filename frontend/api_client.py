@@ -116,11 +116,17 @@ class ApiClient:
             body["records"] = records
         return self._json("POST", "/api/simulation/steps", json=body)
 
-    def sim_run(self, target_employee_id: int, source_ip: str, scenario: str, records: int | None = None) -> dict:
-        body = {"target_employee_id": target_employee_id, "source_ip": source_ip, "scenario": scenario}
-        if records:
-            body["records"] = records
-        return self._json("POST", "/api/simulation/run", json=body)
+    def sim_start_run(self, body: dict) -> dict:
+        return self._json("POST", "/api/simulation/runs", json=body)
+
+    def sim_get_run(self, run_id: int) -> dict:
+        return self._json("GET", f"/api/simulation/runs/{run_id}")
+
+    def sim_runs(self, limit: int = 8) -> list[dict]:
+        return self._json("GET", "/api/simulation/runs", params={"limit": limit})["items"]
+
+    def sim_cancel_run(self, run_id: int) -> dict:
+        return self._json("POST", f"/api/simulation/runs/{run_id}/cancel")
 
     def sim_reset(self) -> dict:
         return self._json("POST", "/api/simulation/reset")

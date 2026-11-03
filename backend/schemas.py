@@ -188,6 +188,7 @@ class EventOut(EventPublic):
     details: dict[str, Any]
     is_synthetic: bool
     scenario: str | None
+    simulation_run_id: int | None = None
     risk_points: int
     risk_flags: list[dict[str, Any]]
 

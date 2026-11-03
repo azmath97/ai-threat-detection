@@ -150,6 +150,10 @@ def evaluate_event(db: Session, employee: Employee, event: SecurityEvent, baseli
             fire("large_export", records=event.records_downloaded, baseline_session_max=baseline.session_download_max)
         if et == "data_export":
             fire("data_export")
+        if (event.details or {}).get("channel") == "removable_media" and sensitivity_of(event.resource) >= 2 \
+                and not _already_flagged(db, employee, event, "removable_media_copy"):
+            fire("removable_media_copy", 1.0 if event.records_downloaded >= bulk else 0.5,
+                 records=event.records_downloaded, device=(event.details or {}).get("device"))
 
     if et == "external_transfer":
         records = event.records_downloaded or event.records_accessed

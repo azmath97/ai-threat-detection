@@ -1,11 +1,10 @@
-"""Attack simulation for local demonstrations.
+"""Manual attack steps and reset for the simulation environment.
 
 Every step goes through the same authentication, permission checks, event collection and detection
-engine as a normal employee. Everything it creates is flagged `is_synthetic` and can be reset.
+engine as a normal employee. Everything it creates is flagged `is_synthetic` and can be reset. Seeded, selectable scenario
+runs live in scenario_generator.py and simulation_runs.py; the steps here are individual stages an administrator triggers
+by hand (and that the "compromised account campaign" scenario reuses).
 """
-import random
-import secrets
-
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
@@ -24,11 +23,12 @@ from backend.models import (
     ResponseControl,
     SecurityAlert,
     SecurityEvent,
+    SimulationRun,
 )
 from data.demo_accounts import demo_password
 
 SIM_DEVICE = "SimulatedAttackerToolkit/1.0 (Linux x86_64; synthetic)"
-DEFAULT_SOURCE_IP = "185.220.101.45"  # documentation-style external address, not in any employee's known list
+DEFAULT_SOURCE_IP = "203.0.113.45"  # RFC 5737 documentation address: never routable, not in any employee's known list
 EXPORT_RECORDS = 25_000
 PROBE_RESOURCES = ["hr-records", "payroll-records", "it-admin-console", "audit-reports", "loan-applications"]
 EXFIL_DESTINATION = "files.exfil-sim.example.invalid"
@@ -53,21 +53,6 @@ STEPS = [
 ]
 STEP_IDS = [s["id"] for s in STEPS]
 
-SCENARIOS = [
-    {"id": "it_admin_full_chain", "name": "Compromised IT administrator - full attack chain",
-     "default_target": "david.kumar", "steps": STEP_IDS,
-     "description": "The IT administrator can create privileged accounts, so every stage of the chain succeeds."},
-    {"id": "finance_data_theft", "name": "Compromised finance analyst - data theft",
-     "default_target": "alice.morgan",
-     "steps": ["unfamiliar_login", "restricted_access", "large_export", "admin_login_failures", "external_transfer"],
-     "description": "A standard employee account: restricted access is denied by the backend, exports are limited to its own data."},
-    {"id": "randomized_campaign", "name": "Randomised campaign - varying stages, order and size",
-     "default_target": "david.kumar", "steps": STEP_IDS, "randomized": True,
-     "description": "Each run picks which stages happen, their order, the export size, the number of failed logins and the "
-                    "probed resources from a seed (returned, so a run can be replayed). Stages the account is not entitled to "
-                    "are still denied by the backend."},
-]
-SCENARIO_IDS = {s["id"] for s in SCENARIOS}
 
 
 class _Sim:
@@ -79,36 +64,6 @@ class _Sim:
 
     def meta(self, step: str) -> dict:
         return {"sim_step": step, "scenario": self.scenario, "simulated_by": self.admin.username}
-
-
-def plan_scenario(scenario: str, records: int = EXPORT_RECORDS, seed: int | None = None) -> dict:
-    """Concrete steps and parameters for a run.
-
-    The fixed scenarios are identical every time. `randomized_campaign` draws which stages happen, their order, the
-    export size, the number of failed logins and the probed resources from a seeded generator, so a run can be
-    replayed by reusing its seed. The simulated attacker still goes through the normal backend for every step.
-    """
-    definition = next(s for s in SCENARIOS if s["id"] == scenario)
-    if not definition.get("randomized"):
-        return {"scenario": scenario, "seed": None, "steps": list(definition["steps"]), "records": records,
-                "failed_attempts": 5, "probe_resources": list(PROBE_RESOURCES)}
-    seed = secrets.randbelow(2**31) if seed is None else seed
-    rng = random.Random(seed)
-    middle = [step for step, p in (("restricted_access", 0.85), ("large_export", 0.9), ("admin_login_failures", 0.7)) if rng.random() < p]
-    if rng.random() < 0.6:
-        middle += ["create_privileged_account", "privileged_login"]
-    if not {"restricted_access", "large_export"} & set(middle):
-        middle.append("large_export")
-    rng.shuffle(middle)
-    if "create_privileged_account" in middle and middle.index("privileged_login") < middle.index("create_privileged_account"):
-        a, b = middle.index("create_privileged_account"), middle.index("privileged_login")
-        middle[a], middle[b] = middle[b], middle[a]
-    steps = ["unfamiliar_login", *middle]
-    if rng.random() < 0.8:       # exfiltration normally follows collection, but some campaigns never reach it
-        steps.insert(rng.randint(steps.index("large_export") + 1, len(steps)) if "large_export" in steps else len(steps),
-                     "external_transfer")
-    return {"scenario": scenario, "seed": seed, "steps": steps, "records": max(500, int(records * rng.uniform(0.4, 1.6))),
-            "failed_attempts": rng.randint(3, 8), "probe_resources": rng.sample(PROBE_RESOURCES, rng.randint(3, 5))}
 
 
 def _active_session(sim: _Sim, employee: Employee) -> EmployeeSession | None:
@@ -252,12 +207,11 @@ _HANDLERS = {
 
 
 def run_step(db: Session, admin: Employee, target: Employee, step: str, ip: str, scenario: str,
-             records: int = EXPORT_RECORDS, *, plan: dict | None = None) -> dict:
+             records: int = EXPORT_RECORDS) -> dict:
     if step not in _HANDLERS:
         raise ServiceError(422, f"Unknown simulation step '{step}'")
     before = db.scalar(select(func.max(SecurityEvent.id))) or 0
-    extra = {k: plan[k] for k in ("failed_attempts", "probe_resources") if plan} if plan else {}
-    sim = _Sim(db, admin, target, ip, scenario, records, **extra)
+    sim = _Sim(db, admin, target, ip, scenario, records)
     try:
         outcome = _HANDLERS[step](sim)
     except ServiceError as exc:
@@ -270,22 +224,15 @@ def run_step(db: Session, admin: Employee, target: Employee, step: str, ip: str,
     return {"step": step, **outcome, "event_ids": events}
 
 
-def run_plan(db: Session, admin: Employee, target: Employee, ip: str, plan: dict) -> list[dict]:
-    return [run_step(db, admin, target, step, ip, plan["scenario"], plan["records"], plan=plan) for step in plan["steps"]]
-
-
-def run_scenario(db: Session, admin: Employee, target: Employee, ip: str, scenario: str, records: int = EXPORT_RECORDS,
-                 seed: int | None = None) -> list[dict]:
-    return run_plan(db, admin, target, ip, plan_scenario(scenario, records, seed))
-
-
 def status(db: Session) -> dict:
     synthetic_events = db.execute(
         select(SecurityEvent.details, SecurityEvent.scenario).where(SecurityEvent.is_synthetic.is_(True))
     ).all()
     steps = {d.get("sim_step") for d, _ in synthetic_events if d and d.get("sim_step")}
     accounts = db.execute(select(Employee.employee_code, Employee.username).where(Employee.is_synthetic.is_(True))).all()
+    active = db.scalar(select(SimulationRun.id).where(SimulationRun.active_slot == 1))
     return {
+        "active_run_id": active,
         "synthetic_events": len(synthetic_events),
         "steps_executed": [s for s in STEP_IDS if s in steps],
         "scenarios": sorted({sc for _, sc in synthetic_events if sc}),
@@ -298,6 +245,11 @@ def status(db: Session) -> dict:
 
 def reset(db: Session, admin: Employee) -> dict:
     """Remove everything the simulation created and undo containment applied to the affected employees."""
+    active = db.scalar(select(SimulationRun).where(SimulationRun.active_slot == 1))
+    if active is not None:
+        raise ServiceError(409, f"Simulation run {active.id} is still {active.status}. Stop it before resetting.")
+    runs = [{"run": r.id, "scenario": r.scenario, "seed": r.seed, "status": r.status, "plan_sha256": r.plan_sha256}
+            for r in db.scalars(select(SimulationRun).order_by(SimulationRun.id))]
     event_ids = list(db.scalars(select(SecurityEvent.id).where(SecurityEvent.is_synthetic.is_(True))))
     synthetic_accounts = set(db.scalars(select(Employee.id).where(Employee.is_synthetic.is_(True))))
     affected = set(db.scalars(select(SecurityEvent.employee_id).where(SecurityEvent.is_synthetic.is_(True))))
@@ -331,13 +283,14 @@ def reset(db: Session, admin: Employee) -> dict:
     removed["events"] = db.execute(delete(SecurityEvent).where(SecurityEvent.is_synthetic.is_(True))).rowcount
     removed["sessions"] = db.execute(delete(EmployeeSession).where(EmployeeSession.is_synthetic.is_(True))).rowcount
     removed["accounts"] = db.execute(delete(Employee).where(Employee.is_synthetic.is_(True))).rowcount
+    removed["runs"] = db.execute(delete(SimulationRun)).rowcount
 
     for employee in real_affected:
         last = db.scalar(select(func.max(SecurityEvent.timestamp)).where(
             SecurityEvent.employee_id == employee.id, SecurityEvent.event_type == "login"))
         db.execute(update(Employee).where(Employee.id == employee.id).values(last_login_at=last))
 
-    write_audit(db, "simulation_reset", actor_id=admin.id, details={**removed, "employees_restored": restored})
+    write_audit(db, "simulation_reset", actor_id=admin.id, details={**removed, "employees_restored": restored, "runs_removed": runs})
     db.commit()
     db.expire_all()
     return {**removed, "employees_restored": restored}

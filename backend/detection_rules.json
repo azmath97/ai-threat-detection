@@ -85,6 +85,10 @@
       "enabled": true, "severity": 0.08, "stages": [],
       "description": "Data export operation"
     },
+    "removable_media_copy": {
+      "enabled": true, "severity": 0.34, "stages": ["collection"],
+      "description": "Records of a classified resource copied to removable media (halved when below the bulk threshold)"
+    },
     "unusual_outbound_transfer": {
       "enabled": true, "severity": 0.38, "stages": ["collection"],
       "description": "Outbound transfer to an external destination that is unusual for this employee"

@@ -12,7 +12,6 @@ from backend import security
 from backend.config import get_settings, validate_for_environment
 from backend.rate_limit import login_throttle
 from backend.response_service import SCOPE_NOTICE
-from backend.simulation_service import plan_scenario
 from conftest import login
 from ml import synthetic_data as sd
 from ml.anomaly_detector import get_detector, volume_guard
@@ -162,42 +161,6 @@ def test_evaluate_dataset_rejects_a_file_missing_required_columns(tmp_path):
     bad.write_text("who,when\nx,2025-01-01\n", encoding="utf-8")
     with pytest.raises(ValueError, match="missing required column"):
         evaluate(bad)
-
-
-# ------------------------------------------------------------------ randomised simulation
-def test_fixed_scenarios_are_unchanged_and_randomised_plans_vary_but_stay_valid():
-    fixed = plan_scenario("it_admin_full_chain", 8000)
-    assert fixed["seed"] is None and len(fixed["steps"]) == 7 and fixed["failed_attempts"] == 5 and fixed["records"] == 8000
-
-    assert plan_scenario("randomized_campaign", 8000, seed=5) == plan_scenario("randomized_campaign", 8000, seed=5)
-    plans = [plan_scenario("randomized_campaign", 8000, seed=s) for s in range(60)]
-    assert len({tuple(p["steps"]) for p in plans}) >= 8
-    assert len({p["records"] for p in plans}) > 20 and len({p["failed_attempts"] for p in plans}) >= 4
-    for p in plans:
-        steps = p["steps"]
-        assert steps[0] == "unfamiliar_login" and len(steps) == len(set(steps))
-        assert {"restricted_access", "large_export"} & set(steps)
-        if "privileged_login" in steps:
-            assert steps.index("create_privileged_account") < steps.index("privileged_login")
-        if "external_transfer" in steps and "large_export" in steps:
-            assert steps.index("external_transfer") > steps.index("large_export")
-        assert 3 <= p["failed_attempts"] <= 8 and 3 <= len(p["probe_resources"]) <= 5 and p["records"] >= 500
-
-
-def test_randomised_run_goes_through_the_backend_and_is_replayable(client, admin):
-    employees = client.get("/api/employees", headers=admin).json()
-    david = next(e["id"] for e in employees if e["username"] == "david.kumar")
-    body = {"target_employee_id": david, "scenario": "randomized_campaign", "seed": 7, "records": 6000}
-    first = client.post("/api/simulation/run", json=body, headers=admin).json()
-    assert first["seed"] == 7 and [r["step"] for r in first["results"]] == first["plan"]
-    assert all(r["event_ids"] for r in first["results"] if r["status"] != "blocked")
-    events = client.get("/api/events", params={"synthetic": "true", "limit": 200}, headers=admin).json()["items"]
-    assert events and all(e["is_synthetic"] for e in events)
-    client.post("/api/simulation/reset", headers=admin)
-    second = client.post("/api/simulation/run", json=body, headers=admin).json()
-    assert second["plan"] == first["plan"] and second["records"] == first["records"]
-    unseeded = client.post("/api/simulation/run", json={**body, "seed": None}, headers=admin).json()
-    assert isinstance(unseeded["seed"], int)
 
 
 # ------------------------------------------------------------------ containment scope

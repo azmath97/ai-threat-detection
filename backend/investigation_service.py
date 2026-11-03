@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
-from backend import controls, data_exposure, investigation_explainer, threat_engine
+from backend import controls, data_exposure, investigation_explainer, run_context, threat_engine
 from backend.baseline import baseline_for
 from backend.catalog import RESOURCES, SEVERITY_LABELS, STAGE_LABELS, is_self_service, sensitivity_of
 from backend.config import get_settings
@@ -244,11 +244,14 @@ def build_report(db: Session, employee: Employee, as_of: datetime | None = None,
 
 
 def active_for(db: Session, employee: Employee) -> AttackInvestigation | None:
-    return db.scalar(
-        select(AttackInvestigation)
-        .where(AttackInvestigation.employee_id == employee.id, AttackInvestigation.status.in_(ACTIVE_STATUSES))
-        .order_by(AttackInvestigation.id.desc())
-    )
+    """The employee's open investigation. Inside a simulation run only that run's own investigation is considered, so
+    a run never appends evidence to an investigation created by another run (or by the manual steps)."""
+    query = select(AttackInvestigation).where(AttackInvestigation.employee_id == employee.id,
+                                              AttackInvestigation.status.in_(ACTIVE_STATUSES))
+    run_id = run_context.current_run_id()
+    if run_id is not None:
+        query = query.where(AttackInvestigation.simulation_run_id == run_id)
+    return db.scalar(query.order_by(AttackInvestigation.id.desc()))
 
 
 def upsert_investigation(db: Session, employee: Employee, as_of: datetime | None = None, synthetic: bool = False,
@@ -258,7 +261,8 @@ def upsert_investigation(db: Session, employee: Employee, as_of: datetime | None
     threat = threat or threat_engine.assess(db, employee, as_of)
     investigation = active_for(db, employee)
     if investigation is None:
-        investigation = AttackInvestigation(employee_id=employee.id, status="open", is_synthetic=synthetic)
+        investigation = AttackInvestigation(employee_id=employee.id, status="open", is_synthetic=synthetic,
+                                            simulation_run_id=run_context.current_run_id())
         db.add(investigation)
         db.flush()
 

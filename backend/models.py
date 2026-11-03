@@ -83,6 +83,8 @@ class SecurityEvent(Base):
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     scenario: Mapped[str | None] = mapped_column(String(64), nullable=True)
     request_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    simulation_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("simulation_runs.id", ondelete="SET NULL"), nullable=True, index=True)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     risk_points: Mapped[int] = mapped_column(Integer, default=0)
     risk_flags: Mapped[list] = mapped_column(JSON, default=list)
@@ -131,6 +133,8 @@ class AttackInvestigation(Base):
     latest_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # latest suspicious event
     case_file: Mapped[dict | None] = mapped_column(JSON, nullable=True)          # sessions, IPs, resources, exposure totals
     explanation: Mapped[dict | None] = mapped_column(JSON, nullable=True)        # deterministic, evidence-based
+    simulation_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("simulation_runs.id", ondelete="SET NULL"), nullable=True, index=True)
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
@@ -219,6 +223,41 @@ class AuditLog(Base):
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     timestamp: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+
+
+class SimulationRun(Base):
+    """One simulated scenario run: its seed, parameters, generated plan, progress and outcome.
+
+    `active_slot` is 1 while the run is queued or running and NULL afterwards; its unique index lets the database
+    itself guarantee that at most one run is active at a time.
+    """
+
+    __tablename__ = "simulation_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    scenario: Mapped[str] = mapped_column(String(64), index=True)
+    seed: Mapped[int] = mapped_column(Integer)
+    seed_mode: Mapped[str] = mapped_column(String(8))                      # fixed | random
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)  # queued|running|completed|failed|cancelled
+    active_slot: Mapped[int | None] = mapped_column(Integer, unique=True, nullable=True)
+    target_employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    started_by_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    source_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    pace: Mapped[str] = mapped_column(String(8), default="demo")
+    parameters: Mapped[dict] = mapped_column(JSON, default=dict)
+    plan: Mapped[dict] = mapped_column(JSON, default=dict)
+    plan_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    steps_total: Mapped[int] = mapped_column(Integer, default=0)
+    steps_done: Mapped[int] = mapped_column(Integer, default=0)
+    results: Mapped[list] = mapped_column(JSON, default=list)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+    target: Mapped[Employee | None] = relationship(foreign_keys=[target_employee_id])
 
 
 class ResponseControl(Base):

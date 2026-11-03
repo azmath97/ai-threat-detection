@@ -1,6 +1,6 @@
 import sqlite3
 
-from conftest import auth_header, login
+from conftest import auth_header, login, run_steps
 
 
 def _employee_id(client, admin, username):
@@ -184,13 +184,13 @@ def test_simulation_full_chain_uses_real_pipeline_and_resets(client, admin, db_p
 
     config = client.get("/api/simulation/scenarios", headers=admin).json()
     assert len(config["steps"]) == 7 and any(t["username"] == "david.kumar" for t in config["targets"])
-    bad = {"target_employee_id": david, "source_ip": "not-an-ip"}
-    assert client.post("/api/simulation/run", headers=admin, json=bad).status_code == 422
+    assert len(config["scenarios"]) >= 7
+    bad = {"target_employee_id": david, "source_ip": "not-an-ip", "step": "unfamiliar_login"}
+    assert client.post("/api/simulation/steps", headers=admin, json=bad).status_code == 422
 
-    run = client.post("/api/simulation/run", headers=admin, json={
-        "target_employee_id": david, "source_ip": "185.220.101.45", "scenario": "it_admin_full_chain"})
-    assert run.status_code == 200, run.text
-    results = {r["step"]: r for r in run.json()["results"]}
+    steps = run_steps(client, admin, "david.kumar", [s["id"] for s in config["steps"]], ip="185.220.101.45",
+                      scenario="it_admin_full_chain", records=25000)
+    results = {r["step"]: r for r in steps}
     assert all(r["status"] == "completed" for r in results.values()), results
     assert "svc.backup01" in results["create_privileged_account"]["detail"]
 
@@ -241,9 +241,9 @@ def test_simulation_full_chain_uses_real_pipeline_and_resets(client, admin, db_p
 
 def test_simulation_standard_employee_is_limited_by_permissions(client, admin):
     henry = _employee_id(client, admin, "henry.novak")
-    run = client.post("/api/simulation/run", headers=admin, json={
-        "target_employee_id": henry, "scenario": "finance_data_theft"}).json()
-    results = {r["step"]: r for r in run["results"]}
+    run = run_steps(client, admin, "henry.novak", ["unfamiliar_login", "restricted_access", "large_export",
+                                                    "admin_login_failures", "external_transfer"], scenario="finance_data_theft")
+    results = {r["step"]: r for r in run}
     assert "hr-records: denied" in results["restricted_access"]["detail"]
     assert results["large_export"]["status"] == "completed" and "source-code-repo" in results["large_export"]["detail"]
     assert "create_privileged_account" not in results

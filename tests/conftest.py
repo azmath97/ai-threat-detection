@@ -47,6 +47,38 @@ def admin(client):
     return auth_header(client, "SEC-9011")
 
 
+def wait_for_run(client, admin, run_id, timeout=60.0):
+    """Poll a simulation run until it reaches a terminal status."""
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        run = client.get(f"/api/simulation/runs/{run_id}", headers=admin).json()
+        if run["status"] in ("completed", "failed", "cancelled"):
+            return run
+        time.sleep(0.05)
+    raise AssertionError(f"simulation run {run_id} did not finish in {timeout}s")
+
+
+def run_scenario(client, admin, scenario, **body):
+    """Start a seeded scenario run at instant pace and wait for it to finish."""
+    response = client.post("/api/simulation/runs", headers=admin, json={"scenario": scenario, "pace": "instant", **body})
+    assert response.status_code == 202, response.text
+    return wait_for_run(client, admin, response.json()["id"])
+
+
+def employee_id(client, admin, username):
+    return next(e["id"] for e in client.get("/api/employees", headers=admin).json() if e["username"] == username)
+
+
+def run_steps(client, admin, username, steps, *, ip="203.0.113.45", scenario="manual_steps", records=None):
+    """Trigger individual simulation steps through the manual-steps endpoint."""
+    body = {"target_employee_id": employee_id(client, admin, username), "source_ip": ip, "scenario": scenario}
+    if records:
+        body["records"] = records
+    return [client.post("/api/simulation/steps", headers=admin, json={**body, "step": s}).json() for s in steps]
+
+
 @pytest.fixture(autouse=True)
 def restore_state(request):
     """Reset the simulation and delete the real rows a test created, so every test starts from the seeded baseline."""
@@ -63,6 +95,9 @@ def restore_state(request):
     from backend.rate_limit import login_throttle
 
     login_throttle.reset()
+    active = client.get("/api/simulation/status", headers=admin).json().get("active_run_id")
+    if active:
+        client.post(f"/api/simulation/runs/{active}/cancel", headers=admin)
     client.post("/api/simulation/reset", headers=admin)
     with sqlite3.connect(db_path) as con:
         con.execute("delete from investigation_evidence where investigation_id > ?", (marks["attack_investigations"],))

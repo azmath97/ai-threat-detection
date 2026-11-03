@@ -67,7 +67,7 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | SOC read models | `soc_service.py`, `soc_routes.py` |
 | Simulation | `simulation_service.py`, `simulation_routes.py` |
 | Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (180 tests) |
+| Tests | `tests/` (196 tests) |
 
 ## Technology stack
 
@@ -470,9 +470,50 @@ events are *not* labelled malicious, and events the key lists under another acco
 excluded from metrics); users are split into train/validation/test as whole users; `ml/cert/leakage.py` rejects labels,
 identities, answer-key fields and synthetic events as model inputs; and a synthetic supplement (`source = synthetic_test`,
 fixed seed or recorded random seed, manifest with the reason for every scenario) is kept apart from the CERT test set.
-This step prepares data only: **the application's detector has not been trained or evaluated on CERT**, because
-r4.2 has no IP addresses, authentication results or record counts, so a CERT-specific feature builder is still needed.
-Until a CERT evaluation is run and reported, no figure in this README comes from CERT or any real data.
+This step prepares data only; the detection benchmark built on it is described next.
+
+### Detection benchmark: features, models, results and limits
+
+`ml/detect/` turns events into per-user, per-day windows, builds deviation features (own history, a lagged own
+baseline, peer group, 7-day change, sustained-drift CUSUMs, sequences), compares several detectors and scores them on
+held-out users. The *live* application engine above is unchanged apart from the new states and audit view; this pipeline is
+an offline benchmark, not wired into live scoring. Everything is in [docs/detection-evaluation.md](docs/detection-evaluation.md)
+with full tables in [docs/detection-results/](docs/detection-results). The headline numbers, all on **held-out test users**
+with the threshold calibrated on validation users only (test evaluated once):
+
+| CERT r4.2 (synthetic data), 21 insiders | Precision | Recall | F1 | FPR | Incidents detected |
+|---|---|---|---|---|---|
+| Original approach (Isolation Forest, raw volumes) | 0.013 | 0.018 | 0.015 | 0.0040 | 4 / 21 |
+| Isolation Forest on the new deviation features | 0.150 | 0.149 | 0.150 | 0.0024 | 19 / 21 |
+| Hybrid (rules + correlation + anomaly model) | 0.170 | 0.229 | 0.195 | 0.0032 | 13 / 21 |
+| Hybrid without the destination-category enrichment | 0.117 | 0.120 | 0.119 | 0.0026 | 16 / 21 |
+| Supervised reference (uses labels; a ceiling, not a deployable detector) | 0.291 | 0.993 | 0.450 | 0.0070 | 20 / 21 |
+
+What these numbers do and do not show:
+
+* The new features and the hybrid are about an order of magnitude better than the original raw-feature model, but the
+  unsupervised detectors are still far from the supervised reference, and precision is low. r4.2 is a "dense needles" dataset
+  (0.29 % of test windows are malicious), so precision and F1 are inflated relative to a real organisation. Intervals are wide
+  (21 insiders): the hybrid's recall 95 % interval is 0.08 to 0.38.
+* **Bulk export (separate synthetic report; CERT r4.2 has no bulk-export scenario):** the original raw-feature model detected
+  0 of 7 held-out bulk-export incidents; the hybrid detected 6 of 7 with **0 false alerts on benign large transfers**, while
+  LOF and the supervised model both alerted on 3 of 3 legitimate large transfers. The hybrid missed `unusual_external_transfer`
+  (0 / 4) and 4 of 7 `account_misuse` incidents. Synthetic and CERT numbers are never combined.
+* **Early warning holds only for long incidents.** Windows are scored at day end. For CERT scenario 2 (about 55 days) the hybrid's
+  median alert came 16 days after the first malicious event with 62 % of the incident's events still to come; for single-day
+  patterns, and for scenario 3 (about 1.4 days), the alert came after most or all of the activity. The live application engine
+  alerts event by event before the final simulated transfer, but this benchmark does **not** demonstrate early detection of a
+  single-day bulk export.
+* The destination-category lists (job-search, file-sharing, document-leak sites) were written after reading the public
+  scenario descriptions, so the results with them are optimistic; the no-category row is the conservative figure.
+* Not computable: per-scenario precision (benign windows have no scenario), a bulk-export result on CERT, precision at real-world
+  prevalence, and delay for undetected incidents. Labels outside the answer key are benign only by convention.
+
+**The five states in the application** (SOC overview and every investigation page): *anomalous activity detected*, *suspicious
+sequence correlated*, *potential data exposure*, *confirmed malicious (simulation ground truth)* and *simulated containment
+completed*. Model outputs are never shown as confirmed; "confirmed" exists only where the simulation provides ground truth,
+and the live engine's confidence components are itemised on the investigation page together with the caveat that one event can
+inform more than one component.
 
 ## Detection rules in detail
 
@@ -798,9 +839,11 @@ backend/                     FastAPI app, models, detection, correlation, invest
 data/                        demo_accounts.py (credentials), seed_data.py (history), the SQLite file (git-ignored)
 ml/                          features.py, synthetic_data.py, train_model.py, anomaly_detector.py, evaluate_dataset.py, artifacts/ (git-ignored)
 ml/cert/                     CERT r4.2 pipeline: schema, validate, prepare, labels, split, leakage, synthetic supplement
+ml/detect/                   window builder, features, models, hybrid risk, benchmark and summary (offline benchmark)
+docs/                        cert-dataset.md, detection-evaluation.md, detection-results/
 docs/cert-dataset.md         CERT dataset setup, field mapping, label rules, caveats
 frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       180 pytest tests
+tests/                       196 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
 requirements.txt  .env.example
 ```
@@ -808,7 +851,7 @@ requirements.txt  .env.example
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 180 tests, about two minutes
+python -m pytest tests -q          # 196 tests, about two minutes
 ```
 
 The suite uses a temporary database and a separate backend process, and an autouse fixture resets the simulation and
@@ -836,6 +879,9 @@ removes rows each test creates. It covers:
   are hand-tuned for the case study and would need real data and tuning before any real use. The five confidence weights
   are not learned from labelled outcomes.
 * **The volume guard was tuned against the synthetic attacks** (see Machine learning), so its recall is in-sample.
+* **Detection quality is modest and mostly measured on synthetic data.** On the held-out CERT r4.2 users the best unsupervised
+  detector has F1 about 0.2 at a 0.3 % window false-positive rate, and the supervised reference shows what labels would add. The
+  benchmark's early-warning evidence covers only incidents that span many days. See docs/detection-evaluation.md.
 * **Simulated containment.** Blocking, isolating, locking and privilege removal change application state only; there is no
   firewall, directory or endpoint integration, and the SOC dashboard says so on the Response Centre page.
 * **Source IPs:** the backend trusts only the TCP peer. On one machine every client is loopback, so

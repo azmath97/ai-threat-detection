@@ -224,6 +224,7 @@ def render_overview() -> None:
             ui.kv_table([
                 ("Employee ID", t["employee_id"]), ("Severity", t["level_label"]), ("Current attack stage", t["stage_label"]),
                 ("Last event", short(t["last_event_at"]["local"])), ("Data exposure", t["exposure_label"]),
+                ("Detection states", "; ".join(s["label"] for s in t.get("states", []) if s["active"]) or "none"),
                 ("Investigation", f"#{t['investigation_id']} ({t['investigation_status']})" if t["investigation_id"] else "none"),
             ])
         history = cached(f"history:{t['employee_pk']}", "/api/soc/confidence-history", employee_id=t["employee_pk"], minutes=240)
@@ -341,6 +342,26 @@ def render_investigation_list(view: str) -> None:
             st.rerun()
 
 
+def states_panel(d: dict) -> None:
+    """The five distinct states, why each is on or off, and how the confidence was built."""
+    ui.section("Detection states")
+    ui.table([{"state": s["label"], "now": "Yes" if s["active"] else "No", "basis": s["basis"]} for s in d.get("states", [])],
+             {"state": "State", "now": "Active", "basis": "Basis"})
+    st.caption("Model outputs (anomalous activity, correlated sequence, potential exposure) are inferences and are never shown as "
+               "confirmed. 'Confirmed' is reserved for simulation ground truth. Containment is simulated.")
+    audit = d.get("audit")
+    if audit:
+        with st.expander("How the attack confidence was calculated"):
+            ui.table([{"component": c["component"].replace("_", " ").title(), "value": f"{c['value']:.2f}", "weight": f"{c['weight']:.2f}",
+                       "points": f"{c['contribution']:.1f}"} for c in audit["components"]],
+                     {"component": "Component", "value": "Value (0-1)", "weight": "Weight", "points": "Points"})
+            if audit["capped_by_stage_count"]:
+                st.caption("Capped: fewer independent stages than the severity level requires.")
+            ui.table([{"rule": r["rule"], "target": r.get("target") or "-", "points": r["points"], "count": r["count"], "why": r["description"]}
+                      for r in audit["reason_codes"]], {"rule": "Reason code", "target": "Target", "points": "Points", "count": "Events", "why": "Meaning"})
+            st.caption(audit["note"])
+
+
 def render_investigation(inv_id: int) -> None:
     d = cached(f"inv:{inv_id}", f"/api/soc/investigations/{inv_id}")
     tl = cached(f"tl-inv:{inv_id}", "/api/soc/timeline", investigation_id=inv_id)
@@ -354,6 +375,7 @@ def render_investigation(inv_id: int) -> None:
              ("Data exposure", d["exposure_label"], f"{d['records_exposed']:,} records potentially exposed", "")]
     sc.kpi_grid(tiles)
     ui.notice("info", d["summary"])
+    states_panel(d)
     if tl:
         ui.section("Attack stages")
         st.markdown(sc.stage_strip(tl["stages"]), unsafe_allow_html=True)

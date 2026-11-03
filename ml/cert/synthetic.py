@@ -22,6 +22,7 @@ from pathlib import Path
 import pandas as pd
 
 from ml.cert.schema import EVENT_COLUMNS, SOURCE_SYNTHETIC, SYNTHETIC_NOTICE
+from ml.cert.split import split_users
 
 INTERNAL_DOMAIN = "corp.example"
 PARTNER_DOMAINS = ["partner-a.example", "partner-b.example", "audit-firm.example"]
@@ -314,6 +315,8 @@ def generate(out: str | Path, cfg: SyntheticConfig | None = None, *, profile_pat
     meta.to_csv(out / "eval_metadata.csv", index=False)
     pd.DataFrame({"entity_id": [u["entity_id"] for u in users], "user_id": [u["user_id"] for u in users]}).to_csv(
         out / "identity_map.csv", index=False)
+    threat_entities = {users[i]["entity_id"] for i, name in assignments.items() if name in threat_names}
+    split_users([u["entity_id"] for u in users], threat_entities, seed=cfg.seed).to_csv(out / "splits.csv", index=False)
 
     per_scenario = meta.groupby("scenario").agg(events=("event_id", "size"), users=("insider_user", "nunique")).to_dict("index")
     manifest = {

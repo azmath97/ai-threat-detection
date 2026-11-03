@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from backend import controls, investigation_explainer, investigation_service, threat_engine
+from backend import controls, detection_states, investigation_explainer, investigation_service, threat_engine
 from backend.catalog import (
     RESOURCE_EVENT_TYPES,
     RESOURCES,
@@ -99,9 +99,27 @@ def _last_event_at(db: Session, employee_id: int) -> datetime | None:
         SecurityEvent.employee_id.in_(linked_employee_ids(db, employee_id))))
 
 
+def _action_counts(db: Session) -> dict[int, int]:
+    """Completed containment actions per investigation (the state describes the current incident, not old history)."""
+    counts: dict[int, int] = {}
+    for (investigation_id,) in db.execute(select(ContainmentAction.investigation_id).where(
+            ContainmentAction.status == "completed", ContainmentAction.investigation_id.is_not(None))):
+        counts[investigation_id] = counts.get(investigation_id, 0) + 1
+    return counts
+
+
+def states_for(threat: "threat_engine.ThreatAssessment | None", *, synthetic: bool, actions: int) -> list[dict]:
+    anomaly = threat.ml.score if threat and threat.ml else 0.0
+    return detection_states.derive(
+        anomaly_score=anomaly, independent_stages=threat.counted_stages if threat else 0,
+        exposure_status=(threat.exposure.get("status", "none") if threat else "none"),
+        ground_truth_simulation=synthetic, containment_actions=actions)
+
+
 # ---------------------------------------------------------------- overview
 def threat_rows(db: Session) -> list[dict]:
     threats, employees, invs = current_threats(db), _employees(db), _latest_investigations(db)
+    action_counts = _action_counts(db)
     alerts = {a.employee_id: a for a in db.scalars(select(SecurityAlert).where(SecurityAlert.status.in_(ACTIVE_ALERT))
                                                    .order_by(SecurityAlert.id))}
     rows = []
@@ -124,6 +142,8 @@ def threat_rows(db: Session) -> list[dict]:
             "last_event_at": iso(last),
             "investigation_id": inv.id if inv else None, "investigation_status": inv.status if inv else None,
             "alert_id": alert.id if alert else None, "alert_status": alert.status if alert else None,
+            "states": states_for(t, synthetic=bool((inv and inv.is_synthetic) or (alert and alert.is_synthetic)),
+                                 actions=action_counts.get(inv.id, 0) if inv else 0),
         })
     return sorted(rows, key=lambda r: r["confidence"], reverse=True)
 
@@ -306,6 +326,22 @@ def _live_case_file(db: Session, case: dict | None) -> dict | None:
     }
 
 
+def _audit(live: "threat_engine.ThreatAssessment", alert: SecurityAlert | None) -> dict:
+    """How the confidence was built: weighted components, reason codes (rule factors) and the evidence with timestamps."""
+    evidence = [{"event_id": e.get("event_id"), "rule": e.get("rule"), "rules": e.get("rules"), "stages": e.get("stages"),
+                 "severity": e.get("severity"), "timestamp": e.get("timestamp")} for e in (alert.evidence or [])] if alert else []
+    components = [{"component": name, **{k: v for k, v in info.items()}} for name, info in live.components.items()
+                  if isinstance(info, dict) and "weight" in info]
+    return {
+        "confidence": live.confidence, "capped_by_stage_count": bool(live.capped), "components": components,
+        "reason_codes": live.factors[:10], "independent_stages": live.counted_stages, "evidence": evidence,
+        "note": ("The five components are weighted and summed. Evidence is de-duplicated inside the rule component, but one event can "
+                 "still inform more than one component (rule, stage, anomaly features and baseline), so the components are not "
+                 "statistically independent. The CERT benchmark pipeline (docs/detection-evaluation.md) counts each evidence "
+                 "family once by construction; unifying the live engine with it is future work."),
+    }
+
+
 def investigation_detail(db: Session, investigation_id: int) -> dict:
     inv = db.get(AttackInvestigation, investigation_id)
     if inv is None:
@@ -320,6 +356,9 @@ def investigation_detail(db: Session, investigation_id: int) -> dict:
     evidence = [_with_local(ev, by_name) for ev in (alert.evidence or [])] if alert else []
     return {
         **investigation_row(inv, alert),
+        "states": states_for(live, synthetic=bool(inv.is_synthetic), actions=len(actions)),
+        "audit": None if live is None else _audit(live, alert),
+        "state_definitions": detection_states.STATE_DEFINITIONS,
         "summary": inv.summary, "indicators": inv.indicators, "exposure": inv.exposure,
         "first_event_id": inv.first_event_id, "latest_event_id": inv.latest_event_id,
         "resolved_at": iso(inv.closed_at) if inv.closed_at else None,

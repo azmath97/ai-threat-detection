@@ -9,7 +9,7 @@ import pytest
 
 from backend import security
 from backend.config import get_settings, validate_for_environment
-from backend.rate_limit import login_ip_throttle, login_throttle
+from backend.rate_limit import login_throttle
 from backend.response_service import SCOPE_NOTICE
 from conftest import login
 from ml import synthetic_data as sd

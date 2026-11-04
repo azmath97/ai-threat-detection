@@ -356,7 +356,7 @@ def write_outputs(result: dict, records: list[RunRecord], *, operating_point: Pa
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m ml.calibrate_scoring", description=__doc__.split("\n\n")[0])
-    parser.add_argument("--seeds", type=int, default=10, help="seeds per split (validation and test each); default 10")
+    parser.add_argument("--seeds", type=int, default=12, help="seeds per split (validation and test each); default 12, the number behind backend/operating_point.json")
     parser.add_argument("--no-write-operating-point", action="store_true", help="write only the reports, not backend/operating_point.json")
     parser.add_argument("--out", type=Path, default=OUT_DIR)
     args = parser.parse_args(argv)

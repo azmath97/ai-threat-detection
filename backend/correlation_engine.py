@@ -157,7 +157,6 @@ def correlate_events(events: list[SecurityEvent], parents: dict[int, int | None]
         effective += 1.0 if (strong or len(counted) == 1) else 0.5
 
     ordered = sorted(hits.values(), key=lambda h: RANK[h.stage])
-    times = [ev.timestamp for ev in evidence]
     sessions = sorted({ev.session_id for ev in evidence if ev.session_id is not None})
     return CorrelationResult(
         evidence=evidence,

@@ -3,7 +3,6 @@
     python -m ml.detect.summary data/processed/reports/cert_test.json
 """
 import json
-import sys
 
 
 def _f(v, digits=3):

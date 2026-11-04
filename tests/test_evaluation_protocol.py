@@ -11,7 +11,7 @@ from ml.cert import synthetic
 from ml.cert.leakage import LeakageError
 from ml.detect import guards, scenarios
 from ml.detect.dataset import build_cert_windows
-from ml.detect.evaluate import blind_partition, fit_and_calibrate, run_track
+from ml.detect.evaluate import blind_partition, fit_and_calibrate
 from ml.detect.features import FEATURE_COLUMNS, RAW_FEATURES, own_baseline_features
 from ml.detect.protocol import Protocol, assign_partitions
 from ml.detect.run_evaluation import run

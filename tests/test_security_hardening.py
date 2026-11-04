@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import auth_header, employee_id, login
+from conftest import auth_header, login
 from fastapi.testclient import TestClient
 
 from backend import hardening

@@ -5,7 +5,6 @@ Everything goes through the real HTTP API and the one SQLite database (no servic
 import sqlite3
 from datetime import datetime, timedelta
 
-import pytest
 from conftest import app_now, auth_header, login
 from fastapi.testclient import TestClient
 

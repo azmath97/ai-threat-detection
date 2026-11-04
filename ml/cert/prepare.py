@@ -44,7 +44,7 @@ from ml.cert.schema import (
     DatasetError,
 )
 from ml.cert.split import split_users
-from ml.cert.validate import locate_release, validate_release
+from ml.cert.validate import validate_release
 
 CHUNK_ROWS = 500_000
 ORG_DOMAIN_FALLBACK = "dtaa.com"
@@ -278,7 +278,6 @@ def prepare(source: str | Path, out: str | Path, *, answers: str | Path | None =
     label_frame = None
     if answer_events is not None:
         label_frame, eval_meta = label_tools.split_labels_and_metadata(answer_events)
-        listed_time = dict(zip(answer_events["event_id"], answer_events["listed_time"]))
     explicit_ids = set(label_frame["event_id"]) if label_frame is not None else set()
     matched: dict[str, str] = {}
     profile = _Profile()
@@ -333,7 +332,7 @@ def prepare(source: str | Path, out: str | Path, *, answers: str | Path | None =
         s["first_event"], s["last_event"] = t_min, t_max
         stats[kind] = s
 
-    labels_out, label_report = None, {"answer_key_supplied": answers is not None}
+    label_report = {"answer_key_supplied": answers is not None}
     if label_frame is not None:
         present = label_frame[label_frame["event_id"].isin(matched)]
         present.to_csv(out / "labels.csv", index=False)

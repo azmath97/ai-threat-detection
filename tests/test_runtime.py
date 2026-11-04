@@ -192,7 +192,7 @@ def test_response_centre_runs_simulated_containment_with_a_confirmation_and_reco
     at = at.button(key="nav_Response Centre").click().run()
     assert not at.exception, [e.value for e in at.exception]
     labels = [b.label for b in at.button]
-    assert "Simulate containment" in labels and not any(l in ("Review", "Execute action") for l in labels)
+    assert "Simulate containment" in labels and not any(name in ("Review", "Execute action") for name in labels)
     at = next(b for b in at.button if b.label == "Simulate containment").click().run()
     assert not at.exception, [e.value for e in at.exception]
     text = _page_text(at)

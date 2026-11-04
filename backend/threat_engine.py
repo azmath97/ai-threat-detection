@@ -261,7 +261,6 @@ def assess_all(db: Session, as_of: datetime | None = None) -> dict[int, ThreatAs
 
 def recommend_actions(threat: ThreatAssessment) -> list[dict]:
     """Containment recommendations driven by stage, exposure and related accounts."""
-    s = get_settings()
     if threat.level == "normal" or threat.correlation is None:
         return [{"action": "monitor", "priority": "low", "executable": False, "target": None, "target_employee_id": None,
                  "reason": "No malicious pattern; continue routine monitoring"}]

@@ -54,7 +54,6 @@ def _table(header: list[str], rows: list[list]) -> list[str]:
 
 def render_track(track: dict) -> list[str]:
     name = track["track"]
-    part = track["evaluated_partition"]
     L = [f"## {TRACK_TITLES[name]}", ""]
     if track["development_run"]:
         L += ["> **Development run on the validation partition.** Thresholds were calibrated on these windows, so the numbers below are "

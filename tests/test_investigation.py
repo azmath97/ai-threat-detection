@@ -6,7 +6,6 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-import pytest
 from conftest import auth_header, login
 
 from backend import investigation_explainer

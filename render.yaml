@@ -1,38 +1,35 @@
-# Render Blueprint for the FastAPI backend only. The three Streamlit apps are deployed separately
-# (Streamlit Community Cloud); see "Deploying to the cloud" in README.md.
+# Render Blueprint: the whole simulated platform as ONE Docker web service (FastAPI backend + the three Streamlit apps on
+# loopback behind the gateway in deploy/gateway.py, which is the only public port). See docs/deployment.md.
+#
+# Nothing secret is stored in this file. Every value marked sync: false is entered in the Render dashboard.
+# NOT YET DEPLOYED: this blueprint has not been run on Render. Follow docs/deployment.md, then run deploy/verify.py.
+# Render supplies RENDER_EXTERNAL_URL automatically. Add PUBLIC_URL in the dashboard only if you attach a custom domain.
 services:
   - type: web
-    name: westbridge-api
-    runtime: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /api/health
+    name: westbridge-platform
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # The four Python processes need roughly 0.6 GB at idle, so the 512 MB plans (including free) will not fit.
+    plan: 1c-2g
+    healthCheckPath: /healthz
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.3
-      - key: APP_ENV
-        value: production
-      # Persistent shared database. The service's own disk is ephemeral (lost on every deploy and restart), so the
-      # backend refuses to start in production with SQLite. Create a managed PostgreSQL database (Render PostgreSQL, or
-      # any provider) and paste its connection URL in the Render dashboard (sync: false = not stored in this file).
-      # To move existing local demo data into it: python -m backend.db_tools copy (see README, "Database").
+      # persistent = records live in your PostgreSQL database and survive restarts and redeploys (needs DATABASE_URL).
+      # demo       = throw-away synthetic data in a temporary SQLite file, reset on every start (refuses DATABASE_URL).
+      - key: DEPLOY_MODE
+        value: persistent
+      # Connection URL of a managed PostgreSQL database that you create. The container's own disk is ephemeral.
       - key: DATABASE_URL
         sync: false
-      # Secrets come from the platform, never from the repository.
+      # Output of `python -m deploy.make_secrets` (run it on your own machine; it prints to the terminal only).
       - key: SECRET_KEY
-        generateValue: true
-      # Behind Render's TLS-terminating proxy: honour X-Forwarded-Proto so REQUIRE_HTTPS (on in production) sees https.
-      - key: TRUST_FORWARDED_PROTO
-        value: "true"
-      # JSON object {"alice.morgan": "<password>", ... all 11 demo usernames} with a strong, unique password each (12+ chars).
-      # Enter it in the Render dashboard (sync: false = not stored in this file). Or set AUTO_SEED to "false" and manage accounts yourself.
+        sync: false
       - key: DEMO_PASSWORDS_JSON
         sync: false
-      # Shared with the Streamlit apps (as the TRUSTED_FRONTEND_KEY secret) so the API can attribute their requests
-      # to the signed-in employee's registered workstation. Copy the generated value from the Render dashboard.
-      - key: TRUSTED_FRONTEND_KEY
-        generateValue: true
+      # Browser login (HTTP Basic) that protects the SOC dashboard and the simulation console.
+      - key: ADMIN_UI_USER
+        sync: false
+      - key: ADMIN_UI_PASSWORD
+        sync: false
       - key: SIMULATION_ENABLED
         value: "true"
       - key: DISPLAY_TIMEZONE

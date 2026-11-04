@@ -22,7 +22,15 @@ def env_seconds(name: str, default: float, minimum: float) -> float:
     return max(minimum, value)
 
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+def _api_base_url() -> str:
+    """Where the backend is. Production never falls back to a localhost default: a missing value stops the app with a clear message."""
+    value = os.getenv("API_BASE_URL", "").strip()
+    if not value and os.getenv("APP_ENV", "").strip().lower() == "production":
+        raise RuntimeError("API_BASE_URL must be set when APP_ENV=production (the address of the deployed backend)")
+    return (value or "http://127.0.0.1:8000").rstrip("/")
+
+
+API_BASE_URL = _api_base_url()
 TIMEOUT = _timeout()          # raise it on free hosts whose API sleeps when idle
 FRONTEND_KEY = os.getenv("TRUSTED_FRONTEND_KEY", "")
 

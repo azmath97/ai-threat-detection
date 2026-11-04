@@ -240,7 +240,7 @@ def test_audit_trail_covers_alerts_investigations_containment_admin_and_failures
     run_steps(client, admin, "david.kumar", STEPS)
     pk = employee_pk(client, admin, "david.kumar")
     (row,) = [r for r in soc(client, admin, "investigations") if r["employee_id"] == "EMP-1004"]
-    failed_before = len(soc(client, admin, "audit", category="failed_response")["rows"])
+    failed_before = {r["id"] for r in soc(client, admin, "audit", category="failed_response")["rows"]}
     client.post("/api/containment", headers=admin, json={"employee_id": pk, "action_type": "lock_account", "reason": "Contain"})
     client.post("/api/containment", headers=admin, json={"employee_id": pk, "action_type": "lock_account", "reason": "Contain",
                                                          "confirm": True})
@@ -255,7 +255,8 @@ def test_audit_trail_covers_alerts_investigations_containment_admin_and_failures
     for r in audit["rows"]:
         assert r["timestamp"]["local"] and r["actor"]
     failed = soc(client, admin, "audit", category="failed_response")["rows"]
-    new_failures = failed[: len(failed) - failed_before]
+    # the audit view reads a bounded window of the newest rows, so compare row ids, not counts, with what was there before
+    new_failures = [r for r in failed if r["id"] not in failed_before]
     assert len(new_failures) == 2 and all(r["actor"] == "SEC-9011" and r["target"] == "EMP-1004" for r in new_failures)
     assert any("Confirmation required" in r["summary"] for r in new_failures)
     assert any("already locked" in r["summary"] for r in new_failures)

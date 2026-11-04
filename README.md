@@ -87,7 +87,7 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | SOC read models | `soc_service.py`, `soc_routes.py` |
 | Simulation | `scenario_generator.py` (seeded plans), `simulation_runs.py` (background runs, status, stop), `simulation_service.py` (manual steps, reset), `simulation_routes.py` |
 | Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (433 tests) |
+| Tests | `tests/` (479 tests) |
 
 ## Technology stack
 
@@ -333,7 +333,7 @@ A test asks SQLite's `EXPLAIN QUERY PLAN` for 14 of these queries and fails if a
 
 ### What was and was not verified
 
-Run in this repository (`python -m pytest tests -q`, 433 tests): migrations on a fresh database, on a database from an earlier
+Run in this repository (`python -m pytest tests -q`, 479 tests): migrations on a fresh database, on a database from an earlier
 release (including duplicate repair), and the refusal of a newer one; constraint and index behaviour; query plans;
 de-duplication, 12-way same-key and 9-way different-key concurrent ingestion on SQLite; transaction rollback; the
 bounded-query checks; two SOC sessions and a portal session seeing the same data; Streamlit reruns and double clicks against a
@@ -390,61 +390,63 @@ Stop with Ctrl+C. All state stays in `data/insider_threat.db`.
 
 ## Deploying to the cloud
 
-Nothing is deployed for you and this repository contains no deployment URLs. Two supported layouts:
+> **Status: prepared and rehearsed locally; not deployed.** No hosting account was available, so this repository contains no live
+> URL and none is claimed. The Dockerfile and [render.yaml](render.yaml) have never been built or applied. Run the checks in
+> [docs/deployment.md](docs/deployment.md#5-required-checks-after-deploying) against your own deployment before relying on it.
+> This is an educational, simulated demo with synthetic data, not production banking security.
 
-**A. One machine or VM (simplest).** Run `python app.py all` and put a reverse proxy that terminates HTTPS in front of ports
-8501, 8502 and 8503 (WebSocket support is required by Streamlit). The backend does not provide TLS itself: HTTPS exists
-only if your proxy or host provides it. Keep the backend on `127.0.0.1`; the dashboards call it locally, so the default
-`MAP_LOOPBACK_TO_WORKSTATION=true` already attributes sessions correctly (and loopback is exempt from `REQUIRE_HTTPS`). Set
-`APP_ENV=production`, a random `SECRET_KEY` (`python -c "import secrets; print(secrets.token_urlsafe(48))"`) and either
-`DEMO_PASSWORDS_JSON` (from your secret store) or `AUTO_SEED=false`; production refuses to start without them. It also
-refuses SQLite: point `DATABASE_URL` at PostgreSQL, or set `ALLOW_SQLITE_IN_PRODUCTION=true` if the SQLite file is on this
-machine's persistent disk and you accept a single backend process.
+The platform is four processes (the FastAPI backend and three Streamlit apps) and one public port is available on most hosts,
+so it deploys as **one Docker service**: [deploy/start.py](deploy/start.py) runs the four processes on loopback and
+[deploy/gateway.py](deploy/gateway.py) is the only public listener.
 
-**B. Split hosting: API on Render, dashboards on Streamlit Community Cloud.** The Streamlit apps run on a different
-host from the API, so the API only sees the dashboard server's address for every user. `TRUSTED_FRONTEND_KEY` solves
-that: dashboards send it as `X-Frontend-Key`, and the API then attributes the request to the signed-in employee's
-registered workstation IP (the same rule as loopback locally). Requests without the key are recorded with their real peer
-address, and `X-Forwarded-For` is never trusted. Steps that need **your** accounts:
+```text
+internet -> TLS (the host) -> gateway :$PORT --+-- /          employee portal
+                                               +-- /soc/      SOC dashboard      (admin login at the gateway, then backend roles)
+                                               +-- /console/  simulation console (admin login at the gateway, then backend roles)
+                                               +-- /healthz   backend and all three apps
+                                               +-- /api /docs /redoc /openapi.json -> 404 (the backend is never public)
+```
 
-1. Push this repository to GitHub (it already is: `azmath97/ai-threat-detection`).
-2. Create a managed PostgreSQL database (Render PostgreSQL or any provider) and copy its connection URL. The API needs it:
-   in production it refuses to start with SQLite, because the service's own disk is ephemeral.
-3. Render: *New > Blueprint*, choose the repository. [render.yaml](render.yaml) creates the `westbridge-api` web service
-   with `APP_ENV=production`, generated `SECRET_KEY` and `TRUSTED_FRONTEND_KEY`, and `TRUST_FORWARDED_PROTO=true` (Render's
-   proxy terminates TLS, so the API sees `X-Forwarded-Proto: https`). Render will ask you for **`DATABASE_URL`** (paste the
-   PostgreSQL URL from step 2) and **`DEMO_PASSWORDS_JSON`** (both declared `sync: false`, so they are never stored in the
-   repository): paste a JSON object that gives each of the 11 demo
-   usernames (see [Demo credentials](#demo-credentials)) its own strong password of 12+ characters, for example
-   `{"alice.morgan": "...", "bob.chen": "...", ..., "soc.admin": "..."}`; or set `AUTO_SEED` to `false`. The first start creates
-   the schema and seeds the data. When it is live,
-   open `https://<your-service>.onrender.com/api/health` and expect `{"status":"ok",...}`. Copy the service URL and the
-   `TRUSTED_FRONTEND_KEY` value from the service's *Environment* tab.
-4. Streamlit Community Cloud: *Create app* three times from the same repository and branch `main`, with main file
-   `frontend/employee_portal.py`, `frontend/soc_dashboard.py` and `frontend/simulation_console.py`, Python 3.12. In each
-   app's *Advanced settings > Secrets* paste (top-level secrets are exposed to the app as environment variables):
+* **Modes.** `DEPLOY_MODE=persistent` (default) stores everything in your PostgreSQL database (`DATABASE_URL`) and survives
+  restarts. `DEPLOY_MODE=demo` uses a throw-away SQLite file that is re-seeded at every start and **refuses** `DATABASE_URL`, so
+  demo data can never mix with persistent records. The container's disk is never used for durable data.
+* **No default credentials.** Startup validation ([deploy/preflight.py](deploy/preflight.py)) exits with code 2, naming the
+  missing settings (never their values), unless `SECRET_KEY` (32+ characters), `DEMO_PASSWORDS_JSON`, `ADMIN_UI_USER`,
+  `ADMIN_UI_PASSWORD` (16+ characters) and an https `PUBLIC_URL` (Render supplies `RENDER_EXTERNAL_URL`) are set.
+  `python -m deploy.make_secrets` generates them and prints to your terminal only.
+* **Same backend for every dashboard.** The apps reach the backend through `API_BASE_URL` (production refuses to start
+  without it; there is no localhost fallback outside development). CORS and the Streamlit websocket origin check allow only the
+  public URL.
+* **Model artifact.** The Docker build runs `python -m ml.train_model` (seeded synthetic data), so no model file is stored or
+  downloaded.
+* **TLS** is provided by the host (Render terminates HTTPS); the gateway redirects plain HTTP and sends HSTS only when the
+  proxy reports https.
 
-   ```toml
-   API_BASE_URL = "https://<your-service>.onrender.com"
-   TRUSTED_FRONTEND_KEY = "<value copied from Render>"
-   API_TIMEOUT_SECONDS = "60"
-   ```
-5. Check it: sign in to the portal as `EMP-1001` with the password you set, then open the SOC dashboard as `SEC-9011`. The
-   login event should show source IP `10.20.1.11` (a known address), not the Streamlit server's address.
+Steps that need **your** accounts (full detail in [docs/deployment.md](docs/deployment.md)):
 
-Things to know before relying on layout B:
+1. Create a Render account and connect GitHub.
+2. Create a Render PostgreSQL database and copy its URL (skip for `DEPLOY_MODE=demo`).
+3. Run `python -m deploy.make_secrets` locally and keep the output.
+4. *New > Blueprint* on this repository; [render.yaml](render.yaml) defines a Docker service on the 2 GB `1c-2g` plan (the
+   four processes need about 0.6 GB while idle, so 512 MB plans will not fit). Paste `DATABASE_URL`, `SECRET_KEY`,
+   `DEMO_PASSWORDS_JSON`, `ADMIN_UI_USER` and `ADMIN_UI_PASSWORD` when asked (all `sync: false`, never stored in the repository).
+5. Run `python -m deploy.verify --url https://<service> --gate-user ... --gate-password ...` for the public checks, and the
+   behaviour and persistence checks from the Render shell with `--api http://127.0.0.1:8000`.
 
-* **Free tiers sleep.** The first request after idle time can take a minute, hence `API_TIMEOUT_SECONDS`.
-* **Data lives in the PostgreSQL database, not on the API host.** Redeploying or restarting the API keeps sessions, events,
-  alerts and investigations; only the retrained model file is rebuilt. Whether the database itself persists, is backed up
-  or expires depends on the plan you chose with your database provider: check it. Nothing here was tested against a managed
-  provider (see [what was and was not verified](#what-was-and-was-not-verified)).
-* **Run one backend process.** The baseline cache, the model and the rate limiters live in process memory
-  (`render.yaml` starts a single `uvicorn` worker).
-* **Anyone who can open the SOC or simulation URL gets the sign-in form for administrators.** Use strong, unique passwords
-  in `DEMO_PASSWORDS_JSON`, restrict who can view those two apps (Streamlit Cloud's sharing settings), or set
-  `SIMULATION_ENABLED=false` on the API.
-* **Vercel cannot host this**: it needs long-running processes and WebSockets, and its filesystem is not persistent.
+**What was verified locally** (Windows, not a deployment): the whole stack through `python -m deploy.start` in demo mode and in
+persistent mode on a real embedded PostgreSQL 16 server, 25 of 25 `deploy.verify` checks, a hard kill and restart with 3 of 3
+persistence checks, a clean-virtualenv install of [requirements-deploy.txt](requirements-deploy.txt), browser sign-in through
+the gateway, a double-clicked download stored once and reloads storing nothing, a Streamlit websocket accepted for the public
+origin and refused for another, and no secret in the logs. **Not verified:** the Docker build, Render itself, Linux
+memory or load, real TLS behaviour, and anything on a public URL.
+
+**Other layouts.** On one VM you can still run `python app.py all` behind your own HTTPS reverse proxy (WebSocket support
+required) with `APP_ENV=production`, a random `SECRET_KEY`, `DEMO_PASSWORDS_JSON` (or `AUTO_SEED=false`) and PostgreSQL in
+`DATABASE_URL` (or `ALLOW_SQLITE_IN_PRODUCTION=true` for one process on a persistent disk). Keep the backend on `127.0.0.1`,
+and you must add your own authentication in front of the SOC and console pages. Hosting the dashboards on Streamlit
+Community Cloud and the API elsewhere is possible (set `TRUSTED_FRONTEND_KEY` to the same random value on the API and every
+dashboard so requests are attributed to the employee's registered workstation) but is not covered by the blueprint, and
+Vercel cannot host this architecture at all (long-running processes, WebSockets, no persistent filesystem).
 
 ## How to simulate an attack
 
@@ -1256,21 +1258,23 @@ backend/                     FastAPI app, models, detection, correlation, invest
   scoring.py                 the definitions: risk score formula, risk band gate, impact severity, evidence strength
   operating_point.json       the recorded risk-band thresholds (written by ml/calibrate_scoring.py)
 data/                        demo_accounts.py (usernames; random passwords come from a git-ignored file or the secret manager), seed_data.py (history), the SQLite file (git-ignored)
+deploy/                      single-container deployment: start.py, gateway.py, preflight.py, verify.py, make_secrets.py
 ml/                          features.py, synthetic_data.py, train_model.py, anomaly_detector.py, evaluate_dataset.py, calibrate_scoring.py, artifacts/ (git-ignored)
 ml/cert/                     CERT r4.2 pipeline: schema, validate, prepare, labels, split, leakage, synthetic supplement
 ml/detect/                   window builder, features, models, hybrid risk, benchmark and summary (offline benchmark)
-docs/                        cert-dataset.md, detection-evaluation.md, detection-results/
+docs/                        cert-dataset.md, detection-evaluation.md, deployment.md, detection-results/
 docs/cert-dataset.md         CERT dataset setup, field mapping, label rules, caveats
 frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       433 pytest tests
+tests/                       479 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
-requirements.txt  requirements-dev.txt (adds pgserver for the PostgreSQL tests)  .env.example
+requirements.txt  requirements-dev.txt (adds pgserver for the PostgreSQL tests)  requirements-deploy.txt (pinned runtime for the image)
+Dockerfile  .dockerignore  render.yaml  .env.example
 ```
 
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 433 tests, about eight minutes (a real backend is started several times)
+python -m pytest tests -q          # 479 tests, about eight minutes (a real backend is started several times)
 python -m pip install -r requirements-dev.txt   # optional: adds pgserver so tests/test_postgres.py runs instead of skipping
 ```
 

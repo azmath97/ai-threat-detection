@@ -518,6 +518,6 @@ def test_streamlit_keeps_its_own_xsrf_and_cors_protections_on():
 
 def test_render_blueprint_takes_secrets_from_the_platform_not_the_file():
     text = (ROOT / "render.yaml").read_text(encoding="utf-8")
-    assert "generateValue: true" in text and "sync: false" in text and "DEMO_PASSWORDS_JSON" in text
-    assert "TRUST_FORWARDED_PROTO" in text
+    assert "sync: false" in text and "DEMO_PASSWORDS_JSON" in text and "SECRET_KEY" in text
+    assert "generateValue" not in text                      # secrets come from `python -m deploy.make_secrets`, shown to the operator once
     assert not re.search(r"(SECRET_KEY|PASSWORD)[^\n]*\n\s*value:\s*\S{8,}", text)

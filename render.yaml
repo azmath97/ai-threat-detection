@@ -13,6 +13,12 @@ services:
         value: 3.12.3
       - key: APP_ENV
         value: production
+      # Persistent shared database. The service's own disk is ephemeral (lost on every deploy and restart), so the
+      # backend refuses to start in production with SQLite. Create a managed PostgreSQL database (Render PostgreSQL, or
+      # any provider) and paste its connection URL in the Render dashboard (sync: false = not stored in this file).
+      # To move existing local demo data into it: python -m backend.db_tools copy (see README, "Database").
+      - key: DATABASE_URL
+        sync: false
       # Secrets come from the platform, never from the repository.
       - key: SECRET_KEY
         generateValue: true

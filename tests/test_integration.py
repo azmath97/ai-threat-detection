@@ -3,10 +3,10 @@
 Everything goes through the real HTTP API and the one SQLite database (no service-level shortcuts).
 """
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import pytest
-from conftest import auth_header, login
+from conftest import app_now, auth_header, login
 from fastapi.testclient import TestClient
 
 from backend.main import app
@@ -33,7 +33,7 @@ def parse(ts: str) -> datetime:
 # ---------------------------------------------------------------- normal employee
 def test_normal_employee_session_is_recorded_by_the_soc_and_stays_low_risk(client, admin, db_path):
     pk = pk_of(client, admin, "alice.morgan")
-    started = datetime.now(timezone.utc) - timedelta(seconds=2)
+    started = app_now() - timedelta(seconds=2)
 
     response = login(client, "EMP-1001")                                    # familiar (registered workstation) address
     assert response.status_code == 200
@@ -57,7 +57,7 @@ def test_normal_employee_session_is_recorded_by_the_soc_and_stays_low_risk(clien
         [(e["event_type"], e["risk_points"], e["risk_flags"]) for e in events]
     assert len({e["session_id"] for e in events}) == 1 and None not in {e["session_id"] for e in events}
     assert {e["source_ip"] for e in events} == {"10.20.1.11"}                # the backend set the IP, not the client
-    assert all(started <= parse(e["timestamp"]) <= datetime.now(timezone.utc) + timedelta(seconds=2) for e in events)
+    assert all(started <= parse(e["timestamp"]) <= app_now() + timedelta(seconds=2) for e in events)
 
     # the SOC reads the same rows from the same database
     feed = client.get("/api/soc/events", headers=admin, params={"employee": "EMP-1001", "limit": 100}).json()

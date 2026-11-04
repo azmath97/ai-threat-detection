@@ -7,10 +7,12 @@ import random
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from backend import migrations
 from backend.config import get_settings
-from backend.database import Base, SessionLocal, engine, init_db, utcnow
+from backend.database import SessionLocal, engine, init_db, utcnow
 from backend.event_service import record_event, write_audit
 from backend.models import AccessPermission, Employee, EmployeeSession, employee_code_for
 from backend.security import hash_password, hash_token
@@ -108,13 +110,23 @@ def _seed_history(db: Session, employee: Employee, perms: dict[str, str], rng: r
 
 
 def seed_database(db: Session, reset: bool = False) -> bool:
-    """Create the synthetic dataset. Returns False if data already exists (and reset is False)."""
+    """Create the synthetic dataset. Returns False if data already exists (and reset is False).
+
+    Safe when two backend processes start together: the second one's inserts violate the unique usernames, it rolls back
+    and reports that the data already exists."""
     if reset:
-        Base.metadata.drop_all(bind=engine)
+        migrations.drop_everything(engine)
         init_db()
     if db.scalar(select(Employee.id).limit(1)) is not None:
         return False
+    try:
+        return _seed(db)
+    except IntegrityError:
+        db.rollback()
+        return False
 
+
+def _seed(db: Session) -> bool:
     rng = random.Random(20260101)
     passwords = load_passwords()
 

@@ -147,7 +147,8 @@ def test_setup_command_creates_env_with_a_random_secret_and_credentials_idempote
 
 # ----------------------------------------------------------------------------------------- missing configuration
 def test_production_validation_covers_secret_cors_and_credentials(fresh_credentials, tmp_path):
-    base = replace(get_settings(), app_env="production", secret_key="r" * 40, trusted_frontend_key="")
+    base = replace(get_settings(), app_env="production", secret_key="r" * 40, trusted_frontend_key="",
+                   database_url="postgresql+psycopg://u:p@db.example.test/w")
     fresh_credentials.setenv("DEMO_CREDENTIALS_FILE", str(tmp_path / "absent.json"))
     with pytest.raises(RuntimeError, match="demo credentials"):
         validate_for_environment(base)                                        # AUTO_SEED needs a credential source

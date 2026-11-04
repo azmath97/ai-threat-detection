@@ -31,7 +31,7 @@ from backend.catalog import (
     is_self_service,
 )
 from backend.config import get_settings, validate_for_environment
-from backend.database import SessionLocal, get_db, init_db, utcnow
+from backend.database import SessionLocal, check_database, database_info, engine, get_db, init_db, utcnow
 from backend.errors import ServiceError
 from backend.event_service import write_audit
 from backend.rate_limit import login_ip_throttle, login_throttle
@@ -81,7 +81,7 @@ from backend.hardening import (
     SecurityHeadersMiddleware,
     install_error_handlers,
 )
-from backend.security import AuthContext, device_info, get_auth, require_admin, resolve_ip
+from backend.security import AuthContext, device_info, get_auth, idempotency_key, require_admin, resolve_ip
 from ml.anomaly_detector import ensure_model, get_detector, reload_detector
 
 logger = logging.getLogger("insider_threat")
@@ -194,9 +194,25 @@ def _profile(db: Session, employee: Employee, internal: bool = False) -> Profile
 
 # ---------------------------------------------------------------- health
 @app.get("/api/health", tags=["system"])
-def health(db: Session = Depends(get_db)):
-    db.scalar(select(func.count(Employee.id)))
+def health():
+    try:
+        check_database()
+    except Exception:
+        logger.exception("Health check: database unavailable")
+        return JSONResponse(status_code=503, content={"status": "unavailable"}, headers={"Retry-After": "2"})
     return {"status": "ok", "time": utcnow().isoformat(), "display_timezone": get_settings().display_timezone}
+
+
+@app.get("/api/system/database", tags=["system"])
+def database_status(_: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
+    """Which store the backend uses (redacted), its schema version and row counts. Administrators only."""
+    from backend import migrations
+
+    tables = {"employees": Employee, "security_events": SecurityEvent, "security_alerts": SecurityAlert,
+              "attack_investigations": AttackInvestigation, "containment_actions": ContainmentAction}
+    return {**database_info(), "schema_version": migrations.current_version(engine),
+            "latest_schema_version": migrations.CURRENT_VERSION,
+            "row_counts": {name: db.scalar(select(func.count(model.id))) or 0 for name, model in tables.items()}}
 
 
 # ---------------------------------------------------------------- auth
@@ -286,6 +302,7 @@ def access_resource(
     result, permitted = event_service.access_resource(
         db, auth.employee, resource_id, body.action, source_ip=resolve_ip(request, auth.employee),
         session=auth.session, record_count=body.record_count, device_info=device_info(request),
+        request_id=idempotency_key(request),
     )
     if not permitted:
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"You do not have permission to {body.action} {meta['name']}")
@@ -311,7 +328,7 @@ def create_event(
     Send `request_id` (or an `Idempotency-Key` header) so a retried request is stored and scored only once.
     """
     ip, device = resolve_ip(request, auth.employee), device_info(request)
-    request_id = (body.request_id or request.headers.get("idempotency-key") or "")[:64] or None
+    request_id = idempotency_key(request, body.request_id)
     if body.event_type in RESOURCE_EVENT_TYPES:
         result, _ = event_service.access_resource(
             db, auth.employee, body.resource, EVENT_TO_ACTION[body.event_type], source_ip=ip, session=auth.session,
@@ -351,7 +368,7 @@ def list_events(
     until: str | None = Query(None),
     min_risk_points: int = Query(0, ge=0),
     synthetic: bool | None = Query(None, description="Filter simulation-generated events"),
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(100, ge=1, le=get_settings().max_page_size),
     offset: int = Query(0, ge=0),
 ):
     if event_type is not None and event_type not in EVENT_TYPES:
@@ -488,7 +505,7 @@ def list_alerts(
     alert_status: str | None = Query(None, alias="status", pattern="^(open|investigating|contained|resolved|false_positive)$"),
     severity: str | None = Query(None, pattern="^(normal|suspicious|high_risk|critical)$"),
     employee_id: int | None = Query(None, gt=0),
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(100, ge=1, le=get_settings().max_page_size),
 ):
     query = select(SecurityAlert).order_by(SecurityAlert.updated_at.desc(), SecurityAlert.id.desc()).limit(limit)
     if alert_status:
@@ -529,8 +546,9 @@ def list_investigations(
     db: Session = Depends(get_db),
     inv_status: str | None = Query(None, alias="status", pattern="^(open|contained|resolved)$"),
     employee_id: int | None = Query(None, gt=0),
+    limit: int = Query(100, ge=1, le=get_settings().max_page_size),
 ):
-    query = select(AttackInvestigation).order_by(AttackInvestigation.updated_at.desc(), AttackInvestigation.id.desc())
+    query = select(AttackInvestigation).order_by(AttackInvestigation.updated_at.desc(), AttackInvestigation.id.desc()).limit(limit)
     if inv_status:
         query = query.where(AttackInvestigation.status == inv_status)
     if employee_id:

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend import baseline as baseline_service
@@ -69,6 +70,31 @@ def has_access(db: Session, employee_id: int, resource: str, action: str) -> boo
     return ACCESS_LEVEL_RANK[permission.access_level] >= ACCESS_LEVEL_RANK[ACTION_REQUIRED_LEVEL[action]]
 
 
+def _duplicate_of(db: Session, employee: Employee, request_id: str) -> "EventResult | None":
+    """The event already stored for this (employee, request_id) deduplication key, if any."""
+    existing = db.scalar(select(SecurityEvent).where(SecurityEvent.employee_id == employee.id,
+                                                     SecurityEvent.request_id == request_id))
+    if existing is None:
+        return None
+    latest = db.scalar(select(RiskAssessment).where(RiskAssessment.event_id == existing.id).order_by(RiskAssessment.id.desc()))
+    return EventResult(event=existing, assessment=latest, alert=None, duplicate=True)
+
+
+def _serialise_ingestion(db: Session, employee: Employee) -> None:
+    """Make concurrent ingestion for one employee (and the account that owns it) run one at a time.
+
+    The assessment of an event must see every earlier event, and "is there already an open alert / investigation?" must
+    not race. PostgreSQL gets that from a row lock taken in a fixed order (so two workers cannot deadlock). The lock is
+    FOR NO KEY UPDATE, not FOR UPDATE: a transaction that already inserted a session or event for the employee holds a
+    shared foreign-key lock on the row, and two such transactions asking for FOR UPDATE would wait on each other forever.
+    SQLite already has a single writer: the write lock taken by the first INSERT is held to the end of the transaction.
+    """
+    if db.get_bind().dialect.name == "sqlite":
+        return
+    ids = sorted({employee.id, *([employee.created_by_id] if employee.created_by_id else [])})
+    db.execute(select(Employee.id).where(Employee.id.in_(ids)).order_by(Employee.id).with_for_update(key_share=True))
+
+
 def record_event(
     db: Session,
     employee: Employee,
@@ -89,18 +115,24 @@ def record_event(
     evaluate_alerts: bool = True,
     commit: bool = True,
 ) -> EventResult:
-    """Store an event and run it through detection.
+    """Store an event and run it through detection, all in one transaction.
 
-    `request_id` makes the call idempotent: replaying the same request returns the original event without scoring
-    it again. `evaluate_alerts=False` (used for bulk history seeding) stores rule flags but skips ML scoring and alerts.
+    The event, its risk assessment, any alert, the investigation and their audit rows are committed together or not at all.
+
+    Deduplication key: `(employee_id, request_id)`. A repeat of the same key (a client retry, a double click, a Streamlit
+    rerun, two concurrent requests) returns the original event with `duplicate=True` and stores and scores nothing new.
+    A partial unique index makes this hold even when two requests arrive at the same instant.
+    `evaluate_alerts=False` (used for bulk history seeding) stores rule flags but skips ML scoring and alerts.
     """
     if request_id:
-        existing = db.scalar(select(SecurityEvent).where(SecurityEvent.employee_id == employee.id,
-                                                         SecurityEvent.request_id == request_id))
-        if existing is not None:
-            latest = db.scalar(select(RiskAssessment).where(RiskAssessment.event_id == existing.id)
-                               .order_by(RiskAssessment.id.desc()))
-            return EventResult(event=existing, assessment=latest, alert=None, duplicate=True)
+        duplicate = _duplicate_of(db, employee, request_id)
+        if duplicate is not None:
+            return duplicate
+    _serialise_ingestion(db, employee)
+    if request_id:
+        duplicate = _duplicate_of(db, employee, request_id)       # re-check now that we hold the lock
+        if duplicate is not None:
+            return duplicate
 
     synthetic = is_synthetic or bool(session and session.is_synthetic)
     event = SecurityEvent(
@@ -122,7 +154,14 @@ def record_event(
     )
     event.employee = employee
     db.add(event)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        duplicate = _duplicate_of(db, employee, request_id) if request_id and commit else None
+        if duplicate is None:
+            raise
+        return duplicate                                          # the concurrent request with the same key won the race
 
     # 1. rules, judged against this employee's own baseline, permissions and session context
     detection_engine.apply_rules(db, employee, event, baseline_service.baseline_for(db, employee, event.timestamp))

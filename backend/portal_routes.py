@@ -14,7 +14,7 @@ from backend.database import get_db
 from backend.event_service import has_access, record_event
 from backend.models import Employee
 from backend.rate_limit import enforce
-from backend.security import AuthContext, device_info, get_auth, resolve_ip
+from backend.security import AuthContext, device_info, get_auth, idempotency_key, resolve_ip
 
 router = APIRouter(prefix="/api", tags=["portal"])
 _PERIOD = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -27,13 +27,17 @@ class Ctx:
         self.db, self.auth = db, auth
         self.ip = resolve_ip(request, auth.employee)
         self.device = device_info(request)
+        self.key = idempotency_key(request)      # one page visit + action: repeats of this request store one event
+        self._logged = 0
 
     def log(self, event_type: str, resource: str | None, *, accessed: int = 0, downloaded: int = 0,
             details: dict | None = None, outcome: str = "success"):
+        self._logged += 1
         return record_event(
             self.db, self.auth.employee, event_type, source_ip=self.ip, resource=resource, outcome=outcome,
             details=details, session=self.auth.session, device_info=self.device,
             records_accessed=accessed, records_downloaded=downloaded,
+            request_id=f"{self.key}#{self._logged}" if self.key else None,
         )
 
     def require(self, resource: str, action: str, event_type: str, details: dict | None = None) -> None:

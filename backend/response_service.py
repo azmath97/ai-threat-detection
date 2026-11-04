@@ -13,6 +13,7 @@ change nothing is refused with 409 instead of creating a duplicate action.
 import ipaddress
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.catalog import RESOURCES, is_self_service, sensitivity_of
@@ -101,6 +102,20 @@ def restore_employee(db: Session, target: Employee) -> dict:
     return {"restored_permissions": restored}
 
 
+def _replay(db: Session, admin_id: int, target_id: int, action_type: str, request: dict, key: str, ip: str | None):
+    """The original action for this idempotency key (marked `replayed`), or None if the key is unused."""
+    existing = db.scalar(select(ContainmentAction).where(ContainmentAction.idempotency_key == key))
+    if existing is None:
+        return None
+    if (existing.details or {}).get("request") != request or existing.performed_by != admin_id:
+        raise ServiceError(409, "This idempotency key was already used for a different containment request")
+    write_audit(db, "containment_replayed", actor_id=admin_id, target_type="employee", target_id=target_id, ip=ip,
+                details={"action_id": existing.id, "action": action_type, "idempotency_key": key})
+    db.commit()
+    existing.replayed = True
+    return existing
+
+
 def apply_action(
     db: Session,
     admin: Employee,
@@ -124,16 +139,19 @@ def apply_action(
                "investigation_id": investigation_id, "alert_id": alert_id}
     try:
         if idempotency_key:
-            existing = db.scalar(select(ContainmentAction).where(ContainmentAction.idempotency_key == idempotency_key))
-            if existing is not None:
-                if (existing.details or {}).get("request") != request or existing.performed_by != admin_id:
-                    raise ServiceError(409, "This idempotency key was already used for a different containment request")
-                write_audit(db, "containment_replayed", actor_id=admin_id, target_type="employee", target_id=target_id, ip=ip,
-                            details={"action_id": existing.id, "action": action_type, "idempotency_key": idempotency_key})
-                db.commit()
-                existing.replayed = True
-                return existing
-        return _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm, value, alert_id, idempotency_key, request)
+            replay = _replay(db, admin_id, target_id, action_type, request, idempotency_key, ip)
+            if replay is not None:
+                return replay
+        try:
+            return _apply(db, admin, target, action_type, reason, investigation_id, ip, confirm, value, alert_id, idempotency_key, request)
+        except IntegrityError:
+            # a concurrent request with the same key, or the same block / isolation, committed first
+            db.rollback()
+            if idempotency_key:
+                replay = _replay(db, admin_id, target_id, action_type, request, idempotency_key, ip)
+                if replay is not None:
+                    return replay
+            raise ServiceError(409, "A conflicting request was processed at the same moment; refresh and retry") from None
     except ServiceError as exc:
         db.rollback()
         write_audit(db, "containment_failed", actor_id=admin_id, target_type="employee", target_id=target_id, ip=ip,

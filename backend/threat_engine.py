@@ -8,7 +8,7 @@ arrive. Repeated identical evidence is discounted, and thin evidence (too few in
 severity, so a single unfamiliar IP or one large export cannot be critical on its own.
 """
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import log1p
 
 from sqlalchemy import select
@@ -158,10 +158,22 @@ def assess_and_store(db: Session, employee: Employee, event: SecurityEvent) -> t
     return threat, row
 
 
+def _idle(employee_id: int, as_of: datetime) -> ThreatAssessment:
+    result = ThreatAssessment(employee_id=employee_id, as_of=as_of)
+    result.exposure = data_exposure.assess([], False)
+    return result
+
+
 def assess_all(db: Session, as_of: datetime | None = None) -> dict[int, ThreatAssessment]:
-    """Current assessment of every employee (employees without recent activity are normal by definition)."""
+    """Current assessment of every employee. Only employees with events in the correlation window (and the creators of
+    those accounts) are assessed; the rest are normal by definition, so the cost follows recent activity, not history."""
     as_of = as_of or utcnow()
-    return {e.id: assess(db, e, as_of) for e in db.scalars(select(Employee).order_by(Employee.id))}
+    since = as_of - timedelta(minutes=get_settings().correlation_window_minutes)
+    employees = {e.id: e for e in db.scalars(select(Employee).order_by(Employee.id))}
+    active = set(db.scalars(select(SecurityEvent.employee_id).where(
+        SecurityEvent.timestamp >= since, SecurityEvent.timestamp <= as_of).distinct()))
+    active |= {employees[i].created_by_id for i in active if i in employees and employees[i].created_by_id}
+    return {i: assess(db, e, as_of) if i in active else _idle(i, as_of) for i, e in employees.items()}
 
 
 def recommend_actions(threat: ThreatAssessment) -> list[dict]:

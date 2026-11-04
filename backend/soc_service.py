@@ -54,6 +54,7 @@ def stage_of(flags: list[dict] | None) -> str | None:
 
 # ---------------------------------------------------------------- change token for polling
 def version(db: Session) -> dict:
+    """Cheap change token the dashboards poll: a handful of indexed max()/small-table reads, never a scan of a growing table."""
     def last(col):
         value = db.scalar(select(func.max(col)))
         return value.timestamp() if isinstance(value, datetime) else (value or 0)
@@ -62,14 +63,19 @@ def version(db: Session) -> dict:
         "events": db.scalar(select(func.max(SecurityEvent.id))) or 0,
         "assessments": db.scalar(select(func.max(RiskAssessment.id))) or 0,
         "audit": db.scalar(select(func.max(AuditLog.id))) or 0,
-        "alerts": f"{db.scalar(select(func.count(SecurityAlert.id))) or 0}:{last(SecurityAlert.updated_at)}",
-        "investigations": f"{db.scalar(select(func.count(AttackInvestigation.id))) or 0}:{last(AttackInvestigation.updated_at)}",
+        "alerts": f"{db.scalar(select(func.max(SecurityAlert.id))) or 0}:{last(SecurityAlert.updated_at)}",
+        "investigations": f"{db.scalar(select(func.max(AttackInvestigation.id))) or 0}:{last(AttackInvestigation.updated_at)}",
         "controls": f"{db.scalar(select(func.count(ResponseControl.id)).where(ResponseControl.active.is_(True))) or 0}:"
                     f"{db.scalar(select(func.max(ResponseControl.id))) or 0}",
         "employees": f"{db.scalar(select(func.count(Employee.id))) or 0}:"
                      f"{db.scalar(select(func.count(Employee.id)).where(Employee.status == 'locked')) or 0}",
     }
     return {**parts, "token": "|".join(str(v) for v in parts.values())}
+
+
+def window_start(now: datetime | None = None) -> datetime:
+    """Start of the reporting window used by dashboard totals (DASHBOARD_WINDOW_DAYS)."""
+    return (now or utcnow()) - timedelta(days=get_settings().dashboard_window_days)
 
 
 def current_threats(db: Session) -> dict[int, threat_engine.ThreatAssessment]:
@@ -86,11 +92,13 @@ def _employees(db: Session) -> dict[int, Employee]:
 
 
 def _latest_investigations(db: Session) -> dict[int, AttackInvestigation]:
-    result: dict[int, AttackInvestigation] = {}
-    for inv in db.scalars(select(AttackInvestigation).order_by(AttackInvestigation.id)):
-        previous = result.get(inv.employee_id)
-        if previous is None or inv.status in ACTIVE_INVESTIGATION or previous.status not in ACTIVE_INVESTIGATION:
-            result[inv.employee_id] = inv
+    """Per employee: the newest active investigation, otherwise the newest one. Reads only those rows, not the whole table."""
+    latest = select(func.max(AttackInvestigation.id)).group_by(AttackInvestigation.employee_id)
+    result = {inv.employee_id: inv for inv in db.scalars(
+        select(AttackInvestigation).where(AttackInvestigation.id.in_(latest)).order_by(AttackInvestigation.id))}
+    for inv in db.scalars(select(AttackInvestigation).where(AttackInvestigation.status.in_(ACTIVE_INVESTIGATION))
+                          .order_by(AttackInvestigation.id)):
+        result[inv.employee_id] = inv
     return result
 
 
@@ -101,11 +109,10 @@ def _last_event_at(db: Session, employee_id: int) -> datetime | None:
 
 def _action_counts(db: Session) -> dict[int, int]:
     """Completed containment actions per investigation (the state describes the current incident, not old history)."""
-    counts: dict[int, int] = {}
-    for (investigation_id,) in db.execute(select(ContainmentAction.investigation_id).where(
-            ContainmentAction.status == "completed", ContainmentAction.investigation_id.is_not(None))):
-        counts[investigation_id] = counts.get(investigation_id, 0) + 1
-    return counts
+    return dict(db.execute(
+        select(ContainmentAction.investigation_id, func.count(ContainmentAction.id))
+        .where(ContainmentAction.status == "completed", ContainmentAction.investigation_id.is_not(None))
+        .group_by(ContainmentAction.investigation_id)).all())
 
 
 def states_for(threat: "threat_engine.ThreatAssessment | None", *, synthetic: bool, actions: int) -> list[dict]:
@@ -150,12 +157,14 @@ def threat_rows(db: Session) -> list[dict]:
 
 def overview(db: Session) -> dict:
     s, now = get_settings(), utcnow()
+    since = window_start(now)
     employees, threats = _employees(db), current_threats(db)
     sensitive_ids = [r for r in RESOURCES if not is_self_service(r) and sensitivity_of(r) >= 2]
     sensitive_filter = (SecurityEvent.outcome == "success", SecurityEvent.event_type.in_(RESOURCE_EVENT_TYPES),
-                        SecurityEvent.resource.in_(sensitive_ids))
-    transfers = db.scalars(select(SecurityEvent).where(SecurityEvent.event_type == "external_transfer",
-                                                       SecurityEvent.outcome == "success")).all()
+                        SecurityEvent.resource.in_(sensitive_ids), SecurityEvent.timestamp >= since)
+    confirmed_transfers = db.scalar(select(func.count(SecurityEvent.id)).where(
+        SecurityEvent.event_type == "external_transfer", SecurityEvent.outcome == "success",
+        SecurityEvent.timestamp >= since, SecurityEvent.details["transfer_status"].as_string() == "confirmed")) or 0
     day_ago = now - timedelta(hours=24)
     buckets = {(now - timedelta(hours=o)).replace(minute=0, second=0, microsecond=0): 0 for o in range(23, -1, -1)}
     for (ts,) in db.execute(select(SecurityEvent.timestamp).where(SecurityEvent.timestamp >= day_ago)):
@@ -168,8 +177,9 @@ def overview(db: Session) -> dict:
             by_level[threats[emp.id].level] += 1
     return {
         "generated_at": iso(now),
+        "window_days": s.dashboard_window_days,
         "kpis": {
-            "total_events": db.scalar(select(func.count(SecurityEvent.id))) or 0,
+            "total_events": db.scalar(select(func.count(SecurityEvent.id)).where(SecurityEvent.timestamp >= since)) or 0,
             "events_24h": db.scalar(select(func.count(SecurityEvent.id)).where(SecurityEvent.timestamp >= day_ago)) or 0,
             "active_investigations": db.scalar(select(func.count(AttackInvestigation.id)).where(
                 AttackInvestigation.status.in_(ACTIVE_INVESTIGATION))) or 0,
@@ -181,7 +191,7 @@ def overview(db: Session) -> dict:
                                                     .where(*sensitive_filter)) or 0,
             "sensitive_records_24h": db.scalar(select(func.coalesce(func.sum(SecurityEvent.records_accessed), 0))
                                                .where(*sensitive_filter, SecurityEvent.timestamp >= day_ago)) or 0,
-            "confirmed_external_transfers": sum(1 for e in transfers if (e.details or {}).get("transfer_status") == "confirmed"),
+            "confirmed_external_transfers": confirmed_transfers,
         },
         "thresholds": {"suspicious": s.threat_suspicious_threshold, "high_risk": s.threat_high_threshold,
                        "critical": s.threat_critical_threshold},
@@ -201,7 +211,7 @@ def confidence_history(db: Session, employee_id: int, minutes: int) -> list[dict
 
 # ---------------------------------------------------------------- live feed
 def event_feed(db: Session, *, employee: str | None, ip: str | None, event_type: str | None, severity: str | None,
-               minutes: int | None, limit: int) -> dict:
+               minutes: int | None, limit: int, before_id: int | None = None) -> dict:
     latest = (select(RiskAssessment.event_id.label("eid"), func.max(RiskAssessment.id).label("aid"))
               .where(RiskAssessment.event_id.is_not(None)).group_by(RiskAssessment.event_id).subquery())
     query = (select(SecurityEvent, RiskAssessment, Employee)
@@ -220,9 +230,14 @@ def event_feed(db: Session, *, employee: str | None, ip: str | None, event_type:
         query = query.where(RiskAssessment.level == severity)
     if minutes:
         query = query.where(SecurityEvent.timestamp >= utcnow() - timedelta(minutes=minutes))
-    rows = db.execute(query.order_by(SecurityEvent.id.desc()).limit(limit)).all()
+    if before_id:
+        query = query.where(SecurityEvent.id < before_id)
+    rows = db.execute(query.order_by(SecurityEvent.id.desc()).limit(limit + 1)).all()
+    more = len(rows) > limit
+    rows = rows[:limit]
     return {
         "latest_id": db.scalar(select(func.max(SecurityEvent.id))) or 0,
+        "has_more": more, "next_before_id": rows[-1][0].id if more and rows else None,
         "rows": [{
             "id": e.id, "timestamp": iso(e.timestamp), "employee_id": emp.employee_code, "account": emp.username,
             "event_type": e.event_type, "source_ip": e.source_ip, "resource": e.resource, "outcome": e.outcome,
@@ -244,7 +259,8 @@ def employee_rows(db: Session) -> list[dict]:
                              .where(SecurityEvent.risk_points > 0, SecurityEvent.timestamp >= day_ago)
                              .group_by(SecurityEvent.employee_id)).all())
     last = dict(db.execute(select(SecurityEvent.employee_id, func.max(SecurityEvent.timestamp))
-                           .where(SecurityEvent.risk_points > 0).group_by(SecurityEvent.employee_id)).all())
+                           .where(SecurityEvent.risk_points > 0, SecurityEvent.timestamp >= window_start())
+                           .group_by(SecurityEvent.employee_id)).all())
     rows = []
     for emp in _employees(db).values():
         t, inv = threats[emp.id], invs.get(emp.id)
@@ -299,14 +315,16 @@ def investigation_row(inv: AttackInvestigation, alert: SecurityAlert | None) -> 
     }
 
 
-def investigation_rows(db: Session, status: str | None = None) -> list[dict]:
-    alerts = {a.investigation_id: a for a in db.scalars(select(SecurityAlert).where(SecurityAlert.investigation_id.is_not(None)))}
-    query = select(AttackInvestigation).order_by(AttackInvestigation.updated_at.desc())
+def investigation_rows(db: Session, status: str | None = None, limit: int = 200) -> list[dict]:
+    query = select(AttackInvestigation).order_by(AttackInvestigation.updated_at.desc(), AttackInvestigation.id.desc()).limit(limit)
     if status == "active":
         query = query.where(AttackInvestigation.status.in_(ACTIVE_INVESTIGATION))
     elif status:
         query = query.where(AttackInvestigation.status == status)
-    return [investigation_row(inv, alerts.get(inv.id)) for inv in db.scalars(query)]
+    invs = list(db.scalars(query))
+    alerts = {a.investigation_id: a for a in db.scalars(select(SecurityAlert).where(
+        SecurityAlert.investigation_id.in_([i.id for i in invs] or [0])))}
+    return [investigation_row(inv, alerts.get(inv.id)) for inv in invs]
 
 
 def _live_case_file(db: Session, case: dict | None) -> dict | None:

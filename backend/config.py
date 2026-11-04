@@ -57,6 +57,14 @@ class Settings:
     rate_limit_sensitive_per_minute: int
     rate_limit_heavy_per_minute: int
     rate_limit_employee_per_minute: int
+    db_busy_timeout_seconds: int
+    db_pool_size: int
+    db_max_overflow: int
+    db_pool_timeout_seconds: int
+    db_pool_recycle_seconds: int
+    allow_sqlite_in_production: bool
+    dashboard_window_days: int
+    max_page_size: int
     correlation_window_minutes: int
     investigation_window_hours: int
     threat_suspicious_threshold: int
@@ -76,10 +84,24 @@ class Settings:
         return ZoneInfo(self.display_timezone)
 
 
+def normalize_database_url(url: str) -> str:
+    """Accept the URL forms hosts hand out. `postgres://` and `postgresql://` become `postgresql+psycopg://` (psycopg 3)."""
+    url = url.strip()
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
+
+
+def redact_url(url: str) -> str:
+    """The URL with any password replaced, safe to log or return."""
+    return re.sub(r"(://[^:/@\s]+):[^@\s]*@", r"\1:***@", url)
+
+
 @lru_cache
 def get_settings() -> Settings:
     default_db = f"sqlite:///{(BASE_DIR / 'data' / 'insider_threat.db').as_posix()}"
-    db_url = _str("DATABASE_URL", default_db)
+    db_url = normalize_database_url(_str("DATABASE_URL", default_db))
     if db_url.startswith("sqlite:///./"):
         db_url = f"sqlite:///{(BASE_DIR / db_url[len('sqlite:///./'):]).as_posix()}"
     app_env = _str("APP_ENV", "development").strip().lower()
@@ -119,6 +141,14 @@ def get_settings() -> Settings:
         rate_limit_sensitive_per_minute=_int("RATE_LIMIT_SENSITIVE_PER_MINUTE", 30),
         rate_limit_heavy_per_minute=_int("RATE_LIMIT_HEAVY_PER_MINUTE", 6),
         rate_limit_employee_per_minute=_int("RATE_LIMIT_EMPLOYEE_PER_MINUTE", 60),
+        db_busy_timeout_seconds=max(1, _int("DB_BUSY_TIMEOUT_SECONDS", 30)),
+        db_pool_size=max(1, _int("DB_POOL_SIZE", 10)),
+        db_max_overflow=max(0, _int("DB_MAX_OVERFLOW", 10)),
+        db_pool_timeout_seconds=max(1, _int("DB_POOL_TIMEOUT_SECONDS", 30)),
+        db_pool_recycle_seconds=max(30, _int("DB_POOL_RECYCLE_SECONDS", 1800)),
+        allow_sqlite_in_production=_bool("ALLOW_SQLITE_IN_PRODUCTION", False),
+        dashboard_window_days=max(1, _int("DASHBOARD_WINDOW_DAYS", 30)),
+        max_page_size=max(10, _int("MAX_PAGE_SIZE", 500)),
         correlation_window_minutes=_int("CORRELATION_WINDOW_MINUTES", 240),
         investigation_window_hours=_int("INVESTIGATION_WINDOW_HOURS", 24),
         threat_suspicious_threshold=_int("THREAT_SUSPICIOUS_THRESHOLD", 25),
@@ -166,6 +196,12 @@ def validate_for_environment(settings: Settings | None = None) -> None:
                            "random value of at least 32 characters; there is no default")
     if s.trusted_frontend_key and len(s.trusted_frontend_key) < 24:
         raise RuntimeError("TRUSTED_FRONTEND_KEY must be at least 24 characters")
+    if s.database_url.startswith("sqlite") and not s.allow_sqlite_in_production:
+        raise RuntimeError(
+            "APP_ENV=production needs a persistent shared database: set DATABASE_URL to a managed PostgreSQL URL "
+            "(for example postgresql://user:password@host/dbname). SQLite is a single-file, single-host development "
+            "database and its file is lost on an ephemeral filesystem; set ALLOW_SQLITE_IN_PRODUCTION=true only if the "
+            "file lives on a persistent volume and you accept a single-process deployment")
     if s.auto_seed:
         from data.demo_accounts import CredentialsMissing, load_passwords
 

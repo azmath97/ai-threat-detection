@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import ipaddress
+import re
 import secrets
 from base64 import b64decode
 from dataclasses import dataclass
@@ -122,6 +123,18 @@ def device_info(request: Request) -> str:
     """Descriptive device string from the client; informational only and sanitised."""
     raw = request.headers.get("x-device-info") or request.headers.get("user-agent") or "unknown"
     return "".join(ch for ch in raw if ch.isprintable())[:200] or "unknown"
+
+
+_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_.:-]{8,48}$")
+
+
+def idempotency_key(request: Request, explicit: str | None = None) -> str | None:
+    """The caller's deduplication key (body `request_id` or `Idempotency-Key` header), or None.
+
+    Keys are 8-48 characters of letters, digits and `_ . : -`; anything else is ignored rather than trusted, so a client
+    cannot use the key to smuggle odd values into the database."""
+    value = (explicit or request.headers.get("idempotency-key") or "").strip()
+    return value if _IDEMPOTENCY_KEY.match(value) else None
 
 
 @dataclass

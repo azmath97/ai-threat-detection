@@ -1,9 +1,36 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from backend.catalog import SEVERITY_LEVELS
 from backend.database import Base, UTCDateTime, utcnow
+
+# Allowed values, kept next to the constraints that enforce them so the database refuses anything else.
+ALERT_STATUSES = ("open", "investigating", "contained", "resolved", "false_positive")
+INVESTIGATION_STATUSES = ("open", "contained", "resolved")
+RUN_STATUSES = ("queued", "running", "completed", "failed", "cancelled")
+
+
+def _in(column: str, values) -> str:
+    return f"{column} IN ({', '.join(repr(v) for v in values)})"
+
+
+def _partial(condition: str) -> dict:
+    """Partial-index predicate understood by both SQLite and PostgreSQL."""
+    return {"sqlite_where": text(condition), "postgresql_where": text(condition)}
 
 
 def employee_code_for(employee_id: int, role: str) -> str:
@@ -12,6 +39,10 @@ def employee_code_for(employee_id: int, role: str) -> str:
 
 class Employee(Base):
     __tablename__ = "employees"
+    __table_args__ = (
+        CheckConstraint(_in("status", ("active", "locked")), name="ck_employees_status"),
+        CheckConstraint(_in("role", ("employee", "security_admin")), name="ck_employees_role"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     employee_code: Mapped[str | None] = mapped_column(String(16), unique=True, index=True, nullable=True)
@@ -36,6 +67,7 @@ class Employee(Base):
 
 class EmployeeSession(Base):
     __tablename__ = "employee_sessions"
+    __table_args__ = (Index("ix_sessions_ip", "ip_address"),)     # "revoke the sessions of a blocked address"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"), index=True)
@@ -52,7 +84,10 @@ class EmployeeSession(Base):
 
 class AccessPermission(Base):
     __tablename__ = "access_permissions"
-    __table_args__ = (UniqueConstraint("employee_id", "resource", name="uq_permission_employee_resource"),)
+    __table_args__ = (
+        UniqueConstraint("employee_id", "resource", name="uq_permission_employee_resource"),
+        CheckConstraint(_in("access_level", ("read", "write")), name="ck_permissions_access_level"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"), index=True)
@@ -64,10 +99,19 @@ class AccessPermission(Base):
 
 
 class SecurityEvent(Base):
+    """One recorded action. Event ingestion is idempotent on (employee_id, request_id): a client that retries or re-renders
+    with the same request_id gets the original event back instead of a duplicate (enforced by a partial unique index)."""
+
     __tablename__ = "security_events"
     __table_args__ = (
-        Index("ix_events_employee_time", "employee_id", "timestamp"),
+        Index("ix_events_employee_time", "employee_id", "timestamp"),       # per-employee windows, baselines, correlation
         Index("ix_events_type_time", "event_type", "timestamp"),
+        Index("ix_events_timestamp", "timestamp"),                          # "last 24 h" counts and the hourly chart
+        Index("ix_events_source_ip_time", "source_ip", "timestamp"),        # investigation evidence by address
+        Index("ix_events_session", "session_id"),                           # investigation evidence by session
+        Index("uq_events_employee_request", "employee_id", "request_id", unique=True, **_partial("request_id IS NOT NULL")),
+        CheckConstraint(_in("outcome", ("success", "failure", "denied")), name="ck_events_outcome"),
+        CheckConstraint("records_accessed >= 0 AND records_downloaded >= 0", name="ck_events_records_nonnegative"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -82,7 +126,7 @@ class SecurityEvent(Base):
     records_downloaded: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     scenario: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     simulation_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("simulation_runs.id", ondelete="SET NULL"), nullable=True, index=True)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -99,7 +143,12 @@ class SecurityEvent(Base):
 
 class RiskAssessment(Base):
     __tablename__ = "risk_assessments"
-    __table_args__ = (Index("ix_risk_employee_time", "employee_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_risk_employee_time", "employee_id", "created_at"),
+        Index("ix_risk_event", "event_id"),                                  # "latest assessment of each event"
+        CheckConstraint(_in("level", SEVERITY_LEVELS), name="ck_risk_level"),
+        CheckConstraint("score >= 0 AND score <= 100", name="ck_risk_score_range"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"))
@@ -115,10 +164,18 @@ class RiskAssessment(Base):
 
 
 class AttackInvestigation(Base):
+    """At most one *active* (open or contained) investigation per employee, enforced by a partial unique index."""
+
     __tablename__ = "attack_investigations"
+    __table_args__ = (
+        Index("ix_inv_employee_status", "employee_id", "status"),
+        Index("ix_inv_updated", "updated_at"),                               # change token and "latest first" lists
+        Index("uq_inv_one_active_per_employee", "employee_id", unique=True, **_partial("status IN ('open', 'contained')")),
+        CheckConstraint(_in("status", INVESTIGATION_STATUSES), name="ck_investigations_status"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"), index=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"))   # indexed by ix_inv_employee_status
     status: Mapped[str] = mapped_column(String(16), default="open", index=True)  # open | contained | resolved
     attack_stage: Mapped[str] = mapped_column(String(32), default="none")
     attack_type: Mapped[str] = mapped_column(String(48), default="none", server_default="none")
@@ -167,11 +224,21 @@ class InvestigationEvidence(Base):
 
 
 class SecurityAlert(Base):
+    """At most one *open or investigating* alert per employee, enforced by a partial unique index."""
+
     __tablename__ = "security_alerts"
-    __table_args__ = (Index("ix_alerts_status_severity", "status", "severity"),)
+    __table_args__ = (
+        Index("ix_alerts_status_severity", "status", "severity"),
+        Index("ix_alerts_employee_status", "employee_id", "status"),
+        Index("ix_alerts_investigation", "investigation_id"),
+        Index("ix_alerts_updated", "updated_at"),
+        Index("uq_alerts_one_open_per_employee", "employee_id", unique=True, **_partial("status IN ('open', 'investigating')")),
+        CheckConstraint(_in("status", ALERT_STATUSES), name="ck_alerts_status"),
+        CheckConstraint(_in("severity", SEVERITY_LEVELS), name="ck_alerts_severity"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"), index=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"))   # indexed by ix_alerts_employee_status
     event_id: Mapped[int | None] = mapped_column(ForeignKey("security_events.id", ondelete="SET NULL"), nullable=True)
     assessment_id: Mapped[int | None] = mapped_column(ForeignKey("risk_assessments.id", ondelete="SET NULL"), nullable=True)
     investigation_id: Mapped[int | None] = mapped_column(ForeignKey("attack_investigations.id", ondelete="SET NULL"), nullable=True)
@@ -203,16 +270,21 @@ class ContainmentAction(Base):
     what it did to this application's own records, and that no external system was involved."""
 
     __tablename__ = "containment_actions"
+    __table_args__ = (
+        Index("uq_containment_idempotency_key", "idempotency_key", unique=True),      # NULLs are distinct on SQLite and PostgreSQL
+        Index("ix_containment_employee_time", "employee_id", "created_at"),
+        CheckConstraint(_in("status", ("completed", "failed")), name="ck_containment_status"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     investigation_id: Mapped[int | None] = mapped_column(ForeignKey("attack_investigations.id", ondelete="SET NULL"), nullable=True, index=True)
     alert_id: Mapped[int | None] = mapped_column(ForeignKey("security_alerts.id", ondelete="SET NULL"), nullable=True, index=True)
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"), index=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"))   # indexed by ix_containment_employee_time
     action_type: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(16), default="completed")
     reason: Mapped[str] = mapped_column(String(500))
     performed_by: Mapped[int] = mapped_column(ForeignKey("employees.id"))
-    idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
 
@@ -268,14 +340,22 @@ class SimulationRun(Base):
     """
 
     __tablename__ = "simulation_runs"
+    __table_args__ = (
+        Index("uq_runs_idempotency_key", "idempotency_key", unique=True),
+        Index("uq_runs_active_slot", "active_slot", unique=True),
+        Index("ix_runs_created", "created_at"),
+        CheckConstraint(_in("status", RUN_STATUSES), name="ck_runs_status"),
+        CheckConstraint(_in("seed_mode", ("fixed", "random")), name="ck_runs_seed_mode"),
+        CheckConstraint("steps_done >= 0 AND steps_total >= 0", name="ck_runs_steps_nonnegative"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     scenario: Mapped[str] = mapped_column(String(64), index=True)
     seed: Mapped[int] = mapped_column(Integer)
     seed_mode: Mapped[str] = mapped_column(String(8))                      # fixed | random
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)  # queued|running|completed|failed|cancelled
-    active_slot: Mapped[int | None] = mapped_column(Integer, unique=True, nullable=True)
+    active_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
     target_employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
     started_by_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
     source_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
@@ -299,6 +379,11 @@ class ResponseControl(Base):
     """An active containment control enforced by the backend: a blocked source IP or an isolated system."""
 
     __tablename__ = "response_controls"
+    __table_args__ = (
+        # one active block per address / isolation per system, even when two administrators act at the same moment
+        Index("uq_controls_one_active", "kind", "value", unique=True, **_partial("active")),
+        CheckConstraint(_in("kind", ("blocked_ip", "isolated_system")), name="ck_controls_kind"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     kind: Mapped[str] = mapped_column(String(24), index=True)  # blocked_ip | isolated_system

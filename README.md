@@ -20,8 +20,9 @@ notice that **while it is happening** and before the simulated data leaves.
   "Simulation completed" for that reason.
 * It has not been validated for live use.
 
-* **One FastAPI backend and one SQLite database are the single source of truth.** The portal, the SOC dashboard and
-  the simulation console only call the backend; none of them has its own data, scores or event system.
+* **One FastAPI backend and one configured database are the single source of truth** (SQLite for local development,
+  PostgreSQL for anything deployed; see [Database and persistence](#database-and-persistence)). The portal, the SOC
+  dashboard and the simulation console only call the backend; none of them has its own data, scores or event system.
 * **Detection is hybrid:** an Isolation Forest anomaly model, configurable rules, event correlation, a bounded
   0-100 attack-confidence score, a separate data-exposure assessment and attack-stage classification.
 * **Simulated containment has visible effects inside the application:** a simulated account disable stops logins to this
@@ -34,7 +35,7 @@ notice that **while it is happening** and before the simulated data leaves.
 2. [Technology stack](#technology-stack)
 3. [Install and run](#install-and-run) and [deploy to the cloud](#deploying-to-the-cloud)
 4. [Environment setup](#environment-setup)
-5. [Database initialisation](#database-initialisation)
+5. [Database initialisation](#database-initialisation) and [database and persistence](#database-and-persistence)
 6. [Demo credentials](#demo-credentials)
 7. [Launching](#launching-the-application)
 8. [Simulate an attack](#how-to-simulate-an-attack) and [reset](#how-to-reset-the-simulation)
@@ -56,7 +57,7 @@ notice that **while it is happening** and before the simulated data leaves.
 
 ```
  Employee Portal  (Streamlit :8501) --\
- Simulation Console (Streamlit :8502) ---HTTP/JSON-->  FastAPI backend (:8000)  -->  SQLite  data/insider_threat.db
+ Simulation Console (Streamlit :8502) ---HTTP/JSON-->  FastAPI backend (:8000)  -->  SQLite (local) or PostgreSQL (DATABASE_URL)
  SOC Dashboard    (Streamlit :8503) --/                      |
                                                             +-- ml/  Isolation Forest (ml/artifacts/*.joblib)
  every action -> security event -> rules -> ML score -> correlation -> confidence -> alert -> investigation
@@ -83,14 +84,14 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | SOC read models | `soc_service.py`, `soc_routes.py` |
 | Simulation | `scenario_generator.py` (seeded plans), `simulation_runs.py` (background runs, status, stop), `simulation_service.py` (manual steps, reset), `simulation_routes.py` |
 | Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (347 tests) |
+| Tests | `tests/` (399 tests) |
 
 ## Technology stack
 
 | Layer | Technology |
 |---|---|
 | Backend | Python 3.12, FastAPI, Uvicorn, Pydantic 2 |
-| Database | SQLite through SQLAlchemy 2 (timestamps stored in UTC, shown in `DISPLAY_TIMEZONE`) |
+| Database | SQLAlchemy 2 over SQLite (local development) or PostgreSQL through `psycopg` 3 (shared / deployed), with versioned schema migrations (timestamps stored in UTC, shown in `DISPLAY_TIMEZONE`) |
 | Machine learning | scikit-learn `IsolationForest`, NumPy, joblib (model saved locally and reused) |
 | Dashboards | Streamlit and Plotly (charts and the attack graph); custom CSS theme in `frontend/theme.py` (responsive down to phone width, no external fonts or assets) |
 | Security | Argon2id password hashes (`argon2-cffi`), random session tokens stored as HMAC digests, rate limiting, strict CORS, security headers (see [Security](#security-notes-and-limitations)) |
@@ -153,7 +154,14 @@ Copy-Item .env.example .env        # bash: cp .env.example .env
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DATABASE_URL` | `sqlite:///./data/insider_threat.db` | database location |
+| `DATABASE_URL` | `sqlite:///./data/insider_threat.db` | the one shared database. Local development: SQLite. Deployed: `postgresql://USER:PASSWORD@HOST:5432/DBNAME` (`postgres://` is accepted too). Production refuses SQLite unless `ALLOW_SQLITE_IN_PRODUCTION=true` |
+| `ALLOW_SQLITE_IN_PRODUCTION` | `false` | only for one process whose SQLite file is on a persistent volume |
+| `DB_BUSY_TIMEOUT_SECONDS` | `30` | how long a writer waits for the SQLite write lock before the request fails with 503 |
+| `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT_SECONDS`, `DB_POOL_RECYCLE_SECONDS` | `10`, `10`, `30`, `1800` | PostgreSQL connection pool (ignored for SQLite) |
+| `DASHBOARD_WINDOW_DAYS` | `30` | the SOC overview totals cover this many days (the response says so in `window_days`) |
+| `MAX_PAGE_SIZE` | `500` | most rows a list endpoint returns per request (a larger `limit` is a 422) |
+| `SOC_REFRESH_SECONDS`, `SOC_CACHE_SECONDS`, `SIM_POLL_SECONDS` | `3`, `25`, `1` | read by the Streamlit apps: how often a SOC session checks the change token, how long fetched panels are reused, and how often the console polls a running simulation. Values below `1`, `5` and `0.5` are raised to those minimums |
+| `PORTAL_REPEAT_WINDOW_SECONDS` | `3` | a repeated identical portal action inside this window (double click, rerun) is recorded once |
 | `SECRET_KEY` | none | keys the session-token HMAC. **No default exists.** Development: if unset, a random per-machine key is created in `data/.local_secret` (git-ignored). Production: must be set (32+ random characters) by the environment or your platform's secret manager, or the backend refuses to start |
 | `DEMO_PASSWORDS_JSON` | unset | production: JSON object `{"alice.morgan": "...", ...}` giving all 11 demo usernames a unique password of 12+ characters, from a secret manager. Alternative: `DEMO_CREDENTIALS_FILE` |
 | `DEMO_CREDENTIALS_FILE` | `data/demo_credentials.local.json` | local credentials file (generated outside production, git-ignored) |
@@ -188,15 +196,150 @@ Rule severities, scoring weights and parameters live in `backend/detection_rules
 
 ## Database initialisation
 
-Nothing to run manually: the backend creates all tables and seeds the data on first start (`AUTO_SEED=true`), and
-adds columns missing from databases created by earlier versions. To rebuild from scratch:
+Nothing to run manually: on start-up the backend creates or upgrades the schema (see [migrations](#schema-versions-and-migrations))
+and seeds the data on first start (`AUTO_SEED=true`). To rebuild from scratch:
 
 ```powershell
 python -m data.seed_data --reset     # drops and re-creates the demo database
 python -m ml.train_model --export    # optional: retrain the model; --export also writes ml/artifacts/*.csv
 ```
 
-Data persists across restarts (SQLite file `data/insider_threat.db`, git-ignored).
+Data persists across restarts (SQLite file `data/insider_threat.db`, git-ignored, unless `DATABASE_URL` says otherwise).
+
+## Database and persistence
+
+**One store.** The backend is the only process that opens the database. The three Streamlit apps never import SQLAlchemy,
+SQLite or the models (a test parses their source to prove it) and keep no business data of their own: everything they show
+is fetched from `/api/*`, and what they hold in `st.session_state` is the sign-in token, filters and a short-lived copy of
+what the backend returned. So the employee portal, the SOC dashboard and the simulation console always read the same rows,
+and two dashboard sessions see the same figures.
+
+### SQLite (local development) and its limits
+
+The default. The backend opens it in WAL mode with `foreign_keys=ON`, `synchronous=NORMAL` and a busy timeout
+(`DB_BUSY_TIMEOUT_SECONDS`), so readers and the one writer overlap and writers queue instead of failing. It is **not** a
+production-scale database:
+
+* one writer at a time, on one host, and one backend process (several processes share the file but not the in-memory state
+  below); never put the file on a network share;
+* a request that cannot get the write lock within the busy timeout gets **HTTP 503 with `Retry-After`** and a generic body;
+* `synchronous=NORMAL` survives an application crash or a forced kill of the backend (tested), but the last few transactions can
+  be lost if the whole machine loses power;
+* no encryption at rest, access control or backups: copy the `.db` file (and its `-wal` file) yourself.
+
+### PostgreSQL (shared or deployed)
+
+Set `DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DBNAME` (from your host's secret manager, never from the repository).
+The URL is rewritten to use the bundled `psycopg` 3 driver. The pool uses `pool_pre_ping` and recycling, so a database
+restart is survived without restarting the backend: requests get a 503 while it is down and succeed again once it is back.
+`GET /api/system/database` (administrators only) shows the redacted URL, the dialect, the schema version and row counts,
+and nothing else about the server.
+
+`APP_ENV=production` **refuses to start with SQLite**, because a deployed service's own disk is ephemeral (Render's free
+web service, for one, loses it on every deploy and restart). Create a managed PostgreSQL database with whichever provider you
+use and give its URL to the service. The ML model file (`ml/artifacts/`) is derived data that is retrained at start-up, so an
+ephemeral disk is acceptable for it; sessions, events, alerts, investigations, containment records and simulation runs are
+all in the database.
+
+Moving the local demo data into PostgreSQL (copies every table, never writes to the source, refuses a non-empty target, runs in
+one transaction, resets the id sequences, then compares row counts):
+
+```powershell
+$env:TARGET_DATABASE_URL = "postgresql://USER:PASSWORD@HOST:5432/DBNAME"      # bash: export TARGET_DATABASE_URL=...
+python -m backend.db_tools copy --source sqlite:///./data/insider_threat.db
+python -m backend.db_tools info --url $env:TARGET_DATABASE_URL                # schema version and row counts
+```
+
+A source file made by an older release must first be upgraded: `python -m backend.db_tools upgrade --url sqlite:///copy-of-it.db`
+(work on a copy). Or skip the copy and let the new database seed itself (`AUTO_SEED=true`, which in production also needs
+`DEMO_PASSWORDS_JSON`).
+
+### Schema versions and migrations
+
+`backend/migrations.py` keeps a `schema_migrations` table and applies numbered steps in a single transaction, under a lock
+(`BEGIN IMMEDIATE` on SQLite, a PostgreSQL advisory lock), so two backends starting together cannot both migrate.
+
+* A new database is created at the current version directly. An unversioned database from an earlier release is treated as
+  version 1 and upgraded. A database **newer** than the code is refused untouched.
+* Version 2 adds the indexes, the event de-duplication key and the constraints listed below. Before adding the uniqueness
+  rules it repairs existing rows without deleting any: duplicate request ids and containment keys are cleared, extra open alerts
+  and investigations are marked resolved, extra active controls are released, and an audit entry
+  `schema_migration_repair` records the counts. If existing rows break a CHECK constraint the migration stops before
+  changing anything and lists them. On SQLite the affected tables are rebuilt (copy, drop, rename, re-index, then
+  `PRAGMA foreign_key_check`).
+* There are no automatic downgrades. Back up before upgrading a database you care about.
+
+### Constraints and indexes
+
+Chosen from the queries the code actually runs (per-employee time windows for correlation and baselines, "last N days"
+counts, the live feed, alert and investigation lists, evidence by address and session, simulation runs):
+
+| Table | Indexes (besides primary and foreign keys) | Constraints |
+|---|---|---|
+| `security_events` | `(employee_id, timestamp)`, `(event_type, timestamp)`, `(timestamp)`, `(source_ip, timestamp)`, `(session_id)`, `(simulation_run_id)`; **unique `(employee_id, request_id)` where `request_id` is not null** | `outcome` in success/failure/denied; record counts not negative |
+| `risk_assessments` | `(employee_id, created_at)`, `(event_id)` | level is a known severity; score 0 to 100 |
+| `security_alerts` | `(status, severity)`, `(employee_id, status)`, `(investigation_id)`, `(updated_at)`, `(created_at)`; **unique `employee_id` where status is open or investigating** | known status and severity |
+| `attack_investigations` | `(employee_id, status)`, `(updated_at)`, `(status)`, `(simulation_run_id)`; **unique `employee_id` where status is open or contained** | known status |
+| `containment_actions` | `(employee_id, created_at)`, `(investigation_id)`, `(alert_id)`; **unique `idempotency_key`** | known status |
+| `simulation_runs` | `(status)`, `(scenario)`, `(created_at)`; **unique `idempotency_key`; unique `active_slot`** (one active run) | known status and seed mode; step counts not negative |
+| `response_controls` | **unique `(kind, value)` where active** (one live block or isolation) | known kind |
+| `employees`, `employee_sessions`, `audit_logs` | username, code, department, token hash, session IP, audit action / actor / time | known role and status |
+
+A test asks SQLite's `EXPLAIN QUERY PLAN` for 14 of these queries and fails if any is answered by a table scan.
+
+### Event ingestion: transactions, de-duplication and concurrency
+
+* **One transaction per event.** The event, its risk assessment, the alert, the investigation and their audit rows are
+  committed together or not at all. A test injects a failure in scoring and again in alerting and checks that nothing is left
+  behind and that the same key can then be used normally.
+* **De-duplication key: `(employee_id, request_id)`.** The backend takes the key from an `Idempotency-Key` header (8 to 48 characters
+  of letters, digits and `_ . : -`; anything else is ignored, not rejected) or the `request_id` field of `POST /api/events`.
+  A repeat returns the original event with `duplicate: true` and stores and scores nothing. The unique index makes this
+  hold even when two requests arrive at the same instant (the loser catches the integrity error and returns the winner's
+  event). Events without a key are never merged.
+* **Streamlit reruns and double clicks.** A rerun does not call the backend again for data already loaded in that page
+  visit. For a button or form, the portal sends one idempotency key per action and reuses it for an identical action within
+  `PORTAL_REPEAT_WINDOW_SECONDS` (3 s by default), so a double click, or a rerun that interrupts a request in flight, is
+  recorded once. The trade-off is deliberate: the same document requested again after the window **is** a new event, and
+  inside the window it is not.
+* **Concurrency.** On SQLite the single write lock serialises writers. On PostgreSQL each ingestion first takes a row lock
+  on the employee (and the creator of a created account) in id order, so the assessment sees every earlier event and the
+  "is there already an open alert?" check cannot race; the unique indexes above are the backstop. The lock is
+  `FOR NO KEY UPDATE`: an earlier, simpler `FOR UPDATE` deadlocked when six simulated logins for one employee ran at once on
+  PostgreSQL (found by the tests below), because each transaction already held the shared foreign-key lock created by its own
+  session insert. A deadlock, lock timeout or lost connection that still occurs returns **503 with `Retry-After`**, never a
+  stack trace; a unique-constraint clash returns 409. Containment retries replay the stored action (HTTP 200).
+
+### Bounded reads and refresh intervals
+
+* The change token `GET /api/soc/version` polled by every SOC session is a fixed handful of indexed `max()` reads. It no longer
+  counts whole tables (a test checks this).
+* The overview's totals cover the last `DASHBOARD_WINDOW_DAYS` days and say so on the tiles; per-employee assessment only runs
+  for employees with events in the correlation window; investigation and action summaries are grouped in SQL; list endpoints
+  take a `limit` capped by `MAX_PAGE_SIZE`; the live feed pages with a keyset cursor (`before_id`, returning `has_more` and
+  `next_before_id`) and a "Show 150 more events" button, up to 450 rows in the page.
+* Refresh intervals are configuration (`SOC_REFRESH_SECONDS`, `SOC_CACHE_SECONDS`, `SIM_POLL_SECONDS`) with minimums so a typo
+  cannot make a dashboard hammer the backend. Each refresh is one small request; panels are re-fetched only when the token
+  moves (or when the cached copy is older than `SOC_CACHE_SECONDS`, because time windows slide).
+
+### What was and was not verified
+
+Run in this repository (`python -m pytest tests -q`, 399 tests): migrations on a fresh database, on a database from an earlier
+release (including duplicate repair), and the refusal of a newer one; constraint and index behaviour; query plans;
+de-duplication, 12-way same-key and 9-way different-key concurrent ingestion on SQLite; transaction rollback; the
+bounded-query checks; two SOC sessions and a portal session seeing the same data; Streamlit reruns and double clicks against a
+live backend; a forced kill of the backend during a running simulation (data kept, the run marked failed, the run slot freed);
+containment and its idempotent retry surviving a restart; lock contention giving a 503 and recovering; the copy tool
+SQLite to SQLite. `tests/test_postgres.py` additionally runs a real backend against an **embedded PostgreSQL 16.2** (the
+`pgserver` package from `requirements-dev.txt`, started by the test; skipped if it is not installed): schema, indexes
+and partial unique indexes, 16-way same-key and different-key concurrency, six concurrent attack sequences ending in one live
+alert and one live investigation, restart persistence, the SQLite to PostgreSQL copy (then starting a backend on the copy),
+and a database stop and start while the backend stays up (503, then recovery without restarting the backend).
+
+**Not verified:** any managed PostgreSQL service (the embedded server is a stock PostgreSQL 16.2 with default settings, not your
+provider's configuration); behaviour under real load, large volumes, or many simultaneous dashboard sessions; PostgreSQL with more than
+one backend process (the rate limiters, the baseline cache, the model and the simulation runner are in-process, so run **one**
+backend worker); migration of a very large database; backup and restore.
 
 ## Demo credentials
 
@@ -245,7 +388,9 @@ Nothing is deployed for you and this repository contains no deployment URLs. Two
 only if your proxy or host provides it. Keep the backend on `127.0.0.1`; the dashboards call it locally, so the default
 `MAP_LOOPBACK_TO_WORKSTATION=true` already attributes sessions correctly (and loopback is exempt from `REQUIRE_HTTPS`). Set
 `APP_ENV=production`, a random `SECRET_KEY` (`python -c "import secrets; print(secrets.token_urlsafe(48))"`) and either
-`DEMO_PASSWORDS_JSON` (from your secret store) or `AUTO_SEED=false`; production refuses to start without them.
+`DEMO_PASSWORDS_JSON` (from your secret store) or `AUTO_SEED=false`; production refuses to start without them. It also
+refuses SQLite: point `DATABASE_URL` at PostgreSQL, or set `ALLOW_SQLITE_IN_PRODUCTION=true` if the SQLite file is on this
+machine's persistent disk and you accept a single backend process.
 
 **B. Split hosting: API on Render, dashboards on Streamlit Community Cloud.** The Streamlit apps run on a different
 host from the API, so the API only sees the dashboard server's address for every user. `TRUSTED_FRONTEND_KEY` solves
@@ -254,15 +399,19 @@ registered workstation IP (the same rule as loopback locally). Requests without 
 address, and `X-Forwarded-For` is never trusted. Steps that need **your** accounts:
 
 1. Push this repository to GitHub (it already is: `azmath97/ai-threat-detection`).
-2. Render: *New > Blueprint*, choose the repository. [render.yaml](render.yaml) creates the `westbridge-api` web service
+2. Create a managed PostgreSQL database (Render PostgreSQL or any provider) and copy its connection URL. The API needs it:
+   in production it refuses to start with SQLite, because the service's own disk is ephemeral.
+3. Render: *New > Blueprint*, choose the repository. [render.yaml](render.yaml) creates the `westbridge-api` web service
    with `APP_ENV=production`, generated `SECRET_KEY` and `TRUSTED_FRONTEND_KEY`, and `TRUST_FORWARDED_PROTO=true` (Render's
-   proxy terminates TLS, so the API sees `X-Forwarded-Proto: https`). Render will ask you for **`DEMO_PASSWORDS_JSON`**
-   (declared `sync: false`, so it is never stored in the repository): paste a JSON object that gives each of the 11 demo
+   proxy terminates TLS, so the API sees `X-Forwarded-Proto: https`). Render will ask you for **`DATABASE_URL`** (paste the
+   PostgreSQL URL from step 2) and **`DEMO_PASSWORDS_JSON`** (both declared `sync: false`, so they are never stored in the
+   repository): paste a JSON object that gives each of the 11 demo
    usernames (see [Demo credentials](#demo-credentials)) its own strong password of 12+ characters, for example
-   `{"alice.morgan": "...", "bob.chen": "...", ..., "soc.admin": "..."}`; or set `AUTO_SEED` to `false`. When it is live,
+   `{"alice.morgan": "...", "bob.chen": "...", ..., "soc.admin": "..."}`; or set `AUTO_SEED` to `false`. The first start creates
+   the schema and seeds the data. When it is live,
    open `https://<your-service>.onrender.com/api/health` and expect `{"status":"ok",...}`. Copy the service URL and the
    `TRUSTED_FRONTEND_KEY` value from the service's *Environment* tab.
-3. Streamlit Community Cloud: *Create app* three times from the same repository and branch `main`, with main file
+4. Streamlit Community Cloud: *Create app* three times from the same repository and branch `main`, with main file
    `frontend/employee_portal.py`, `frontend/soc_dashboard.py` and `frontend/simulation_console.py`, Python 3.12. In each
    app's *Advanced settings > Secrets* paste (top-level secrets are exposed to the app as environment variables):
 
@@ -271,14 +420,16 @@ address, and `X-Forwarded-For` is never trusted. Steps that need **your** accoun
    TRUSTED_FRONTEND_KEY = "<value copied from Render>"
    API_TIMEOUT_SECONDS = "60"
    ```
-4. Check it: sign in to the portal as `EMP-1001` with the password you set, then open the SOC dashboard as `SEC-9011`. The
+5. Check it: sign in to the portal as `EMP-1001` with the password you set, then open the SOC dashboard as `SEC-9011`. The
    login event should show source IP `10.20.1.11` (a known address), not the Streamlit server's address.
 
 Things to know before relying on layout B:
 
 * **Free tiers sleep.** The first request after idle time can take a minute, hence `API_TIMEOUT_SECONDS`.
-* **The database is on the API host's disk.** On Render's free plan it is wiped on restart or redeploy; the backend
-  re-seeds and retrains automatically, but investigations and sessions are lost.
+* **Data lives in the PostgreSQL database, not on the API host.** Redeploying or restarting the API keeps sessions, events,
+  alerts and investigations; only the retrained model file is rebuilt. Whether the database itself persists, is backed up
+  or expires depends on the plan you chose with your database provider: check it. Nothing here was tested against a managed
+  provider (see [what was and was not verified](#what-was-and-was-not-verified)).
 * **Run one backend process.** The baseline cache, the model and the rate limiters live in process memory
   (`render.yaml` starts a single `uvicorn` worker).
 * **Anyone who can open the SOC or simulation URL gets the sign-in form for administrators.** Use strong, unique passwords
@@ -431,10 +582,11 @@ Avoid claiming "this protects the bank" and avoid quoting the benchmark figures 
 
 ### How the three screens stay in sync
 
-The SOC dashboard polls `GET /api/soc/version` every 3 seconds. That endpoint returns a small change token built from the
-latest event, assessment and audit IDs and the counts and update times of alerts, investigations, response controls and
-employees. The page only reloads its data when the token changes, so filters, selected
-investigation and navigation are preserved while new events appear.
+The SOC dashboard checks `GET /api/soc/version` every `SOC_REFRESH_SECONDS` (3 by default). That endpoint returns a small change
+token built from the latest event, assessment, audit, alert and investigation IDs and update times, plus the active
+response controls and employees (a fixed handful of indexed reads, not table scans). The page only reloads its data when the
+token changes, so filters, selected investigation and navigation are preserved while new events appear. All sessions read the
+same database through the same backend, so two open SOC sessions and the portal stay consistent.
 
 ## The data
 
@@ -898,8 +1050,8 @@ The portal shows no risk scores, alerts or investigations.
 ## SOC dashboard
 
 http://127.0.0.1:8503, administrators only (employees are refused at sign-in and by every `/api/soc/*` endpoint). Every
-figure comes from the backend. Live panels poll a small change token every 3 seconds and only reload when something
-changed, so filters and navigation are kept.
+figure comes from the backend. Live panels check a small change token every `SOC_REFRESH_SECONDS` (3 s by default) and only reload
+when something changed, so filters and navigation are kept. Overview totals cover the last `DASHBOARD_WINDOW_DAYS` days.
 
 | Page | Content |
 |---|---|
@@ -944,7 +1096,8 @@ Interactive documentation: `/docs`. Send `Authorization: Bearer <token>` with th
 
 | Method | Path | Access | Purpose |
 |---|---|---|---|
-| GET | `/api/health` | public | liveness |
+| GET | `/api/health` | public | liveness plus a database check (503 `{"status":"unavailable"}` when the database cannot be reached) |
+| GET | `/api/system/database` | admin | redacted database URL, dialect, schema version and row counts |
 | POST | `/api/auth/login` | public | body `employee_id` + `password` |
 | POST | `/api/auth/logout` | any | revoke the session |
 | GET | `/api/employees/me`; `/api/employees/{id}` | any; self or admin | profile and permissions |
@@ -955,7 +1108,7 @@ Interactive documentation: `/docs`. Send `Authorization: Bearer <token>` with th
 | GET | `/api/portal/hr/records[/{employee_id}]` | HR access | search, open record |
 | GET | `/api/portal/documents[/{id}/download]`, `/directory`, `/directory/departments` | per resource / any | documents, directory |
 | POST | `/api/admin/accounts` | IT admin console write | create a privileged account |
-| POST / GET | `/api/events`; `/api/events/me` | any | events for the caller only (identity, IP, device set by the backend) |
+| POST / GET | `/api/events`; `/api/events/me` | any | events for the caller only (identity, IP, device set by the backend); an `Idempotency-Key` header (or `request_id`) makes a retry store the event once |
 | GET | `/api/events` | admin | history with filters |
 | GET / POST | `/api/risk/employees[/{id}]`, `/api/risk/assess` | admin | risk, factors, stages, exposure |
 | GET / PATCH | `/api/alerts[/{id}]` | admin | alerts |
@@ -963,7 +1116,7 @@ Interactive documentation: `/docs`. Send `Authorization: Bearer <token>` with th
 | GET | `/api/investigations/{id}/explanation`, `/evidence`, `/export` | admin | explanation, preserved evidence, report download |
 | POST | `/api/investigations/{id}/resolve` | admin | `reason` + `confirm: true` |
 | GET / POST | `/api/containment` | admin (POST: containment guard) | simulated actions: `revoke_sessions`, `lock_account`, `restrict_access`, `remove_privileges`, `block_ip`, `isolate_system`, `restore_account`, `unblock_ip`, `release_system`, `resolve_investigation`; body takes `employee_id`, `action_type`, `reason`, `investigation_id`, `alert_id`, `target`, `confirm`, `idempotency_key`; 201 on a new action, 200 with `replayed: true` on a retry, 409 for a no-op or key clash, 429 when rate limited |
-| GET | `/api/soc/version`, `/overview`, `/confidence-history`, `/events`, `/employees`, `/investigations[/{id}]`, `/scopes`, `/timeline`, `/graph`, `/response`, `/audit` | admin | SOC read models |
+| GET | `/api/soc/version`, `/overview`, `/confidence-history`, `/events`, `/employees`, `/investigations[/{id}]`, `/scopes`, `/timeline`, `/graph`, `/response`, `/audit` | admin | SOC read models; `/events` takes `limit` (capped by `MAX_PAGE_SIZE`) and `before_id` for keyset paging, `/investigations` takes `limit` |
 | GET | `/api/dashboard/stats`, `/api/audit-logs` | admin | KPIs, audit trail |
 | GET / POST | `/api/detection/status`, `/reload`, `/retrain` | admin | model, thresholds, rules |
 | GET / POST | `/api/simulation/scenarios`, `/status`, `/steps`, `/reset` | admin, simulation enabled | scenario catalogue (with per-employee eligibility), simulation state, manual single steps, reset (409 while a run is active) |
@@ -988,13 +1141,18 @@ Timestamps are stored in UTC and returned as `timestamp` (UTC) and `timestamp_lo
 | `audit_logs` | actor, action, target, IP, details, time |
 | `simulation_runs` | one row per scenario run: scenario, seed and seed mode, status, parameters, full plan and its SHA-256, per-action results, progress, error, timestamps; events and investigations reference it through `simulation_run_id` |
 
-All tables have timestamps and indexes on their lookup columns (employee, time, status and severity).
+All tables have timestamps and indexes chosen from the actual queries; the full list of indexes, constraints and
+de-duplication rules is in [Database and persistence](#constraints-and-indexes). A separate `schema_migrations` table records
+the schema version.
 
 ## Project structure
 
 ```
 app.py                       launcher (loads .env, starts backend and dashboards)
 backend/                     FastAPI app, models, detection, correlation, investigation, response, SOC read models
+  database.py                engine and connection settings for SQLite and PostgreSQL
+  migrations.py              versioned schema migrations (indexes, constraints, de-duplication key)
+  db_tools.py                `python -m backend.db_tools copy | upgrade | info`
   detection_rules.json       configurable rules, weights and parameters
 data/                        demo_accounts.py (usernames; random passwords come from a git-ignored file or the secret manager), seed_data.py (history), the SQLite file (git-ignored)
 ml/                          features.py, synthetic_data.py, train_model.py, anomaly_detector.py, evaluate_dataset.py, artifacts/ (git-ignored)
@@ -1003,16 +1161,21 @@ ml/detect/                   window builder, features, models, hybrid risk, benc
 docs/                        cert-dataset.md, detection-evaluation.md, detection-results/
 docs/cert-dataset.md         CERT dataset setup, field mapping, label rules, caveats
 frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       347 pytest tests
+tests/                       399 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
-requirements.txt  .env.example
+requirements.txt  requirements-dev.txt (adds pgserver for the PostgreSQL tests)  .env.example
 ```
 
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 347 tests, about two minutes
+python -m pytest tests -q          # 399 tests, about eight minutes (a real backend is started several times)
+python -m pip install -r requirements-dev.txt   # optional: adds pgserver so tests/test_postgres.py runs instead of skipping
 ```
+
+The suite pins its clock: when it starts during business hours the application's clock is moved forward to 21:00 local time
+(`tests/conftest.py`), because the attack-chain tests assume the attacker acts after hours and otherwise pass or fail
+depending on the time of day.
 
 The suite uses a temporary database and a separate backend process, and an autouse fixture resets the simulation and
 removes rows each test creates. It covers:
@@ -1035,6 +1198,8 @@ removes rows each test creates. It covers:
   credentials; per-account and per-address brute-force lockout and per-route rate limits with `Retry-After`; role
   escalation, tampered, expired, revoked and locked sessions; oversized, malformed and mistyped payloads without echoing
   input; generic 500s with no paths or stack traces; CORS, security headers, HTTPS requirement and no cookies.
+* **Persistence and multi-client behaviour** (`tests/test_persistence.py`, `tests/test_postgres.py`): see
+  [what was and was not verified](#what-was-and-was-not-verified) for the list; the PostgreSQL file needs `pgserver`.
 * **Simulated containment** (`tests/test_containment_simulation.py`): each action records the alert and investigation, the
   initiator, time and result; only this application's tables change (digest comparison before and after every action) and
   evidence tables never do; socket, DNS, SMTP, HTTP and subprocess calls fail the test if attempted, and the backend imports no
@@ -1085,8 +1250,9 @@ been reviewed or penetration-tested. What is in place, and what is not:
 * Sessions are valid for `SESSION_TTL_MINUTES` (480) with no idle timeout, and revoked only by logout or containment.
 * Source-IP attribution relies on the loopback mapping or `TRUSTED_FRONTEND_KEY`; anyone holding that key can have a
   request attributed to a workstation address. Keep it secret and rotate it.
-* SQLite has no encryption at rest, role separation or backup; the local secret and credential files are protected only by
-  file permissions. Anyone with the host can read them.
+* SQLite has no encryption at rest, role separation or backup, and PostgreSQL's protections (TLS to the database, access
+  control, backups, encryption at rest) are whatever your provider and your configuration give you; the local secret and
+  credential files are protected only by file permissions. Anyone with the host can read them.
 * Passwords committed to earlier versions of this repository remain in its git history (a start-up sync replaces them in
   an existing database, but they must be considered public). There is no dependency or container scanning here.
 * Audit logs are database rows an administrator with database access could alter; they are not tamper-evident.
@@ -1109,10 +1275,13 @@ been reviewed or penetration-tested. What is in place, and what is not:
   `MAP_LOOPBACK_TO_WORKSTATION` attributes it to the employee's registered workstation IP; with split hosting the
   shared `TRUSTED_FRONTEND_KEY` does the same for requests from your own dashboards. `X-Forwarded-For` is ignored. Anyone
   holding the key can have their request attributed to a workstation IP, so keep it secret.
-* **SQLite, polling and single-process state.** One local database file and 3-second polling suit a demo, not concurrent
-  multi-site use. The baseline cache, the detector and the login throttle live in one process's memory, so run a single
-  backend worker. `DATABASE_URL` accepts other SQLAlchemy URLs, but only SQLite is tested here. Investigation upserts are
-  not guarded against two simultaneous critical events for the same employee.
+* **SQLite, polling and single-process state.** SQLite is a single-writer, single-host development store and is not
+  production-scale; production refuses it by default. PostgreSQL support is tested only against an embedded PostgreSQL 16.2
+  (see [what was and was not verified](#what-was-and-was-not-verified)). The baseline cache, the detector, the rate limiters
+  and the simulation runner live in one process's memory, so run a single backend worker even with PostgreSQL. Dashboards poll
+  a change token (default every 3 s) and each open SOC session costs one small request per interval; there is no push channel.
+  Two simultaneous critical events for one employee are now serialised and backed by unique indexes, but this was exercised
+  with a handful of parallel requests, not under load.
 * **One active investigation per employee.** Once resolved, a later critical alert opens a new one.
 * **Explanations are rule-based.** They state only what the stored events show; an LLM is not used.
 * **Evidence retention.** Nothing deletes real events, but *Reset simulation* deletes synthetic events and investigations,

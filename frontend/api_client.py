@@ -3,11 +3,23 @@ import os
 
 import requests
 
+
 def _timeout() -> float:
     try:
         return float(os.getenv("API_TIMEOUT_SECONDS", "20"))
     except ValueError:
         return 20.0
+
+
+def env_seconds(name: str, default: float, minimum: float) -> float:
+    """Read a refresh interval from the environment; invalid values fall back to the default, small ones to the minimum.
+
+    The minimum stops a misconfigured dashboard from polling the backend aggressively."""
+    try:
+        value = float(os.getenv(name, default))
+    except ValueError:
+        value = default
+    return max(minimum, value)
 
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -23,9 +35,10 @@ class ApiError(Exception):
 
 
 class ApiClient:
-    def __init__(self, token: str | None = None, device: str | None = None):
+    def __init__(self, token: str | None = None, device: str | None = None, idempotency_key: str | None = None):
         self.token = token
         self.device = device
+        self.idempotency_key = idempotency_key        # lets the backend drop a repeat of the same action (retry, double click)
 
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
         headers = {}
@@ -35,6 +48,8 @@ class ApiClient:
             headers["X-Device-Info"] = self.device
         if FRONTEND_KEY:
             headers["X-Frontend-Key"] = FRONTEND_KEY
+        if self.idempotency_key:
+            headers["Idempotency-Key"] = self.idempotency_key
         try:
             response = requests.request(method, f"{API_BASE_URL}{path}", headers=headers, timeout=TIMEOUT, **kwargs)
         except requests.RequestException as exc:

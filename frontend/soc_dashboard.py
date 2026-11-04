@@ -15,15 +15,19 @@ import streamlit as st  # noqa: E402
 
 from frontend import components as ui  # noqa: E402
 from frontend import soc_components as sc  # noqa: E402
-from frontend.api_client import ApiClient, ApiError  # noqa: E402
+from frontend.api_client import ApiClient, ApiError, env_seconds  # noqa: E402
 
 st.set_page_config(page_title=f"{ui.ORG_NAME} - Security Operations", layout="wide", initial_sidebar_state="auto")
 sc.inject()
 
 PAGES = ["Security Overview", "Live Event Feed", "Attack Investigations", "Employee Risk Monitor", "Attack Timeline",
          "Attack Graph", "Response Centre", "Audit Logs"]
-LIVE_SECONDS = 3
-CACHE_SECONDS = 25
+# How often a dashboard session asks the backend for its cheap change token, and how long cached panels are reused.
+# Set SOC_REFRESH_SECONDS / SOC_CACHE_SECONDS to tune the load on the backend; values below the minimum are raised to it.
+LIVE_SECONDS = env_seconds("SOC_REFRESH_SECONDS", 3, 1)
+CACHE_SECONDS = env_seconds("SOC_CACHE_SECONDS", 25, 5)
+FEED_PAGE = 150          # rows per page of the live feed; "Show more" adds another page, up to the backend's page limit
+FEED_MAX = 450
 TIME_RANGES = {"Last 15 minutes": 15, "Last hour": 60, "Last 6 hours": 360, "Last 24 hours": 1440, "Last 7 days": 10080,
                "All time": None}
 SEVERITIES = {"All severities": None, "Normal": "normal", "Suspicious": "suspicious", "High Risk": "high_risk", "Critical": "critical"}
@@ -200,15 +204,16 @@ def render_overview() -> None:
                 tone="alert" if top["level"] == "critical" else "")
     else:
         ui.hero("Threat posture", "No active threats", "No employee is above the Normal threshold. Detection is running on every new event.",
-                [f"{k['total_events']:,} events monitored", f"{k['events_24h']:,} in the last 24 h"])
+                [f"{k['total_events']:,} events in {ov.get('window_days', 30)} days", f"{k['events_24h']:,} in the last 24 h"])
+    window = ov.get("window_days", 30)
     tiles = [
-        ("Total security events", f"{k['total_events']:,}", f"{k['events_24h']:,} in the last 24 h", "", "activity",
+        ("Security events", f"{k['total_events']:,}", f"last {window} days; {k['events_24h']:,} in the last 24 h", "", "activity",
          [b["count"] for b in ov["events_per_hour"]]),
         ("Active investigations", k["active_investigations"], "open or contained", "warn" if k["active_investigations"] else "", "briefcase"),
         ("Critical alerts", k["critical_alerts"], "active", "alert" if k["critical_alerts"] else "", "alert"),
         ("High-risk employees", k["high_risk_employees"], "High Risk or Critical", "warn" if k["high_risk_employees"] else "", "users"),
-        ("Sensitive records accessed", f"{k['sensitive_records_accessed']:,}", f"{k['sensitive_records_24h']:,} in the last 24 h", "", "database"),
-        ("Confirmed external transfers", k["confirmed_external_transfers"], "transfer confirmed",
+        ("Sensitive records accessed", f"{k['sensitive_records_accessed']:,}", f"last {window} days; {k['sensitive_records_24h']:,} in 24 h", "", "database"),
+        ("Confirmed external transfers", k["confirmed_external_transfers"], f"last {window} days",
          "alert" if k["confirmed_external_transfers"] else "", "send"),
     ]
     sc.kpi_grid(tiles)
@@ -267,6 +272,10 @@ def page_overview() -> None:
     live(render_overview)
 
 
+def show_more_events() -> None:
+    st.session_state["feed_limit"] = min(FEED_MAX, st.session_state.get("feed_limit", FEED_PAGE) + FEED_PAGE)
+
+
 # ------------------------------------------------------------------ 2. live event feed
 def page_feed() -> None:
     ui.page_header("Live Event Feed", "Every security event with its anomaly score, rule severity and attack stage")
@@ -280,9 +289,10 @@ def page_feed() -> None:
     rng = pselect("Time range", list(TIME_RANGES), "f_range", container=cols[4])
 
     def render():
+        limit = st.session_state.get("feed_limit", FEED_PAGE)
         feed = cached("feed", "/api/soc/events", employee=None if emp.startswith("All") else emp, ip=ip.strip() or None,
                       event_type=None if etype.startswith("All") else etype, severity=SEVERITIES[sev],
-                      minutes=TIME_RANGES[rng], limit=150)
+                      minutes=TIME_RANGES[rng], limit=limit)
         if feed is None:
             return
         rows = feed["rows"]
@@ -296,6 +306,8 @@ def page_feed() -> None:
             {"time": "Timestamp", "employee": "Employee ID", "type": "Event type", "ip": "Source IP", "resource": "Resource",
              "status": "Status", "anomaly": "Anomaly score", "risk": "Risk contribution", "stage": "Attack stage",
              "severity": "Severity", "origin": "Origin"}, result_column=["status", "severity"])
+        if feed.get("has_more") and limit < FEED_MAX:
+            st.button(f"Show {FEED_PAGE} more events", key="feed_more", on_click=show_more_events)
 
     live(render)
 

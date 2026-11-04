@@ -14,12 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import streamlit as st  # noqa: E402
 
 from frontend import components as ui  # noqa: E402
-from frontend.api_client import ApiClient, ApiError  # noqa: E402
+from frontend.api_client import ApiClient, ApiError, env_seconds  # noqa: E402
 
 st.set_page_config(page_title=f"{ui.ORG_NAME} - Simulation Console", layout="wide")
 ui.inject_css()
 
 STATUS_TEXT = {"completed": "Completed", "denied": "Denied by backend", "blocked": "Blocked"}
+RUN_POLL_SECONDS = env_seconds("SIM_POLL_SECONDS", 1.0, 0.5)     # how often a running simulation is polled
 
 
 def api() -> ApiClient:
@@ -116,7 +117,7 @@ def render_run(run: dict) -> None:
 
 
 def run_panel(run_id: int, active: bool) -> None:
-    @st.fragment(run_every=1.0 if active else None)
+    @st.fragment(run_every=RUN_POLL_SECONDS if active else None)
     def panel() -> None:
         try:
             run = api().sim_get_run(run_id)

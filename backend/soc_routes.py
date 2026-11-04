@@ -4,10 +4,12 @@ from sqlalchemy.orm import Session
 
 from backend import soc_service
 from backend.catalog import EVENT_TYPES, SEVERITY_LEVELS
+from backend.config import get_settings
 from backend.database import get_db
 from backend.security import AuthContext, require_admin
 
 router = APIRouter(prefix="/api/soc", tags=["soc"])
+_MAX_PAGE = get_settings().max_page_size
 
 
 @router.get("/version")
@@ -34,7 +36,8 @@ def events(
     event_type: str | None = Query(None),
     severity: str | None = Query(None),
     minutes: int | None = Query(None, ge=1, le=60 * 24 * 90),
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(100, ge=1, le=_MAX_PAGE),
+    before_id: int | None = Query(None, gt=0, description="Keyset pagination: only events older than this event id"),
     _: AuthContext = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
@@ -43,7 +46,7 @@ def events(
     if severity and severity not in SEVERITY_LEVELS:
         raise HTTPException(422, f"severity must be one of {', '.join(SEVERITY_LEVELS)}")
     return soc_service.event_feed(db, employee=employee, ip=ip, event_type=event_type, severity=severity,
-                                  minutes=minutes, limit=limit)
+                                  minutes=minutes, limit=limit, before_id=before_id)
 
 
 @router.get("/employees")
@@ -53,8 +56,9 @@ def employees(_: AuthContext = Depends(require_admin), db: Session = Depends(get
 
 @router.get("/investigations")
 def investigations(inv_status: str | None = Query(None, alias="status", pattern="^(active|open|contained|resolved)$"),
+                   limit: int = Query(200, ge=1, le=_MAX_PAGE),
                    _: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
-    return soc_service.investigation_rows(db, inv_status)
+    return soc_service.investigation_rows(db, inv_status, limit)
 
 
 @router.get("/investigations/{investigation_id}")

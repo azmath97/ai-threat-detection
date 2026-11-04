@@ -4,6 +4,8 @@ The portal holds only the session token. Identity, permissions, source IP and de
 backend; this UI never shows security scores, alerts or investigation data.
 """
 import sys
+import time
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -11,13 +13,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import streamlit as st  # noqa: E402
 
 from frontend import components as ui  # noqa: E402
-from frontend.api_client import ApiClient, ApiError  # noqa: E402
+from frontend.api_client import ApiClient, ApiError, env_seconds  # noqa: E402
 
 st.set_page_config(page_title=f"{ui.ORG_NAME} - Employee Portal", layout="wide", initial_sidebar_state="auto")
 ui.inject_css()
 
 PAGES = ["Dashboard", "HR Records", "Payroll", "Documents", "Employee Directory", "My Profile"]
 PAGE_STATE = ("data", "hr_record", "payslip_view", "export_file", "doc_file", "dir_results", "hr_query")
+# A repeat of the same action inside this window (a double click, or a rerun that interrupts a request in flight) reuses
+# one idempotency key, so the backend records the activity once. A deliberate repeat after the window is a new action.
+REPEAT_WINDOW_SECONDS = env_seconds("PORTAL_REPEAT_WINDOW_SECONDS", 3.0, 0.0)
 
 
 # ------------------------------------------------------------------ session helpers
@@ -38,8 +43,22 @@ def reset_session(message: str | None = None) -> None:
         st.session_state["flash"] = message
 
 
+def action_key(action: str) -> str:
+    """Idempotency key for one user action: reused for an identical action inside REPEAT_WINDOW_SECONDS, new otherwise."""
+    now = time.time()
+    last = st.session_state.get("_last_action")
+    if last and last["action"] == action and now - last["at"] < REPEAT_WINDOW_SECONDS:
+        return last["key"]
+    key = uuid.uuid4().hex
+    st.session_state["_last_action"] = {"action": action, "at": now, "key": key}
+    return key
+
+
 def call(fn, *args):
     """Run a backend call. Returns (result, error). An expired session returns the user to sign-in."""
+    client = getattr(fn, "__self__", None)
+    if isinstance(client, ApiClient) and client.token:
+        client.idempotency_key = action_key(f"{fn.__name__}:{args}")
     try:
         return fn(*args), None
     except ApiError as exc:

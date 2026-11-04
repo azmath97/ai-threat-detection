@@ -14,6 +14,7 @@ import uuid
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from backend.config import get_settings
 
@@ -137,6 +138,19 @@ def install_error_handlers(app) -> None:
         errors = [{"loc": [str(part) for part in e.get("loc", ())], "msg": str(e.get("msg", "Invalid value"))[:200],
                    "type": str(e.get("type", "invalid"))} for e in exc.errors()[:20]]
         return JSONResponse(status_code=422, content={"detail": errors})
+
+    @app.exception_handler(OperationalError)
+    async def database_unavailable(request: Request, exc: OperationalError):
+        """Lock timeouts, deadlocks and lost connections are transient: tell the client to retry, say nothing else."""
+        logger.warning("Database busy or unavailable on %s %s: %s", request.method, request.url.path, type(exc.orig).__name__)
+        return JSONResponse(status_code=503, headers={"Retry-After": "2"},
+                            content={"detail": "The database is busy or restarting. Please retry shortly."})
+
+    @app.exception_handler(IntegrityError)
+    async def conflict(request: Request, exc: IntegrityError):
+        """A uniqueness or CHECK constraint refused the write (for example two simultaneous identical requests)."""
+        logger.info("Constraint conflict on %s %s: %s", request.method, request.url.path, type(exc.orig).__name__)
+        return JSONResponse(status_code=409, content={"detail": "The request conflicts with existing data. Refresh and retry."})
 
     @app.exception_handler(Exception)
     async def unexpected_error(request: Request, exc: Exception):

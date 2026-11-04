@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from conftest import auth_header, login
+from conftest import app_now, auth_header, login
 from fastapi.routing import APIRoute
 
 from backend.config import get_settings
@@ -194,7 +194,7 @@ def test_audit_log_records_authentication_and_administrator_actions(client, admi
     admin_id = next(e["id"] for e in client.get("/api/employees", headers=admin).json() if e["username"] == "soc.admin")
     assert failed["actor_id"] == admin_id and "Confirmation required" in failed["details"]["error"]
     ts = datetime.fromisoformat(failed["timestamp"].replace("Z", "+00:00"))
-    assert abs(datetime.now(timezone.utc) - ts) < timedelta(seconds=30)
+    assert abs(app_now() - ts) < timedelta(seconds=30)
     assert [r["id"] for r in new] == sorted((r["id"] for r in new), reverse=True)
 
 
@@ -203,7 +203,7 @@ def test_timestamps_are_stored_in_utc_and_displayed_in_the_configured_zone(clien
     from zoneinfo import ZoneInfo
 
     token = auth_header(client, "EMP-1003")
-    now = datetime.now(timezone.utc)
+    now = app_now()
     client.post("/api/resources/internal-wiki/access", headers=token, json={"action": "view", "record_count": 1})
     event = client.get("/api/events", headers=admin, params={"employee_id": 3, "limit": 1}).json()["items"][0]
     utc = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))

@@ -6,8 +6,9 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from backend import controls, detection_states, investigation_explainer, investigation_service, threat_engine
+from backend import controls, detection_states, investigation_explainer, investigation_service, scoring, threat_engine
 from backend.catalog import (
+    IMPACT_LABELS,
     RESOURCE_EVENT_TYPES,
     RESOURCES,
     SENSITIVITY_LABELS,
@@ -15,13 +16,14 @@ from backend.catalog import (
     SEVERITY_LEVELS,
     STAGE_LABELS,
     STAGES,
+    STRENGTH_LABELS,
     is_self_service,
     sensitivity_of,
 )
 from backend.config import get_settings, to_local
 from backend.data_exposure import STATUS_LABELS
 from backend.database import utcnow
-from backend.detection_engine import level_for, linked_employee_ids
+from backend.detection_engine import linked_employee_ids
 from backend.errors import ServiceError
 from backend.models import (
     AttackInvestigation,
@@ -45,6 +47,12 @@ _MEMO: dict = {"token": None, "at": 0.0, "threats": {}}
 
 def iso(dt: datetime | None) -> dict:
     return {"utc": dt.isoformat() if dt else None, "local": to_local(dt).isoformat() if dt else None}
+
+
+def _triad(t: "threat_engine.ThreatAssessment") -> dict:
+    """Impact severity and evidence strength, which are reported next to (and never folded into) the risk score and band."""
+    return {"impact_severity": t.impact["level"], "impact_label": t.impact["label"],
+            "evidence_strength": t.strength["level"], "strength_label": t.strength["label"]}
 
 
 def stage_of(flags: list[dict] | None) -> str | None:
@@ -140,7 +148,8 @@ def threat_rows(db: Session) -> list[dict]:
         last = _last_event_at(db, emp.id)
         rows.append({
             "employee_pk": emp.id, "employee_id": emp.employee_code, "department": emp.department, "job_role": emp.job_role,
-            "confidence": t.confidence, "level": t.level, "level_label": SEVERITY_LABELS[t.level],
+            "risk_score": t.risk_score, "level": t.level, "level_label": SEVERITY_LABELS[t.level], "band_gated": t.band_gated,
+            **_triad(t),
             "stage": t.stage, "stage_label": t.stage_label,
             "exposure_status": t.exposure.get("status", "none"),
             "exposure_label": STATUS_LABELS[t.exposure.get("status", "none")],
@@ -152,7 +161,7 @@ def threat_rows(db: Session) -> list[dict]:
             "states": states_for(t, synthetic=bool((inv and inv.is_synthetic) or (alert and alert.is_synthetic)),
                                  actions=action_counts.get(inv.id, 0) if inv else 0),
         })
-    return sorted(rows, key=lambda r: r["confidence"], reverse=True)
+    return sorted(rows, key=lambda r: r["risk_score"], reverse=True)
 
 
 def overview(db: Session) -> dict:
@@ -194,23 +203,24 @@ def overview(db: Session) -> dict:
             "confirmed_external_transfers": confirmed_transfers,
         },
         "thresholds": {"suspicious": s.threat_suspicious_threshold, "high_risk": s.threat_high_threshold,
-                       "critical": s.threat_critical_threshold},
+                       "critical": s.threat_critical_threshold, "source": s.thresholds_source},
         "threats": threat_rows(db),
         "events_per_hour": [{"hour": h.isoformat(), "count": c} for h, c in buckets.items()],
-        "employees_by_severity": by_level,
+        "employees_by_risk_band": by_level,
     }
 
 
-def confidence_history(db: Session, employee_id: int, minutes: int) -> list[dict]:
+def risk_history(db: Session, employee_id: int, minutes: int) -> list[dict]:
+    """Stored assessments over time: heuristic risk score (0-100, not a probability) and the risk band at each event."""
     since = utcnow() - timedelta(minutes=minutes)
     rows = db.execute(select(RiskAssessment.created_at, RiskAssessment.score, RiskAssessment.level, RiskAssessment.stage)
                       .where(RiskAssessment.employee_id == employee_id, RiskAssessment.created_at >= since)
                       .order_by(RiskAssessment.created_at, RiskAssessment.id)).all()
-    return [{"time": iso(t), "score": score, "level": level, "stage": stage} for t, score, level, stage in rows]
+    return [{"time": iso(t), "risk_score": score, "level": level, "stage": stage} for t, score, level, stage in rows]
 
 
 # ---------------------------------------------------------------- live feed
-def event_feed(db: Session, *, employee: str | None, ip: str | None, event_type: str | None, severity: str | None,
+def event_feed(db: Session, *, employee: str | None, ip: str | None, event_type: str | None, risk_band: str | None,
                minutes: int | None, limit: int, before_id: int | None = None) -> dict:
     latest = (select(RiskAssessment.event_id.label("eid"), func.max(RiskAssessment.id).label("aid"))
               .where(RiskAssessment.event_id.is_not(None)).group_by(RiskAssessment.event_id).subquery())
@@ -224,10 +234,10 @@ def event_feed(db: Session, *, employee: str | None, ip: str | None, event_type:
         query = query.where(SecurityEvent.source_ip.like(f"{ip.strip()}%"))
     if event_type:
         query = query.where(SecurityEvent.event_type == event_type)
-    if severity == "normal":
+    if risk_band == "normal":
         query = query.where((RiskAssessment.level == "normal") | (RiskAssessment.id.is_(None)))
-    elif severity:
-        query = query.where(RiskAssessment.level == severity)
+    elif risk_band:
+        query = query.where(RiskAssessment.level == risk_band)
     if minutes:
         query = query.where(SecurityEvent.timestamp >= utcnow() - timedelta(minutes=minutes))
     if before_id:
@@ -242,8 +252,10 @@ def event_feed(db: Session, *, employee: str | None, ip: str | None, event_type:
             "id": e.id, "timestamp": iso(e.timestamp), "employee_id": emp.employee_code, "account": emp.username,
             "event_type": e.event_type, "source_ip": e.source_ip, "resource": e.resource, "outcome": e.outcome,
             "anomaly_score": round(a.ml_score, 3) if a is not None and a.ml_score is not None else None,
-            "confidence": a.score if a is not None else None,
-            "severity": a.level if a is not None else "normal",
+            "risk_score": a.score if a is not None else None,
+            "risk_band": a.level if a is not None else "normal",
+            "impact_severity": a.impact_severity if a is not None else None,
+            "evidence_strength": a.evidence_strength if a is not None else None,
             "risk_contribution": e.risk_points, "stage": stage_of(e.risk_flags),
             "stage_label": STAGE_LABELS[stage_of(e.risk_flags) or "none"],
             "rules": [f["rule"] for f in (e.risk_flags or [])], "records_accessed": e.records_accessed,
@@ -267,7 +279,7 @@ def employee_rows(db: Session) -> list[dict]:
         rows.append({
             "employee_pk": emp.id, "employee_id": emp.employee_code, "department": emp.department, "job_role": emp.job_role,
             "account_type": "Created during incident" if emp.created_by_id else ("Security" if emp.role == "security_admin" else "Standard"),
-            "risk_score": t.score, "level": t.level, "level_label": SEVERITY_LABELS[t.level],
+            "risk_score": t.score, "level": t.level, "level_label": SEVERITY_LABELS[t.level], **_triad(t),
             "anomaly_score": round(t.ml.score, 3) if t.ml else 0.0,
             "suspicious_events_24h": counts.get(emp.id, 0), "last_suspicious": iso(last.get(emp.id)),
             "stage_label": t.stage_label, "status": emp.status,
@@ -301,10 +313,15 @@ def investigation_row(inv: AttackInvestigation, alert: SecurityAlert | None) -> 
     items = sorted(inv.timeline or [], key=lambda i: (i["timestamp"], i["event_id"]))
     first, latest = _timeline_edge(items)
     exposure = inv.exposure or {"status": "none", "records_potentially_exposed": 0}
-    level = level_for(inv.risk_score)
+    level = scoring.stored_band(inv.explanation, inv.risk_score_exact)
+    ra = (inv.explanation or {}).get("risk_assessment") or {}
+    impact = inv.impact_severity or ra.get("impact_severity")
+    strength = inv.evidence_strength or ra.get("evidence_strength")
     return {
         "id": inv.id, "employee_pk": inv.employee_id, "employee_id": inv.employee.employee_code,
-        "confidence": inv.risk_score, "level": level, "level_label": SEVERITY_LABELS[level],
+        "risk_score": inv.risk_score_exact, "level": level, "level_label": SEVERITY_LABELS[level],
+        "impact_severity": impact, "impact_label": IMPACT_LABELS.get(impact, "Not assessed"),
+        "evidence_strength": strength, "strength_label": STRENGTH_LABELS.get(strength, "Not assessed"),
         "stage": inv.attack_stage, "stage_label": STAGE_LABELS.get(inv.attack_stage, inv.attack_stage),
         "attack_type": inv.attack_type, "attack_type_label": ATTACK_TYPE_LABELS.get(inv.attack_type, "Not established"),
         "first_event": _with_local(first), "latest_event": _with_local(latest),
@@ -345,18 +362,22 @@ def _live_case_file(db: Session, case: dict | None) -> dict | None:
 
 
 def _audit(live: "threat_engine.ThreatAssessment", alert: SecurityAlert | None) -> dict:
-    """How the confidence was built: weighted components, reason codes (rule factors) and the evidence with timestamps."""
-    evidence = [{"event_id": e.get("event_id"), "rule": e.get("rule"), "rules": e.get("rules"), "stages": e.get("stages"),
-                 "severity": e.get("severity"), "timestamp": e.get("timestamp")} for e in (alert.evidence or [])] if alert else []
-    components = [{"component": name, **{k: v for k, v in info.items()}} for name, info in live.components.items()
-                  if isinstance(info, dict) and "weight" in info]
+    """How the score was built, for an analyst: the formula, each component and where it comes from, the evidence groups with
+    event references and time window, the model output, feature deviations, the corroboration gate and the thresholds in force.
+    `at_alert` is the basis recorded when the alert was raised (it does not change as the window slides)."""
+    components = [{"component": c["key"], **{k: v for k, v in c.items() if k != "key"}} for c in live.breakdown.get("components", [])]
+    counted = {i for f in live.factors for i in f["event_ids"]}
+    evidence = [{**ev.as_dict(), "counted": ev.event_id in counted}
+                for ev in (live.correlation.evidence if live.correlation else [])]
     return {
-        "confidence": live.confidence, "capped_by_stage_count": bool(live.capped), "components": components,
-        "reason_codes": live.factors[:10], "independent_stages": live.counted_stages, "evidence": evidence,
-        "note": ("The five components are weighted and summed. Evidence is de-duplicated inside the rule component, but one event can "
-                 "still inform more than one component (rule, stage, anomaly features and baseline), so the components are not "
-                 "statistically independent. The CERT benchmark pipeline (docs/detection-evaluation.md) counts each evidence "
-                 "family once by construction; unifying the live engine with it is future work."),
+        "risk_score": live.risk_score, "is_probability": False, "band_gated": bool(live.band_gated),
+        "risk_band": live.level, "impact": live.impact, "strength": live.strength,
+        "components": components, "reason_codes": live.factors[:10], "independent_stages": live.counted_stages,
+        "evidence": evidence, "breakdown": live.breakdown, "at_alert": None if alert is None else alert.score_basis,
+        "note": ("The risk score is a hand-weighted heuristic, not a probability. Rule evidence counts each event once through "
+                 "its strongest rule; stage, correlation and baseline deviation are not added because they restate that same "
+                 "evidence (the stage count gates the band instead). The anomaly model sees the same events, so its weight is "
+                 "small. Impact severity and evidence strength are judged separately and never raise or lower the score."),
     }
 
 
@@ -385,12 +406,14 @@ def investigation_detail(db: Session, investigation_id: int) -> dict:
         "recommended_actions": (alert.recommended_actions if alert and alert.recommended_actions else inv.recommended_actions),
         "timeline": [_with_local(i, by_name) for i in items],
         "alert": None if alert is None else {
-            "id": alert.id, "severity": alert.severity, "status": alert.status, "title": alert.title,
+            "id": alert.id, "risk_band": alert.severity, "impact_severity": alert.impact_severity,
+            "evidence_strength": alert.evidence_strength, "status": alert.status, "title": alert.title,
             "detected_at": iso(alert.detected_at), "trigger_event_id": alert.event_id, "first_event_id": alert.first_event_id,
-            "attack_confidence": alert.attack_confidence, "evidence": evidence,
+            "peak_risk_score": alert.peak_risk_score, "evidence": evidence,
         },
         "live": None if live is None else {
-            "confidence": live.confidence, "level": live.level, "stage": live.stage, "stage_label": live.stage_label,
+            "risk_score": live.risk_score, "level": live.level, "band_gated": live.band_gated, **_triad(live),
+            "stage": live.stage, "stage_label": live.stage_label,
             "components": live.components, "ml": live.ml.as_dict() if live.ml else None,
             "independent_stages": live.counted_stages,
         },
@@ -404,13 +427,13 @@ def investigation_detail(db: Session, investigation_id: int) -> dict:
 # ---------------------------------------------------------------- timeline / scopes
 def scopes(db: Session) -> list[dict]:
     result = [{"kind": "investigation", "id": r["id"], "employee_pk": r["employee_pk"], "label":
-               f"Investigation {r['id']} - {r['employee_id']} - {r['level_label']} {r['confidence']} - {r['stage_label']} ({r['status']})",
+               f"Investigation {r['id']} - {r['employee_id']} - {r['level_label']} band, risk score {r['risk_score']:.0f} - {r['stage_label']} ({r['status']})",
                "active": r["status"] in ACTIVE_INVESTIGATION} for r in investigation_rows(db)]
     covered = {r["employee_pk"] for r in result}
     for t in threat_rows(db):
         if t["employee_pk"] not in covered:
             result.append({"kind": "employee", "id": t["employee_pk"], "employee_pk": t["employee_pk"], "active": True,
-                           "label": f"Live window - {t['employee_id']} - {t['level_label']} {round(t['confidence'])} - {t['stage_label']}"})
+                           "label": f"Live window - {t['employee_id']} - {t['level_label']} band, risk score {round(t['risk_score'])} - {t['stage_label']}"})
     return result
 
 
@@ -420,7 +443,8 @@ def timeline(db: Session, investigation_id: int | None, employee_id: int | None)
         if inv is None:
             raise ServiceError(404, "Investigation not found")
         items = sorted(inv.timeline or [], key=lambda i: (i["timestamp"], i["event_id"]))
-        employee, current, confidence, source = inv.employee, inv.attack_stage, inv.risk_score, f"Investigation {inv.id}"
+        employee, current, risk_score, source = inv.employee, inv.attack_stage, inv.risk_score_exact, f"Investigation {inv.id}"
+        band = scoring.stored_band(inv.explanation, inv.risk_score_exact)
     else:
         employee = db.get(Employee, employee_id or 0)
         if employee is None:
@@ -430,7 +454,8 @@ def timeline(db: Session, investigation_id: int | None, employee_id: int | None)
         items = [{"event_id": ev.event_id, "timestamp": ev.timestamp.isoformat(), "account": ev.account,
                   "event_type": ev.event_type, "resource": ev.resource, "outcome": ev.outcome, "source_ip": ev.source_ip,
                   "risk_points": round(ev.severity * 100), "stages": ev.stages, "rules": ev.rules} for ev in evidence]
-        current, confidence, source = t.stage, t.score, "Live correlation window"
+        current, risk_score, source = t.stage, t.risk_score, "Live correlation window"
+        band = t.level
     lanes = []
     by_name = _codes_by_username(db)
     for stage in STAGES:
@@ -440,8 +465,8 @@ def timeline(db: Session, investigation_id: int | None, employee_id: int | None)
                       "last_seen": _with_local(evs[-1])["timestamp"] if evs else None,
                       "rules": sorted({r for i in evs for r in i.get("rules", [])})})
     return {"source": source, "employee_pk": employee.id, "employee_id": employee.employee_code,
-            "current_stage": current, "current_stage_label": STAGE_LABELS.get(current, current), "confidence": confidence,
-            "level": level_for(confidence), "stages": lanes, "events": [_with_local(i, by_name) for i in items]}
+            "current_stage": current, "current_stage_label": STAGE_LABELS.get(current, current), "risk_score": risk_score,
+            "level": band, "stages": lanes, "events": [_with_local(i, by_name) for i in items]}
 
 
 # ---------------------------------------------------------------- attack graph
@@ -593,7 +618,9 @@ def _summary(row: AuditLog) -> str:
         extra = f" [{d['value']}]" if d.get("value") else ""
         return f"{row.action[len('containment_'):].replace('_', ' ')}{extra}: {d.get('reason', '')}"
     if row.action in _ALERTS:
-        return f"severity {d.get('severity')}, confidence {d.get('confidence')}, stage {d.get('stage') or d.get('to_stage')}"
+        # legacy: audit rows written before the rename carry severity / confidence
+        return (f"risk band {d.get('risk_band', d.get('severity'))}, heuristic risk score {d.get('risk_score', d.get('confidence'))}, "
+                f"stage {d.get('stage') or d.get('to_stage')}")
     if row.action == "alert_status_changed":
         return f"alert status {d.get('from')} -> {d.get('to')}"
     if row.action == "investigation_status_changed":

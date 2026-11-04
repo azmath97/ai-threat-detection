@@ -1,4 +1,4 @@
-"""Data exposure assessment, kept separate from the attack-confidence score.
+"""Data exposure assessment, kept separate from the heuristic risk score.
 
 It distinguishes suspicious access, a confirmed record export and a confirmed external transfer, and never
 claims exfiltration unless an external transfer was actually confirmed.

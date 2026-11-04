@@ -63,11 +63,11 @@ def test_states_and_audit_follow_a_simulated_attack_through_containment(client, 
     detail = client.get(f"/api/soc/investigations/{investigation}", headers=admin).json()
     assert [s["state"] for s in detail["states"]] == list(ds.STATE_ORDER) and detail["state_definitions"]
     audit = detail["audit"]
-    assert {c["component"] for c in audit["components"]} == {"ml", "rules", "correlation", "baseline", "stage"}
-    assert abs(sum(c["contribution"] for c in audit["components"]) - audit["confidence"]) < 1.0 or audit["capped_by_stage_count"]
-    assert audit["reason_codes"] and all({"rule", "points", "description"} <= set(r) for r in audit["reason_codes"])
-    assert audit["evidence"] and all(e["event_id"] and e["timestamp"] for e in audit["evidence"])
-    assert "not statistically independent" in audit["note"]
+    assert {c["component"] for c in audit["components"]} == {"rules", "ml"}
+    assert abs(sum(c["contribution"] for c in audit["components"]) - audit["risk_score"]) < 0.05      # the parts add up to the score, nothing else
+    assert audit["reason_codes"] and all({"rule", "points", "description", "event_ids"} <= set(r) for r in audit["reason_codes"])
+    assert audit["evidence"] and all(e["event_id"] and e["timestamp"] and "counted" in e for e in audit["evidence"])
+    assert audit["is_probability"] is False and "not a probability" in audit["note"]
 
     done = client.post("/api/containment", headers=admin, json={"employee_id": david, "action_type": "revoke_sessions",
                                                                 "reason": "state check", "confirm": True,

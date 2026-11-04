@@ -87,8 +87,8 @@ def test_compromised_account_is_detected_correlated_and_alerted_before_the_exter
         assert out["status"] == "completed", out
         assert out["event_ids"], f"{name} recorded no events"
         threats = [t for t in client.get("/api/soc/overview", headers=admin).json()["threats"] if t["employee_id"] == "EMP-1004"]
-        confidence.append(threats[0]["confidence"] if threats else 0.0)
-        if alerted_after is None and any(a["severity"] == "critical" for a in client.get("/api/alerts", headers=admin).json()
+        confidence.append(threats[0]["risk_score"] if threats else 0.0)
+        if alerted_after is None and any(a["risk_band"] == "critical" for a in client.get("/api/alerts", headers=admin).json()
                                           if a["employee_username"] == "david.kumar"):
             alerted_after = name
         return out
@@ -132,7 +132,7 @@ def test_compromised_account_is_detected_correlated_and_alerted_before_the_exter
     # 4. early detection: critical alert BEFORE the external transfer
     assert alerted_after is not None and STEPS.index(alerted_after) < STEPS.index("external_transfer")
     (alert,) = [a for a in client.get("/api/alerts", headers=admin).json() if a["employee_username"] == "david.kumar"]
-    assert alert["severity"] == "critical" and alert["investigation_id"] and alert["first_event_id"]
+    assert alert["risk_band"] == "critical" and alert["investigation_id"] and alert["first_event_id"]
     assert alert["detected_at"] < transfer["timestamp"] and alert["event_id"] < transfer["id"]
 
     # 5. exposure keeps the export and the confirmed transfer apart

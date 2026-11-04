@@ -80,7 +80,7 @@ def test_frontends_never_open_the_database_or_import_the_data_layer():
 # =============================================================================== migrations
 def test_a_new_database_is_created_at_the_current_version_with_every_index(tmp_path):
     db = sqlite_engine(tmp_path)
-    assert migrations.upgrade(db) == [1, 2]
+    assert migrations.upgrade(db) == [1, 2, 3]
     assert migrations.current_version(db) == migrations.CURRENT_VERSION
     for table in Base.metadata.sorted_tables:
         present = {i["name"] for i in inspect(db).get_indexes(table.name)}
@@ -117,7 +117,7 @@ def test_upgrading_an_old_database_keeps_every_row_and_repairs_duplicates_visibl
         s.commit()
     before = count_rows(db)
 
-    assert migrations.upgrade(db) == [1, 2]
+    assert migrations.upgrade(db) == [1, 2, 3]
     after = count_rows(db)
     assert {k: v for k, v in after.items() if k != "audit_logs"} == {k: v for k, v in before.items() if k != "audit_logs"}
     with Session(db) as s:

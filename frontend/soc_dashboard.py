@@ -30,11 +30,11 @@ FEED_PAGE = 150          # rows per page of the live feed; "Show more" adds anot
 FEED_MAX = 450
 TIME_RANGES = {"Last 15 minutes": 15, "Last hour": 60, "Last 6 hours": 360, "Last 24 hours": 1440, "Last 7 days": 10080,
                "All time": None}
-SEVERITIES = {"All severities": None, "Normal": "normal", "Suspicious": "suspicious", "High Risk": "high_risk", "Critical": "critical"}
+RISK_BANDS = {"All risk bands": None, "Normal": "normal", "Watch": "suspicious", "Elevated": "high_risk", "Alert": "critical"}
 EVENT_TYPES = ["All event types", "login", "login_failed", "logout", "resource_access", "file_download", "data_export",
                "directory_search", "administrative_action", "external_transfer", "permission_change_attempt"]
-COMPONENT_LABELS = {"ml": "ML anomaly score", "rules": "Rule severity", "correlation": "Correlated evidence",
-                    "baseline": "Behavioural baseline", "stage": "Attack stage"}
+COMPONENT_LABELS = {"rules": "Rule evidence (hand-assigned weights)", "ml": "Anomaly score (model output)"}
+SCORE_TERMS = ("risk_score", "risk_band", "impact_severity", "evidence_strength", "anomaly_score", "rule_weight")
 ACTION_LABELS = {"revoke_sessions": "Revoke sessions (simulated)", "lock_account": "Disable account (simulated)",
                  "restrict_access": "Restrict sensitive access (simulated)", "remove_privileges": "Remove privileges (simulated)",
                  "block_ip": "Block IP in this application (simulated)", "isolate_system": "Isolate system record (simulated)"}
@@ -100,6 +100,17 @@ def live(render) -> None:
         render()
 
     _fragment()
+
+
+def static(name: str, path: str):
+    """Fetch rarely-changing reference data once per browser session (not on every change token)."""
+    store = st.session_state.setdefault("_static", {})
+    if name not in store:
+        try:
+            store[name] = api().get(path)
+        except ApiError:
+            return None
+    return store[name]
 
 
 def pselect(label, options, key, *, fmt=None, container=st):
@@ -197,60 +208,65 @@ def render_overview() -> None:
     if threats:
         top = threats[0]
         ui.hero("Threat posture", f"{len(threats)} active threat{'s' if len(threats) != 1 else ''} under watch",
-                f"{top['employee_id']} is at {top['level_label']} ({top['confidence']:.1f}/100), currently at the "
+                f"{top['employee_id']}: risk band {top['level_label']} (heuristic risk score {top['risk_score']:.1f}/100, not a probability), "
+                f"impact severity {top['impact_label']}, evidence strength {top['strength_label']}. Currently at the "
                 f"{top['stage_label']} stage. {top['exposure_label']}.",
                 [f"{k['active_investigations']} active investigation{'s' if k['active_investigations'] != 1 else ''}",
                  f"{k['events_24h']:,} events in 24 h", f"Last event {short(top['last_event_at']['local'])}"],
                 tone="alert" if top["level"] == "critical" else "")
     else:
-        ui.hero("Threat posture", "No active threats", "No employee is above the Normal threshold. Detection is running on every new event.",
+        ui.hero("Threat posture", "No active threats", "No employee is above the Normal risk band. Detection is running on every new event.",
                 [f"{k['total_events']:,} events in {ov.get('window_days', 30)} days", f"{k['events_24h']:,} in the last 24 h"])
     window = ov.get("window_days", 30)
     tiles = [
         ("Security events", f"{k['total_events']:,}", f"last {window} days; {k['events_24h']:,} in the last 24 h", "", "activity",
          [b["count"] for b in ov["events_per_hour"]]),
         ("Active investigations", k["active_investigations"], "open or contained", "warn" if k["active_investigations"] else "", "briefcase"),
-        ("Critical alerts", k["critical_alerts"], "active", "alert" if k["critical_alerts"] else "", "alert"),
-        ("High-risk employees", k["high_risk_employees"], "High Risk or Critical", "warn" if k["high_risk_employees"] else "", "users"),
+        ("Active alerts", k["critical_alerts"], "Alert risk band", "alert" if k["critical_alerts"] else "", "alert"),
+        ("Elevated or Alert band", k["high_risk_employees"], "employees by risk band", "warn" if k["high_risk_employees"] else "", "users"),
         ("Sensitive records accessed", f"{k['sensitive_records_accessed']:,}", f"last {window} days; {k['sensitive_records_24h']:,} in 24 h", "", "database"),
         ("Confirmed external transfers", k["confirmed_external_transfers"], f"last {window} days",
          "alert" if k["confirmed_external_transfers"] else "", "send"),
     ]
     sc.kpi_grid(tiles)
+    score_guide()
 
-    ui.section("Live attack confidence")
+    ui.section("Live risk assessment")
     if threats:
         ids = [t["employee_id"] for t in threats]
         chosen = pselect("Monitored employee", ids, "meter_emp",
-                         fmt=lambda eid: next(f"{eid} - {t['level_label']} ({t['confidence']:.1f})" for t in threats if t["employee_id"] == eid))
+                         fmt=lambda eid: next(f"{eid} - {t['level_label']} band, risk score {t['risk_score']:.1f}" for t in threats if t["employee_id"] == eid))
         t = next(x for x in threats if x["employee_id"] == chosen)
         left, right = st.columns([3, 2])
-        left.markdown(sc.meter(t["confidence"], t["level"], ov["thresholds"]), unsafe_allow_html=True)
+        left.markdown(sc.meter(t["risk_score"], t["level"], ov["thresholds"], t["impact_severity"], t["evidence_strength"]), unsafe_allow_html=True)
         with right:
             ui.kv_table([
-                ("Employee ID", t["employee_id"]), ("Severity", t["level_label"]), ("Current attack stage", t["stage_label"]),
+                ("Employee ID", t["employee_id"]), ("Risk band", t["level_label"] + (" (limited by stage count)" if t.get("band_gated") else "")),
+                ("Impact severity", t["impact_label"]), ("Evidence strength", t["strength_label"]),
+                ("Current attack stage", t["stage_label"]),
                 ("Last event", short(t["last_event_at"]["local"])), ("Data exposure", t["exposure_label"]),
                 ("Detection states", "; ".join(s["label"] for s in t.get("states", []) if s["active"]) or "none"),
                 ("Investigation", f"#{t['investigation_id']} ({t['investigation_status']})" if t["investigation_id"] else "none"),
             ])
-        history = cached(f"history:{t['employee_pk']}", "/api/soc/confidence-history", employee_id=t["employee_pk"], minutes=240)
+        history = cached(f"history:{t['employee_pk']}", "/api/soc/risk-history", employee_id=t["employee_pk"], minutes=240)
         if history and len(history) >= 2:
-            st.plotly_chart(sc.confidence_chart(history, ov["thresholds"]), width="stretch", config={"displayModeBar": False})
+            st.plotly_chart(sc.risk_chart(history, ov["thresholds"]), width="stretch", config={"displayModeBar": False})
     else:
         left, right = st.columns([3, 2])
         left.markdown(sc.meter(0, "normal", ov["thresholds"]), unsafe_allow_html=True)
         with right:
-            ui.kv_table([("Employee ID", "-"), ("Severity", "Normal"), ("Current attack stage", "None"), ("Last event", "-")])
-        ui.notice("ok", "No employee is above the Normal threshold.")
+            ui.kv_table([("Employee ID", "-"), ("Risk band", "Normal"), ("Impact severity", "None"), ("Current attack stage", "None"), ("Last event", "-")])
+        ui.notice("ok", "No employee is above the Normal risk band.")
 
     ui.section(f"Active threats ({len(threats)})")
     if threats:
-        ui.table([{"employee": t["employee_id"], "severity": t["level_label"], "confidence": f"{t['confidence']:.1f}",
-                   "stage": t["stage_label"], "exposure": t["exposure_label"], "last": short(t["last_event_at"]["local"]),
+        ui.table([{"employee": t["employee_id"], "band": t["level_label"], "score": f"{t['risk_score']:.1f}",
+                   "impact": t["impact_label"], "strength": t["strength_label"], "stage": t["stage_label"], "exposure": t["exposure_label"], "last": short(t["last_event_at"]["local"]),
                    "investigation": f"#{t['investigation_id']} {t['investigation_status']}" if t["investigation_id"] else "-"}
                   for t in threats],
-                 {"employee": "Employee ID", "severity": "Severity", "confidence": "Attack confidence", "stage": "Current stage",
-                  "exposure": "Data exposure", "last": "Last event", "investigation": "Investigation"}, result_column="severity")
+                 {"employee": "Employee ID", "band": "Risk band", "score": "Heuristic risk score (0-100)", "impact": "Impact severity",
+                  "strength": "Evidence strength", "stage": "Current stage", "exposure": "Data exposure", "last": "Last event",
+                  "investigation": "Investigation"}, result_column="band")
         with_inv = [t for t in threats if t["investigation_id"]]
         if with_inv:
             a, b = st.columns([3, 1], vertical_alignment="bottom")
@@ -264,7 +280,7 @@ def render_overview() -> None:
 
     a, b = st.columns(2)
     a.plotly_chart(sc.events_per_hour_chart(ov["events_per_hour"]), width="stretch", config={"displayModeBar": False})
-    b.plotly_chart(sc.severity_chart(ov["employees_by_severity"]), width="stretch", config={"displayModeBar": False})
+    b.plotly_chart(sc.severity_chart(ov["employees_by_risk_band"]), width="stretch", config={"displayModeBar": False})
 
 
 def page_overview() -> None:
@@ -278,20 +294,20 @@ def show_more_events() -> None:
 
 # ------------------------------------------------------------------ 2. live event feed
 def page_feed() -> None:
-    ui.page_header("Live Event Feed", "Every security event with its anomaly score, rule severity and attack stage")
+    ui.page_header("Live Event Feed", "Every security event with its anomaly score, rule weight and attack stage")
     refresh_token()
     employees = cached("employees", "/api/soc/employees") or []
     cols = st.columns([1.2, 1.2, 1.4, 1.2, 1.4])
     emp = pselect("Employee", ["All employees"] + [e["employee_id"] for e in employees], "f_emp", container=cols[0])
     ip = ptext("IP address (prefix)", "f_ip", container=cols[1], placeholder="e.g. 185.220")
     etype = pselect("Event type", EVENT_TYPES, "f_type", container=cols[2], fmt=lambda v: v.replace("_", " "))
-    sev = pselect("Severity", list(SEVERITIES), "f_sev", container=cols[3])
+    sev = pselect("Risk band", list(RISK_BANDS), "f_sev", container=cols[3])
     rng = pselect("Time range", list(TIME_RANGES), "f_range", container=cols[4])
 
     def render():
         limit = st.session_state.get("feed_limit", FEED_PAGE)
         feed = cached("feed", "/api/soc/events", employee=None if emp.startswith("All") else emp, ip=ip.strip() or None,
-                      event_type=None if etype.startswith("All") else etype, severity=SEVERITIES[sev],
+                      event_type=None if etype.startswith("All") else etype, risk_band=RISK_BANDS[sev],
                       minutes=TIME_RANGES[rng], limit=limit)
         if feed is None:
             return
@@ -301,11 +317,13 @@ def page_feed() -> None:
             "time": short(r["timestamp"]["local"]), "employee": r["employee_id"], "type": r["event_type"].replace("_", " "),
             "ip": r["source_ip"], "resource": r["resource"] or "-", "status": r["outcome"],
             "anomaly": "-" if r["anomaly_score"] is None else f"{r['anomaly_score']:.2f}",
-            "risk": r["risk_contribution"], "stage": r["stage_label"], "severity": sc.SEVERITY_LABELS[r["severity"]],
+            "risk": r["risk_contribution"], "stage": r["stage_label"], "band": sc.SEVERITY_LABELS[r["risk_band"]],
+            "impact": sc.IMPACT_LABELS.get(r.get("impact_severity") or "", "-"),
             "origin": "simulated" if r["synthetic"] else "live"} for r in rows],
             {"time": "Timestamp", "employee": "Employee ID", "type": "Event type", "ip": "Source IP", "resource": "Resource",
-             "status": "Status", "anomaly": "Anomaly score", "risk": "Risk contribution", "stage": "Attack stage",
-             "severity": "Severity", "origin": "Origin"}, result_column=["status", "severity"])
+             "status": "Status", "anomaly": "Anomaly score (0-1, not a probability)", "risk": "Rule weight points (heuristic)",
+             "stage": "Attack stage", "band": "Risk band after this event", "impact": "Impact severity", "origin": "Origin"},
+            result_column=["status", "band"])
         if feed.get("has_more") and limit < FEED_MAX:
             st.button(f"Show {FEED_PAGE} more events", key="feed_more", on_click=show_more_events)
 
@@ -337,18 +355,19 @@ def render_investigation_list(view: str) -> None:
     if rows is None:
         return
     sc.live_note(f"Live - {len(rows)} investigation(s)")
-    ui.table([{"id": r["id"], "employee": r["employee_id"], "confidence": f"{r['confidence']}", "severity": r["level_label"],
+    ui.table([{"id": r["id"], "employee": r["employee_id"], "score": f"{r['risk_score']:.1f}", "band": r["level_label"],
+               "impact": r["impact_label"], "strength": r["strength_label"],
                "stage": r["stage_label"], "type": r["attack_type_label"], "first": fmt_event(r["first_event"]),
                "latest": fmt_event(r["latest_event"]),
                "exposure": f"{r['exposure_label']} ({r['records_exposed']:,} records)" if r["records_exposed"] else r["exposure_label"],
                "status": r["status"].title()} for r in rows],
-             {"id": "ID", "employee": "Affected employee", "confidence": "Attack confidence", "severity": "Severity",
-              "stage": "Current stage", "type": "Likely attack type", "first": "First suspicious event", "latest": "Latest event",
-              "exposure": "Data exposure", "status": "Status"}, result_column="severity")
+             {"id": "ID", "employee": "Affected employee", "score": "Heuristic risk score (0-100)", "band": "Risk band",
+              "impact": "Impact severity", "strength": "Evidence strength", "stage": "Current stage", "type": "Likely attack type", "first": "First suspicious event", "latest": "Latest event",
+              "exposure": "Data exposure", "status": "Status"}, result_column="band")
     if rows:
         a, b = st.columns([3, 1], vertical_alignment="bottom")
         choice = a.selectbox("Select an investigation", [r["id"] for r in rows], key="inv_pick",
-                             format_func=lambda i: next(f"Investigation {i} - {r['employee_id']} - {r['level_label']} ({r['status']})"
+                             format_func=lambda i: next(f"Investigation {i} - {r['employee_id']} - {r['level_label']} band ({r['status']})"
                                                         for r in rows if r["id"] == i))
         if b.button("Open investigation", key="inv_open", width="stretch"):
             go("Attack Investigations", choice)
@@ -356,7 +375,7 @@ def render_investigation_list(view: str) -> None:
 
 
 def states_panel(d: dict) -> None:
-    """The five distinct states, why each is on or off, and how the confidence was built."""
+    """The five distinct states, why each is on or off, and how the score was built."""
     ui.section("Detection states")
     ui.table([{"state": s["label"], "now": "Yes" if s["active"] else "No", "basis": s["basis"]} for s in d.get("states", [])],
              {"state": "State", "now": "Active", "basis": "Basis"})
@@ -364,15 +383,94 @@ def states_panel(d: dict) -> None:
                "confirmed. 'Confirmed' is reserved for simulation ground truth. Containment is simulated.")
     audit = d.get("audit")
     if audit:
-        with st.expander("How the attack confidence was calculated"):
-            ui.table([{"component": c["component"].replace("_", " ").title(), "value": f"{c['value']:.2f}", "weight": f"{c['weight']:.2f}",
-                       "points": f"{c['contribution']:.1f}"} for c in audit["components"]],
-                     {"component": "Component", "value": "Value (0-1)", "weight": "Weight", "points": "Points"})
-            if audit["capped_by_stage_count"]:
-                st.caption("Capped: fewer independent stages than the severity level requires.")
-            ui.table([{"rule": r["rule"], "target": r.get("target") or "-", "points": r["points"], "count": r["count"], "why": r["description"]}
-                      for r in audit["reason_codes"]], {"rule": "Reason code", "target": "Target", "points": "Points", "count": "Events", "why": "Meaning"})
-            st.caption(audit["note"])
+        score_explanation(audit)
+
+
+def _refs(ids: list[int], limit: int = 6) -> str:
+    return ", ".join(f"#{i}" for i in ids[:limit]) + (f" +{len(ids) - limit}" if len(ids) > limit else "")
+
+
+def score_explanation(audit: dict) -> None:
+    """Everything behind the score: components and their origin, evidence groups with event references and times, the model
+    output, feature deviations, the corroboration gate and the thresholds. Rendered from the backend's breakdown only."""
+    bd = audit["breakdown"]
+    with st.expander("How the heuristic risk score was built (not a probability)", expanded=False):
+        st.markdown(f"`{bd['formula']}`")
+        win = bd["window"]
+        st.caption(f"Window: {win['minutes']} minutes, {short(win['start'])} to {short(win['end'])} (UTC). "
+                   f"Heuristic risk score {audit['risk_score']:.1f}/100.")
+        ui.table([{"component": COMPONENT_LABELS.get(c["component"], c["component"]), "origin": c["kind"], "value": f"{c['value']:.2f}",
+                   "weight": f"{c['weight']:.2f}", "points": f"{c['contribution']:.1f}"} for c in audit["components"]],
+                 {"component": "Component", "origin": "Where the number comes from", "value": "Value (0-1)", "weight": "Weight",
+                  "points": "Points"})
+        st.caption(bd["counting_rule"])
+        st.caption("Not added to the score, because they restate the same rule evidence: " + ", ".join(bd["not_added_to_the_score"][:3]) + ".")
+
+        st.markdown("**Rule evidence (reason codes)**")
+        ui.table([{"rule": r["rule"].replace("_", " "), "target": r.get("target") or "-", "weight": f"{r['rule_weight']:.2f}",
+                   "counted": f"{r['counted_weight']:.2f}", "events": r["count"], "refs": _refs(r["event_ids"]),
+                   "when": f"{short(r['first_seen'])} - {short(r['last_seen'])}", "why": r["description"]}
+                  for r in bd["rule_evidence"]],
+                 {"rule": "Rule", "target": "Target", "weight": "Rule weight", "counted": "Counted weight", "events": "Events",
+                  "refs": "Event references", "when": "First - last (UTC)", "why": "Meaning"})
+
+        m = bd["model"]
+        st.markdown("**Anomaly model output**")
+        ui.kv_table([("Mode", m["mode"].replace("_", " ")), ("Anomaly score (0-1)", f"{m['score']:.3f}"),
+                     ("Raw model score", "-" if m["raw"] is None else f"{m['raw']:.3f}"),
+                     ("Volume guard (0-1)", f"{m['volume_guard']:.3f}"), ("Role", m["role"])])
+
+        st.markdown("**Feature deviations behind the anomaly score**")
+        ui.table([{"feature": f["label"], "value": "yes" if f["value"] is True else "no" if f["value"] is False else f["value"],
+                   "ref": f["reference"], "dev": "Deviates" if f["deviates"] else "Within normal"} for f in bd["feature_deviations"]],
+                 {"feature": "Feature", "value": "This window", "ref": "Normal for this employee", "dev": "Comparison"})
+
+        g, t = bd["gate"], bd["thresholds"]
+        st.markdown("**Risk band, gate and thresholds**")
+        ui.kv_table([("Independent attack stages", f"{g['independent_stages']} ({', '.join(x.replace('_', ' ') for x in g['stages']) or 'none'})"),
+                     ("Stages needed", f"Elevated {g['needed_for_elevated']}, Alert {g['needed_for_alert']}"),
+                     ("Band from the score alone", sc.SEVERITY_LABELS.get(g["band_from_score_alone"], g["band_from_score_alone"])),
+                     ("Risk band", sc.SEVERITY_LABELS.get(g["band"], g["band"]) + (" (lowered by the stage gate)" if g["lowered_by_gate"] else "")),
+                     ("Thresholds (risk score)", f"Watch {t['watch']}, Elevated {t['elevated']}, Alert {t['alert']} - {t['source']}")])
+
+        imp, stg = audit["impact"], audit["strength"]
+        st.markdown(f"**Impact severity: {imp['label']}** (from the evidence only; independent of the score)")
+        st.markdown("\n".join(f"- {r}" for r in imp["reasons"]) or "- none")
+        st.markdown(f"**Evidence strength: {stg['label']}** (a qualitative reading, not a probability)")
+        st.markdown("\n".join(f"- {r}" for r in stg["reasons"]))
+
+        if audit.get("evidence"):
+            st.markdown("**Events considered**")
+            ui.table([{"event": f"#{e['event_id']}", "time": short(e["timestamp"]), "rule": e["rule"].replace("_", " "),
+                       "weight": f"{e['rule_weight']:.2f}", "counted": "yes" if e["counted"] else "no (not scored)",
+                       "stages": ", ".join(x.replace("_", " ") for x in e["stages"]) or "-"} for e in audit["evidence"][:60]],
+                     {"event": "Event", "time": "Time (UTC)", "rule": "Strongest rule", "weight": "Rule weight",
+                      "counted": "Counted in score", "stages": "Stages supported"})
+        if audit.get("at_alert"):
+            st.caption(f"When the alert was raised the score was {audit['at_alert']['risk_score']:.1f} over "
+                       f"{audit['at_alert']['gate']['independent_stages']} independent stage(s); the alert keeps that basis.")
+        st.caption(audit["note"])
+
+
+def score_guide() -> None:
+    """What each number means, taken from the backend so the dashboard cannot drift from the definitions."""
+    info = static("detection_status", "/api/detection/status")
+    if not info:
+        return
+    with st.expander("How to read the scores (none of them is a probability)"):
+        for key in SCORE_TERMS:
+            d = info["score_definitions"][key]
+            st.markdown(f"**{d['label']}** ({d['range']}; {d['kind']}). {d['text']}")
+        op = info["operating_point"]
+        test = (op.get("test") or {}).get("bands", {}).get("Alert")
+        st.markdown(f"**Thresholds** - Watch {op['thresholds']['suspicious']}, Elevated {op['thresholds']['high_risk']}, "
+                    f"Alert {op['thresholds']['critical']} ({op['source']}).")
+        if test:
+            st.caption(f"Chosen on synthetic validation runs. On held-out synthetic test runs the Alert band detected {test['tp']} of "
+                       f"{test['tp'] + test['fn']} malicious runs (missed {test['fn']}) and flagged {test['fp']} of {test['fp'] + test['tn']} "
+                       "benign runs. Synthetic only: this does not describe real employees or incidents.")
+        else:
+            st.caption(op.get("note", "No operating point recorded."))
 
 
 def render_investigation(inv_id: int) -> None:
@@ -381,7 +479,9 @@ def render_investigation(inv_id: int) -> None:
     if d is None:
         return
     sc.live_note("Live - updates as new correlated events arrive")
-    tiles = [("Attack confidence", d["confidence"], d["level_label"], "alert" if d["level"] == "critical" else ""),
+    tiles = [("Heuristic risk score", f"{d['risk_score']:.1f}", f"risk band {d['level_label']}; not a probability", "alert" if d["level"] == "critical" else ""),
+             ("Impact severity", d["impact_label"], "from the evidence, not the score", "warn" if d["impact_severity"] in ("high", "critical") else ""),
+             ("Evidence strength", d["strength_label"], "qualitative, not a probability", ""),
              ("Current stage", d["stage_label"], "", ""), ("Likely attack type", d["attack_type_label"], "", ""),
              ("Affected employee", d["employee_id"], "", ""),
              ("Status", d["status"].title(), f"alert #{d['alert_id']}" if d["alert_id"] else "no alert", ""),
@@ -404,15 +504,15 @@ def render_investigation(inv_id: int) -> None:
                        ("Exfiltration established", "Yes" if exp.get("exfiltration_established") else "No")])
         st.caption(exp.get("statement", ""))
     with b:
-        ui.section("How the confidence was reached")
+        ui.section("Current live assessment")
         live_data = d["live"]
         if live_data:
-            comps = live_data["components"]
-            ui.table([{"component": COMPONENT_LABELS[name], "value": f"{comps[name]['value']:.2f}", "weight": f"{comps[name]['weight']:.2f}",
-                       "contribution": f"{comps[name]['contribution']:.1f}"} for name in ("ml", "rules", "correlation", "baseline", "stage")],
-                     {"component": "Component", "value": "Value (0-1)", "weight": "Weight", "contribution": "Points"})
-            st.caption(f"Current live confidence {live_data['confidence']:.1f} ({live_data['independent_stages']} independent stages; "
-                       f"anomaly model: {live_data['ml']['mode'].replace('_', ' ') if live_data['ml'] else 'n/a'}).")
+            ui.kv_table([("Heuristic risk score", f"{live_data['risk_score']:.1f} / 100 (not a probability)"),
+                         ("Risk band", sc.SEVERITY_LABELS[live_data["level"]] + (" (limited by stage count)" if live_data["band_gated"] else "")),
+                         ("Impact severity", live_data["impact_label"]), ("Evidence strength", live_data["strength_label"]),
+                         ("Independent stages", live_data["independent_stages"]),
+                         ("Anomaly model", live_data["ml"]["mode"].replace("_", " ") if live_data["ml"] else "n/a")])
+            st.caption("The full calculation is under 'How the heuristic risk score was built' above.")
 
     ui.section("Correlated evidence")
     alert = d["alert"]
@@ -476,7 +576,7 @@ def findings_panel(d: dict) -> None:
         ui.table([{"stage": s["label"], "first": short(s["first_seen"]), "events": ", ".join(f"#{i}" for i in s["event_ids"][:6])}
                   for s in ex["current_stage"]["observed"]],
                  {"stage": "Observed stage", "first": "First seen (UTC)", "events": "Events"})
-        st.caption(ex["confidence"]["statement"])
+        st.caption((ex.get("risk_assessment") or ex.get("confidence") or {}).get("statement", ""))   # legacy: older explanations
 
     ui.section("Suspicious activities")
     ui.table([{"activity": s["description"], "count": s["count"], "events": refs(s["events"], 3),
@@ -620,17 +720,20 @@ def page_risk() -> None:
         rows = cached("employees", "/api/soc/employees")
         if rows is None:
             return
-        sc.live_note(f"Live - {len(rows)} accounts ranked by attack confidence")
+        sc.live_note(f"Live - {len(rows)} accounts ranked by heuristic risk score")
         ui.table([{"rank": i + 1, "employee": r["employee_id"], "dept": r["department"], "role": r["job_role"],
-                   "score": r["risk_score"], "severity": r["level_label"], "anomaly": f"{r['anomaly_score']:.2f}",
+                   "score": r["risk_score"], "severity": r["level_label"], "impact": r["impact_label"], "strength": r["strength_label"],
+                   "anomaly": f"{r['anomaly_score']:.2f}",
                    "events": r["suspicious_events_24h"], "last": short(r["last_suspicious"]["local"]), "stage": r["stage_label"],
                    "inv": (f"#{r['investigation_id']} {r['investigation_status']}" if r["investigation_id"] else "none"),
                    "type": r["account_type"]} for i, r in enumerate(rows)],
-                 {"rank": "Rank", "employee": "Employee ID", "dept": "Department", "role": "Job role", "score": "Risk score",
-                  "severity": "Severity", "anomaly": "Anomaly score", "events": "Suspicious events (24 h)",
+                 {"rank": "Rank", "employee": "Employee ID", "dept": "Department", "role": "Job role", "score": "Heuristic risk score (0-100)",
+                  "severity": "Risk band", "impact": "Impact severity", "strength": "Evidence strength",
+                  "anomaly": "Anomaly score (0-1)", "events": "Suspicious events (24 h)",
                   "last": "Last suspicious activity", "stage": "Current stage", "inv": "Investigation", "type": "Account type"},
                  result_column="severity")
-        st.caption("Scores come from the detection engine (anomaly model, rules, correlation and baseline). "
+        st.caption("The risk score is a hand-weighted heuristic from rule evidence and an anomaly model, not a probability; impact severity "
+                   "and evidence strength are judged separately. See 'How to read the scores' on the Overview. "
                    "No names or personal characteristics are used. All data here, and every benchmark used to evaluate the "
                    "model (project-generated sessions, the CERT Insider Threat Test Dataset), is synthetic; none of it is real banking data.")
 
@@ -662,7 +765,7 @@ def page_timeline() -> None:
         if tl is None:
             return
         sc.live_note(f"Live - {tl['source']} for {tl['employee_id']}; current stage: {tl['current_stage_label']}; "
-                     f"attack confidence {tl['confidence']}")
+                     f"heuristic risk score {tl['risk_score']:.1f} (not a probability)")
         st.markdown(sc.stage_strip(tl["stages"]), unsafe_allow_html=True)
         if tl["events"]:
             st.plotly_chart(sc.stage_lane_chart(tl["stages"], tl["events"]), width="stretch", config={"displayModeBar": False})
@@ -772,7 +875,8 @@ def page_response() -> None:
         if not data["threats"]:
             ui.notice("ok", "No active threats require a simulated response.")
         for t in data["threats"]:
-            st.markdown(f"**{t['employee_id']}** &nbsp; {sc.severity_badge(t['level'])} &nbsp; confidence {t['confidence']:.1f} "
+            st.markdown(f"**{t['employee_id']}** &nbsp; {sc.severity_badge(t['level'])} {sc.impact_badge(t['impact_severity'])} "
+                        f"&nbsp; heuristic risk score {t['risk_score']:.1f} "
                         f"&nbsp; stage: {t['stage_label']} &nbsp; exposure: {t['exposure_label']}", unsafe_allow_html=True)
             head = st.columns([1.3, 2.6, 2.0, 3.6, 1.4, 1.8])
             for col, title in zip(head, ["Priority", "Simulated action", "Target", "Reason", "Status", ""]):

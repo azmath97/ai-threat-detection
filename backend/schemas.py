@@ -207,8 +207,10 @@ class EventPage(BaseModel):
 
 class EventCreated(BaseModel):
     event: EventPublic
-    risk_score: int | None = None
-    risk_level: str | None = None
+    risk_score: int | None = None        # heuristic risk score of the employee's window after this event (0-100, not a probability)
+    risk_level: str | None = None        # risk band
+    impact_severity: str | None = None
+    evidence_strength: str | None = None
     alert_id: int | None = None
     duplicate: bool = False
 
@@ -219,8 +221,10 @@ class EmployeeRiskOut(BaseModel):
     full_name: str
     department: str
     status: str
-    score: int
-    level: str
+    score: int                           # heuristic risk score, 0-100 (not a probability)
+    level: str                           # risk band (normal / suspicious / high_risk / critical = Normal / Watch / Elevated / Alert)
+    impact_severity: str = "none"
+    evidence_strength: str = "none"
     current_stage: str = "none"
     stage_label: str = "None"
     data_exposure: str = "none"
@@ -237,6 +241,8 @@ class AssessmentOut(APIModel):
     stage: str | None = None
     components: dict[str, Any] | None = None
     exposure: dict[str, Any] | None = None
+    impact_severity: str | None = None
+    evidence_strength: str | None = None
     created_at: datetime
 
 
@@ -244,17 +250,21 @@ class RiskDetailOut(BaseModel):
     employee_id: int
     username: str
     score: int
-    confidence: float
-    level: str
+    risk_score: float                    # heuristic, 0-100, not a probability
+    level: str                           # risk band
+    impact_severity: str
+    evidence_strength: str
     window_minutes: int
     factors: list[dict[str, Any]]
     attack_stages: list[str]
-    attack_confidence: float
     current_stage: str
     stage_label: str
     stage_history: list[str]
     independent_stages: int
     components: dict[str, Any]
+    score_breakdown: dict[str, Any]
+    impact: dict[str, Any]
+    strength: dict[str, Any]
     ml: dict[str, Any] | None
     features: dict[str, Any]
     exposure: dict[str, Any]
@@ -272,12 +282,15 @@ class AlertOut(APIModel):
     event_id: int | None          # the triggering event
     first_event_id: int | None    # first suspicious event in the correlated chain
     investigation_id: int | None
-    severity: str
+    risk_band: str                # band when raised: the heuristic risk score against the calibrated thresholds, gated by stage count
+    impact_severity: str | None = None
+    evidence_strength: str | None = None
     status: str
     title: str
     description: str
     risk_score: int
-    attack_confidence: float
+    peak_risk_score: float        # heuristic, 0-100, not a probability
+    score_basis: dict[str, Any] | None = None
     stage: str | None
     evidence: list[dict[str, Any]] | None
     exposure: dict[str, Any] | None
@@ -316,8 +329,10 @@ class InvestigationOut(APIModel):
     status: str
     attack_stage: str
     attack_type: str
-    confidence: float
+    risk_score_exact: float              # heuristic risk score, 0-100, not a probability
     risk_score: int
+    impact_severity: str | None = None
+    evidence_strength: str | None = None
     summary: str
     timeline: list[dict[str, Any]]
     indicators: list[str]
@@ -343,7 +358,7 @@ class DashboardStats(BaseModel):
     events_total: int
     events_24h: int
     open_alerts: int
-    alerts_by_severity: dict[str, int]
+    alerts_by_risk_band: dict[str, int]
     open_investigations: int
     high_risk_employees: int
     average_risk_score: float

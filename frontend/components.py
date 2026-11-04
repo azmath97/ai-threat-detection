@@ -97,7 +97,8 @@ def fmt_money(value: float, currency: str = "USD") -> str:
 
 
 _PILL = {"Completed": "pill-ok", "Done": "pill-ok", "Denied": "pill-bad", "Failed": "pill-bad", "Denied by backend": "pill-bad",
-         "Critical": "pill-bad", "denied": "pill-bad", "failure": "pill-bad", "High Risk": "pill-high", "Suspicious": "pill-warn",
+         "Critical": "pill-bad", "Alert": "pill-bad", "denied": "pill-bad", "failure": "pill-bad", "High Risk": "pill-high", "Elevated": "pill-high",
+         "Suspicious": "pill-warn", "Watch": "pill-warn",
          "Blocked": "pill-warn", "contained": "pill-warn", "Pending": "pill-warn", "Normal": "pill-ok"}
 
 

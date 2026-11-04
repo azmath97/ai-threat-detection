@@ -86,8 +86,33 @@ def _count(conn: Connection, sql: str, **params) -> int:
 # ------------------------------------------------------------------------------------------- migration 1: baseline
 def _v1_baseline(conn: Connection) -> None:
     """Tables and columns as they existed before versioning (also repairs a database missing newer tables)."""
+    _rename_legacy_columns(conn)
     Base.metadata.create_all(conn, checkfirst=True)
     database._add_missing_columns(conn)
+
+
+# Columns whose old names called a heuristic score a "confidence". (table, old name, new name, multiplier for old values)
+RENAMED_COLUMNS = (
+    ("security_alerts", "attack_confidence", "peak_risk_score", 1.0),
+    ("attack_investigations", "confidence", "risk_score_exact", 100.0),     # was stored as a 0-1 fraction
+)
+
+
+def _rename_legacy_columns(conn: Connection) -> list[str]:
+    """Rename the old score columns (idempotent). Run first in every step that could meet an old database, so a table
+    rebuilt or extended later never leaves the old values behind."""
+    done = []
+    insp = inspect(conn)
+    for table, old, new, factor in RENAMED_COLUMNS:
+        if not insp.has_table(table):
+            continue
+        columns = {c["name"] for c in insp.get_columns(table)}
+        if old in columns and new not in columns:
+            conn.exec_driver_sql(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+            if factor != 1.0:
+                conn.exec_driver_sql(f"UPDATE {table} SET {new} = {new} * {factor}")
+            done.append(f"{table}.{old}->{new}")
+    return done
 
 
 # ---------------------------------------------------------------------- migration 2: indexes, dedupe key, constraints
@@ -202,6 +227,7 @@ OBSOLETE_INDEXES = ("ix_security_events_request_id", "ix_security_alerts_employe
 
 
 def _v2_indexes_and_constraints(conn: Connection) -> None:
+    _rename_legacy_columns(conn)
     _v2_repair_rows(conn)
     _v2_check_existing_rows(conn)
     if conn.dialect.name == "sqlite":
@@ -213,9 +239,19 @@ def _v2_indexes_and_constraints(conn: Connection) -> None:
         conn.exec_driver_sql(f"DROP INDEX IF EXISTS {name}")
 
 
+def _v3_score_columns(conn: Connection) -> None:
+    """Score terminology: rename the old "confidence" columns and add impact severity, evidence strength and the
+    stored score basis. Existing rows keep their scores; the new columns are empty (shown as "not assessed")."""
+    renamed = _rename_legacy_columns(conn)
+    database._add_missing_columns(conn)
+    if renamed:
+        log.info("Migration 3 renamed score columns: %s", ", ".join(renamed))
+
+
 MIGRATIONS = [
     Migration(1, "baseline tables and columns", _v1_baseline),
     Migration(2, "indexes, event de-duplication key, check and uniqueness constraints", _v2_indexes_and_constraints),
+    Migration(3, "heuristic risk score columns, impact severity and evidence strength", _v3_score_columns),
 ]
 CURRENT_VERSION = MIGRATIONS[-1].version
 

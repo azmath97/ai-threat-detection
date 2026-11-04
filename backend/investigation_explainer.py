@@ -287,13 +287,20 @@ def explain(*, employee: Employee, events: list[SecurityEvent], threat, baseline
     created = list(threat.related_accounts.values())
     bad_ips = sorted({e.source_ip for e in flagged if "unfamiliar_ip" in _rules_of(e) and e.source_ip not in known_ips})
     comps = threat.components or {}
-    confidence = {
-        "score": threat.score, "level": threat.level, "level_label": SEVERITY_LABELS[threat.level],
+    risk = {
+        "risk_score": threat.risk_score, "score": threat.score, "score_is_probability": False,
+        "risk_band": threat.level, "risk_band_label": SEVERITY_LABELS[threat.level], "band_gated": bool(threat.band_gated),
+        "impact_severity": threat.impact["level"], "impact_label": threat.impact["label"], "impact_reasons": threat.impact["reasons"],
+        "evidence_strength": threat.strength["level"], "strength_label": threat.strength["label"],
+        "strength_reasons": threat.strength["reasons"],
         "ml_anomaly_score": round(threat.ml.score, 3) if threat.ml else 0.0,
-        "independent_stages": threat.counted_stages, "capped_by_stage_count": bool(threat.capped),
-        "contributions": {k: comps[k]["contribution"] for k in ("ml", "rules", "correlation", "baseline", "stage") if k in comps},
-        "statement": (f"Attack confidence {threat.score}/100 ({SEVERITY_LABELS[threat.level]}) from {threat.counted_stages} independent "
-                      "attack stage(s); combines anomaly model, rule severity, correlated evidence, baseline deviation and stage."),
+        "independent_stages": threat.counted_stages,
+        "contributions": {k: comps[k]["contribution"] for k in ("rules", "ml") if k in comps},
+        "breakdown": threat.breakdown,
+        "statement": (f"Heuristic risk score {threat.risk_score:.1f}/100 (a hand-weighted evidence score, not a probability), risk band "
+                      f"{SEVERITY_LABELS[threat.level]}, from {threat.counted_stages} independent attack stage(s). Impact severity "
+                      f"({threat.impact['label']}) is judged from what the evidence shows was accessed or changed, separately from "
+                      f"the score. Evidence strength is {threat.strength['label'].lower()}."),
     }
 
     return {
@@ -304,7 +311,7 @@ def explain(*, employee: Employee, events: list[SecurityEvent], threat, baseline
         "current_stage": stage,
         "suspicious_activities": _activities(flagged),
         "supporting_evidence": supporting,
-        "confidence": confidence,
+        "risk_assessment": risk,
         "potential_impact": _impact(events, exposure, threat, created),
         "recommended_containment": [{"action": a["action"], "priority": a["priority"], "target": a.get("target"),
                                      "reason": a["reason"], "executable": a.get("executable", True)} for a in actions],

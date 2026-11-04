@@ -207,6 +207,7 @@ SOC_CSS = """
   .sev-suspicious { color: var(--amber); background: var(--amber-bg); }
   .sev-high_risk { color: var(--orange); background: var(--orange-bg); }
   .sev-critical { color: var(--red); background: var(--red-bg); }
+  .imp { font-size: .72rem; font-weight: 600; padding: .14rem .6rem; border-radius: 6px; border: 1px solid; background: #fff; margin-left: .35rem; white-space: nowrap; }
   .m-bar { position: relative; display: flex; height: 10px; border-radius: 999px; }
   .m-bar .band { height: 100%; border-right: 2px solid #fff; box-sizing: border-box; }
   .m-bar .band:first-child { border-radius: 999px 0 0 999px; }

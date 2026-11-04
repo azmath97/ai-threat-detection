@@ -16,6 +16,7 @@ from backend import (
     portal_routes,
     response_service,
     rules,
+    scoring,
     simulation_routes,
     soc_routes,
     threat_engine,
@@ -344,8 +345,9 @@ def create_event(
 
     if auth.is_admin and result.assessment is not None:
         return EventCreated(event=EventPublic.model_validate(result.event), risk_score=result.assessment.score,
-                            risk_level=result.assessment.level, alert_id=result.alert.id if result.alert else None,
-                            duplicate=result.duplicate)
+                            risk_level=result.assessment.level, impact_severity=result.assessment.impact_severity,
+                            evidence_strength=result.assessment.evidence_strength,
+                            alert_id=result.alert.id if result.alert else None, duplicate=result.duplicate)
     return EventCreated(event=EventPublic.model_validate(result.event), duplicate=result.duplicate)
 
 
@@ -408,7 +410,8 @@ def my_events(
 def _risk_row(e: Employee, threat: threat_engine.ThreatAssessment) -> EmployeeRiskOut:
     return EmployeeRiskOut(
         employee_id=e.id, username=e.username, full_name=e.full_name, department=e.department, status=e.status,
-        score=threat.score, level=threat.level, current_stage=threat.stage, stage_label=threat.stage_label,
+        score=threat.score, level=threat.level, impact_severity=threat.impact_severity,
+        evidence_strength=threat.evidence_strength, current_stage=threat.stage, stage_label=threat.stage_label,
         data_exposure=threat.exposure.get("status", "none"),
     )
 
@@ -428,12 +431,14 @@ def _risk_detail(db: Session, employee: Employee) -> RiskDetailOut:
         .order_by(RiskAssessment.created_at.desc(), RiskAssessment.id.desc()).limit(50)
     ).all()
     return RiskDetailOut(
-        employee_id=employee.id, username=employee.username, score=threat.score, confidence=threat.confidence,
-        level=threat.level, window_minutes=get_settings().correlation_window_minutes, factors=threat.factors,
-        attack_stages=threat.stage_names, attack_confidence=round(threat.confidence / 100, 4),
+        employee_id=employee.id, username=employee.username, score=threat.score, risk_score=threat.risk_score,
+        level=threat.level, impact_severity=threat.impact_severity, evidence_strength=threat.evidence_strength,
+        window_minutes=get_settings().correlation_window_minutes, factors=threat.factors,
+        attack_stages=threat.stage_names,
         current_stage=threat.stage, stage_label=threat.stage_label,
         stage_history=corr.stage_history if corr else [], independent_stages=threat.counted_stages,
-        components=threat.components, ml=threat.ml.as_dict() if threat.ml else None, features=threat.features,
+        components=threat.components, score_breakdown=threat.breakdown, impact=threat.impact, strength=threat.strength,
+        ml=threat.ml.as_dict() if threat.ml else None, features=threat.features,
         exposure=threat.exposure, evidence=[ev.as_dict() for ev in corr.evidence] if corr else [],
         links=corr.links if corr else {}, first_event_id=corr.first_event_id if corr else None,
         recommended_actions=threat_engine.recommend_actions(threat),
@@ -466,8 +471,11 @@ def detection_status(_: AuthContext = Depends(require_admin)):
                         "benchmarking, the CERT Insider Threat Test Dataset (synthetic users and synthetic malicious actors). "
                         "None of it is real banking data."),
         "model": get_detector().status(),
+        "score_definitions": scoring.DEFINITIONS,
         "thresholds": {"suspicious": s.threat_suspicious_threshold, "high_risk": s.threat_high_threshold,
-                       "critical": s.threat_critical_threshold, "alert_min_severity": s.alert_min_severity},
+                       "critical": s.threat_critical_threshold, "alert_min_severity": s.alert_min_severity,
+                       "source": s.thresholds_source, "ml_corroboration_threshold": s.ml_corroboration_threshold},
+        "operating_point": scoring.operating_point_summary(),
         "correlation_window_minutes": s.correlation_window_minutes,
         "baseline_days": s.baseline_days,
         "rules": rules.summary(),
@@ -503,15 +511,18 @@ def list_alerts(
     _: AuthContext = Depends(require_admin),
     db: Session = Depends(get_db),
     alert_status: str | None = Query(None, alias="status", pattern="^(open|investigating|contained|resolved|false_positive)$"),
-    severity: str | None = Query(None, pattern="^(normal|suspicious|high_risk|critical)$"),
+    risk_band: str | None = Query(None, pattern="^(normal|suspicious|high_risk|critical)$"),
+    impact_severity: str | None = Query(None, pattern="^(none|low|medium|high|critical)$"),
     employee_id: int | None = Query(None, gt=0),
     limit: int = Query(100, ge=1, le=get_settings().max_page_size),
 ):
     query = select(SecurityAlert).order_by(SecurityAlert.updated_at.desc(), SecurityAlert.id.desc()).limit(limit)
     if alert_status:
         query = query.where(SecurityAlert.status == alert_status)
-    if severity:
-        query = query.where(SecurityAlert.severity == severity)
+    if risk_band:
+        query = query.where(SecurityAlert.severity == risk_band)
+    if impact_severity:
+        query = query.where(SecurityAlert.impact_severity == impact_severity)
     if employee_id:
         query = query.where(SecurityAlert.employee_id == employee_id)
     return db.scalars(query).all()
@@ -667,8 +678,8 @@ def dashboard_stats(_: AuthContext = Depends(require_admin), db: Session = Depen
         select(SecurityAlert.severity, func.count(SecurityAlert.id))
         .where(SecurityAlert.status.in_(("open", "investigating"))).group_by(SecurityAlert.severity)
     ).all()
-    alerts_by_severity = {level: 0 for level in SEVERITY_LEVELS}
-    alerts_by_severity.update({sev: n for sev, n in severity_rows})
+    alerts_by_risk_band = {level: 0 for level in SEVERITY_LEVELS}
+    alerts_by_risk_band.update({sev: n for sev, n in severity_rows})
 
     ranked = sorted(employees, key=lambda e: scores.get(e.id, 0), reverse=True)
     high_threshold = get_settings().threat_high_threshold
@@ -679,8 +690,8 @@ def dashboard_stats(_: AuthContext = Depends(require_admin), db: Session = Depen
             EmployeeSession.revoked_at.is_(None), EmployeeSession.expires_at > now)) or 0,
         events_total=db.scalar(select(func.count(SecurityEvent.id))) or 0,
         events_24h=len(recent),
-        open_alerts=sum(alerts_by_severity.values()),
-        alerts_by_severity=alerts_by_severity,
+        open_alerts=sum(alerts_by_risk_band.values()),
+        alerts_by_risk_band=alerts_by_risk_band,
         open_investigations=db.scalar(select(func.count(AttackInvestigation.id)).where(
             AttackInvestigation.status.in_(("open", "contained")))) or 0,
         high_risk_employees=sum(1 for e in employees if scores.get(e.id, 0) >= high_threshold),

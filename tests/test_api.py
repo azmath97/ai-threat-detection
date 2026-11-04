@@ -211,7 +211,7 @@ def test_simulation_full_chain_uses_real_pipeline_and_resets(client, admin, db_p
     assert {"initial_access", "credential_misuse", "sensitive_resource_access", "collection", "privilege_escalation",
             "persistence", "lateral_movement", "exfiltration"} <= set(risk["attack_stages"])
     alerts = client.get("/api/alerts", headers=admin, params={"employee_id": david}).json()
-    assert len(alerts) == 1 and alerts[0]["severity"] == "critical"
+    assert len(alerts) == 1 and alerts[0]["risk_band"] == "critical"
     assert _query(db_path, "select is_synthetic from security_alerts where id=?", (alerts[0]["id"],))[0][0] == 1
     investigation = client.get(f"/api/investigations/{alerts[0]['investigation_id']}", headers=admin).json()
     assert any("svc.backup01" in i for i in investigation["indicators"])

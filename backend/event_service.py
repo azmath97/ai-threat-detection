@@ -1,4 +1,4 @@
-"""The event pipeline: persist -> rules -> ML/correlation/confidence -> alert -> investigation."""
+"""The event pipeline: persist -> rules -> ML/rule evidence -> heuristic risk score, band, impact, strength -> alert -> investigation."""
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -8,7 +8,17 @@ from sqlalchemy.orm import Session
 
 from backend import baseline as baseline_service
 from backend import controls, detection_engine, investigation_service, run_context, threat_engine
-from backend.catalog import ACCESS_LEVEL_RANK, ACTION_REQUIRED_LEVEL, ACTION_TO_EVENT, SEVERITY_LABELS, SEVERITY_RANK, STAGE_LABELS, is_self_service
+from backend.catalog import (
+    ACCESS_LEVEL_RANK,
+    ACTION_REQUIRED_LEVEL,
+    ACTION_TO_EVENT,
+    IMPACT_LABELS,
+    IMPACT_RANK,
+    SEVERITY_LABELS,
+    SEVERITY_RANK,
+    STAGE_LABELS,
+    is_self_service,
+)
 from backend.config import get_settings
 from backend.database import utcnow
 from backend.models import (
@@ -168,7 +178,7 @@ def record_event(
 
     assessment, alert, threat = None, None, None
     if evaluate_alerts:
-        # 2. ML anomaly score + correlation + baseline + stage -> bounded attack confidence
+        # 2. ML anomaly score + rule evidence -> heuristic risk score, band, impact severity and evidence strength
         threat, assessment = threat_engine.assess_and_store(db, employee, event)
         target = employee
         # Accounts created by another employee are attributed to their creator for alerting.
@@ -224,7 +234,10 @@ def access_resource(
 def _maybe_raise_alert(
     db: Session, employee: Employee, event: SecurityEvent, assessment: RiskAssessment, threat: "threat_engine.ThreatAssessment"
 ) -> SecurityAlert | None:
-    """Raise (or update) the employee's alert once attack confidence reaches ALERT_MIN_SEVERITY (critical by default)."""
+    """Raise (or update) the employee's alert once the risk band reaches ALERT_MIN_SEVERITY (the Alert band by default).
+
+    The band comes from the heuristic risk score and the corroboration gate. The alert records impact severity and evidence
+    strength separately, with the score basis that applied, so a high-impact alert can show weak evidence."""
     settings = get_settings()
     if SEVERITY_RANK[threat.level] < SEVERITY_RANK[settings.alert_min_severity]:
         investigation_service.refresh_active(db, employee, event.timestamp, threat)
@@ -233,9 +246,11 @@ def _maybe_raise_alert(
     investigation = investigation_service.upsert_investigation(db, employee, event.timestamp, synthetic=event.is_synthetic,
                                                                threat=threat)
     chain = " -> ".join(STAGE_LABELS[s] for s in corr.stage_history) or "none"
-    title = f"{SEVERITY_LABELS[threat.level]}: possible insider threat, {employee.employee_code} ({threat.stage_label})"
-    description = (f"Attack confidence {threat.score}/100 ({SEVERITY_LABELS[threat.level]}). Current stage: {threat.stage_label}. "
-                   f"Observed: {chain}. {threat.exposure['statement']}")
+    title = (f"{IMPACT_LABELS[threat.impact_severity]}-impact finding, {threat.strength['label'].lower()} evidence: "
+             f"possible insider threat, {employee.employee_code} ({threat.stage_label})")
+    description = (f"Heuristic risk score {threat.risk_score:.1f}/100 (not a probability), risk band {SEVERITY_LABELS[threat.level]}. "
+                   f"Impact severity {IMPACT_LABELS[threat.impact_severity]}; evidence strength {threat.strength['label']}. "
+                   f"Current stage: {threat.stage_label}. Observed: {chain}. {threat.exposure['statement']}")
     actions = threat_engine.recommend_actions(threat)
     evidence = [ev.as_dict() for ev in corr.evidence]
 
@@ -259,10 +274,14 @@ def _maybe_raise_alert(
         if (alert.severity, threat.stage) != previous:
             write_audit(db, "alert_updated", target_type="alert", target_id=alert.id,
                         details={"employee_id": employee.id, "from_stage": previous[1], "to_stage": threat.stage,
-                                 "severity": alert.severity, "confidence": threat.confidence, "trigger_event_id": event.id})
+                                 "risk_band": alert.severity, "risk_score": threat.risk_score, "trigger_event_id": event.id})
     alert.assessment_id = assessment.id
     alert.risk_score = max(alert.risk_score or 0, threat.score)
-    alert.attack_confidence = max(alert.attack_confidence or 0.0, threat.confidence)
+    alert.peak_risk_score = max(alert.peak_risk_score or 0.0, threat.risk_score)
+    if IMPACT_RANK[threat.impact_severity] >= IMPACT_RANK.get(alert.impact_severity or "none", 0):
+        alert.impact_severity = threat.impact_severity          # impact never goes down while the alert is open
+    alert.evidence_strength = threat.evidence_strength
+    alert.score_basis = threat.breakdown
     alert.stage = threat.stage
     alert.first_event_id = corr.first_event_id
     alert.evidence = evidence
@@ -272,6 +291,7 @@ def _maybe_raise_alert(
     db.flush()
     if created:
         write_audit(db, "alert_created", target_type="alert", target_id=alert.id,
-                    details={"employee_id": employee.id, "severity": threat.level, "confidence": threat.confidence,
+                    details={"employee_id": employee.id, "risk_band": threat.level, "risk_score": threat.risk_score,
+                             "impact_severity": threat.impact_severity, "evidence_strength": threat.evidence_strength,
                              "stage": threat.stage, "trigger_event_id": event.id})
     return alert

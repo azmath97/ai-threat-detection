@@ -111,7 +111,7 @@ def test_every_index_and_constraint_exists_in_postgresql(pg):
         versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
     assert expected_indexes <= indexes and expected_checks <= checks
     assert "WHERE" in partial and "open" in partial                           # a real partial unique index, not a plain one
-    assert versions == [1, 2]
+    assert versions == [1, 2, 3]
 
 
 def test_concurrent_requests_with_one_idempotency_key_store_one_event(api):

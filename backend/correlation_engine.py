@@ -39,10 +39,11 @@ class Evidence:
     relations: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
+        """`rule_weight` is the hand-assigned weight of the strongest rule on this event (heuristic; not impact, not a probability)."""
         return {"event_id": self.event_id, "timestamp": self.timestamp.isoformat(), "account": self.account,
                 "event_type": self.event_type, "resource": self.resource, "outcome": self.outcome,
                 "source_ip": self.source_ip, "session_id": self.session_id, "rule": self.rule, "rules": self.rules,
-                "severity": round(self.severity, 3), "stages": self.stages, "relations": self.relations}
+                "rule_weight": round(self.severity, 3), "stages": self.stages, "relations": self.relations}
 
 
 @dataclass
@@ -66,8 +67,7 @@ class CorrelationResult:
     stage_history: list[str]              # observed stages in order of first appearance
     current_stage: str                    # most advanced stage supported by evidence ("none" if no evidence)
     counted_stages: int                   # independent stages (an event counts once)
-    effective_stages: float               # strongly linked stages count 1.0, weakly linked 0.5
-    strength: float                       # 0..1 correlation component
+    effective_stages: float               # strongly linked stages count 1.0, weakly linked 0.5 (display only; not scored)
     links: dict
     first_event_id: int | None
     last_event_id: int | None
@@ -79,16 +79,6 @@ class CorrelationResult:
     @property
     def is_attack(self) -> bool:
         return self.counted_stages >= 2
-
-
-def _curve(n: float) -> float:
-    points = rules.scoring("correlation_curve")
-    if n <= 0:
-        return 0.0
-    lower = int(n)
-    if lower >= len(points) - 1:
-        return float(points[-1])
-    return float(points[lower] + (n - lower) * (points[lower + 1] - points[lower]))
 
 
 def _relation(a: SecurityEvent, b: SecurityEvent, unfamiliar_ips: set[str], parents: dict[int, int | None]) -> str | None:
@@ -176,7 +166,6 @@ def correlate_events(events: list[SecurityEvent], parents: dict[int, int | None]
         current_stage=ordered[-1].stage if ordered else "none",
         counted_stages=len(counted),
         effective_stages=effective,
-        strength=_curve(effective),
         links={
             "sessions": sessions,
             "ips": sorted(unfamiliar_ips),

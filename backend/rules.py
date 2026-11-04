@@ -42,9 +42,9 @@ def rules() -> dict[str, RuleConfig]:
     for rule_id, cfg in _raw()["rules"].items():
         stages = tuple(cfg.get("stages", []))
         unknown = [s for s in stages if s not in STAGES]
-        severity = float(cfg["severity"])
+        severity = float(cfg.get("weight", cfg.get("severity", -1)))      # "severity" is the pre-v9 name of the same hand-assigned weight
         if unknown or not 0.0 <= severity <= 1.0:
-            raise RulesError(f"rule '{rule_id}': invalid severity or stage {unknown}")
+            raise RulesError(f"rule '{rule_id}': invalid weight or stage {unknown}")
         result[rule_id] = RuleConfig(rule_id, bool(cfg.get("enabled", True)), severity, stages, cfg.get("description", rule_id))
     return result
 
@@ -62,14 +62,11 @@ def scoring(name: str):
 
 
 def weights() -> dict[str, float]:
-    """Component weights, normalised to sum to 1 so the confidence score is bounded by construction."""
+    """Component weights (rules, ml), normalised to sum to 1 so the risk score is bounded by construction.
+    They are hand-assigned heuristics, not fitted to labelled data."""
     raw = _raw()["scoring"]["weights"]
     total = sum(raw.values())
     return {k: v / total for k, v in raw.items()}
-
-
-def stage_weight(stage: str) -> float:
-    return float(_raw()["scoring"]["stage_weights"].get(stage, 0.0))
 
 
 def summary() -> dict:
@@ -77,6 +74,6 @@ def summary() -> dict:
         "path": Path(get_settings().detection_rules_path).name,
         "scoring": _raw()["scoring"],
         "parameters": _raw()["parameters"],
-        "rules": {rid: {"enabled": r.enabled, "severity": r.severity, "stages": list(r.stages), "description": r.description}
+        "rules": {rid: {"enabled": r.enabled, "weight": r.severity, "stages": list(r.stages), "description": r.description}
                   for rid, r in rules().items()},
     }

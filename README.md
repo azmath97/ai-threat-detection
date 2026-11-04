@@ -23,8 +23,11 @@ notice that **while it is happening** and before the simulated data leaves.
 * **One FastAPI backend and one configured database are the single source of truth** (SQLite for local development,
   PostgreSQL for anything deployed; see [Database and persistence](#database-and-persistence)). The portal, the SOC
   dashboard and the simulation console only call the backend; none of them has its own data, scores or event system.
-* **Detection is hybrid:** an Isolation Forest anomaly model, configurable rules, event correlation, a bounded
-  0-100 attack-confidence score, a separate data-exposure assessment and attack-stage classification.
+* **Detection is hybrid, and its numbers are labelled for what they are:** an Isolation Forest anomaly model, configurable rules and
+  event correlation produce a **heuristic risk score** (0-100, hand-weighted, **not a probability**), a **risk band** (a calibrated
+  threshold on that score, limited by how many independent attack stages the evidence spans), a separate **impact severity**
+  (what the evidence shows was accessed or changed) and a qualitative **evidence strength**. See
+  [How the scores are defined](#how-the-scores-are-defined).
 * **Simulated containment has visible effects inside the application:** a simulated account disable stops logins to this
   application, a simulated IP block makes its login code refuse that address, and removing privileges deletes permission
   rows. It never touches a real network.
@@ -60,7 +63,7 @@ notice that **while it is happening** and before the simulated data leaves.
  Simulation Console (Streamlit :8502) ---HTTP/JSON-->  FastAPI backend (:8000)  -->  SQLite (local) or PostgreSQL (DATABASE_URL)
  SOC Dashboard    (Streamlit :8503) --/                      |
                                                             +-- ml/  Isolation Forest (ml/artifacts/*.joblib)
- every action -> security event -> rules -> ML score -> correlation -> confidence -> alert -> investigation
+ every action -> security event -> rules + anomaly score -> heuristic risk score -> risk band / impact / evidence strength -> alert -> investigation
 ```
 
 **Event pipeline** (`backend/event_service.py`). Every employee action is turned into a `security_events` row by the
@@ -70,8 +73,8 @@ backend, then flows through the same steps for real employees and for the simula
 2. apply the configurable rules against the employee's role, permissions, 30-day baseline and session context;
 3. score the behaviour with the Isolation Forest (or the heuristic fallback);
 4. correlate related events (same employee, session, unfamiliar IP, or an account created by that employee);
-5. compute the bounded attack confidence, the attack stage and the data exposure;
-6. at the **critical** threshold raise an alert and create/update an investigation with preserved evidence.
+5. compute the heuristic risk score, the risk band, the impact severity, the evidence strength, the attack stage and the data exposure;
+6. when the risk band reaches **Alert** raise an alert and create/update an investigation with preserved evidence.
 
 The dashboards only read what the backend stored. The portal never shows scores, alerts or investigations.
 
@@ -84,7 +87,7 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | SOC read models | `soc_service.py`, `soc_routes.py` |
 | Simulation | `scenario_generator.py` (seeded plans), `simulation_runs.py` (background runs, status, stop), `simulation_service.py` (manual steps, reset), `simulation_routes.py` |
 | Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (399 tests) |
+| Tests | `tests/` (433 tests) |
 
 ## Technology stack
 
@@ -187,8 +190,9 @@ Copy-Item .env.example .env        # bash: cp .env.example .env
 | `CORRELATION_WINDOW_MINUTES` | `240` | correlation window |
 | `BASELINE_DAYS` | `30` | how much history forms an employee's behavioural baseline |
 | `BULK_RECORD_THRESHOLD` | `500` | minimum record count that counts as a "large" export |
-| `THREAT_SUSPICIOUS_THRESHOLD`, `THREAT_HIGH_THRESHOLD`, `THREAT_CRITICAL_THRESHOLD` | `25`, `50`, `80` | severity bands |
-| `ALERT_MIN_SEVERITY` | `critical` | lowest severity that raises an alert |
+| `THREAT_SUSPICIOUS_THRESHOLD`, `THREAT_HIGH_THRESHOLD`, `THREAT_CRITICAL_THRESHOLD` | `37`, `37`, `37` (from `backend/operating_point.json`) | risk-score thresholds of the Watch, Elevated and Alert bands. The defaults are the operating point chosen on validation runs by `python -m ml.calibrate_scoring`; setting these variables overrides it and the dashboards then say "environment override". Without an operating point file the hand-picked 25/50/80 are used and labelled "uncalibrated defaults" |
+| `OPERATING_POINT_PATH`, `ML_CORROBORATION_THRESHOLD` | `backend/operating_point.json`, `0.45` | where the recorded operating point is read from, and the anomaly score from which the model counts as agreeing with the rules (used only for evidence strength) |
+| `ALERT_MIN_SEVERITY` | `critical` | lowest **risk band** that raises an alert (`critical` is the Alert band; the name is kept for compatibility) |
 | `ML_MODEL_PATH`, `ML_AUTO_TRAIN` | `ml/artifacts/isolation_forest.joblib`, `true` | model file and train-on-first-start |
 
 Rule severities, scoring weights and parameters live in `backend/detection_rules.json` (reload with
@@ -267,6 +271,11 @@ A source file made by an older release must first be upgraded: `python -m backen
   `schema_migration_repair` records the counts. If existing rows break a CHECK constraint the migration stops before
   changing anything and lists them. On SQLite the affected tables are rebuilt (copy, drop, rename, re-index, then
   `PRAGMA foreign_key_check`).
+* Version 3 renames the two columns that called a heuristic score a "confidence" (`security_alerts.attack_confidence` to
+  `peak_risk_score`; `attack_investigations.confidence`, a 0-1 fraction, to `risk_score_exact`, multiplied by 100 so it is a 0-100
+  score like the others) and adds `impact_severity` and `evidence_strength` (on risk assessments, alerts and investigations) and
+  `score_basis` (alerts). Old rows keep their scores; the new columns are empty and shown as "Not assessed". The rename also runs
+  first in versions 1 and 2, so a database from before versioning is upgraded in one pass without losing the old values.
 * There are no automatic downgrades. Back up before upgrading a database you care about.
 
 ### Constraints and indexes
@@ -277,7 +286,7 @@ counts, the live feed, alert and investigation lists, evidence by address and se
 | Table | Indexes (besides primary and foreign keys) | Constraints |
 |---|---|---|
 | `security_events` | `(employee_id, timestamp)`, `(event_type, timestamp)`, `(timestamp)`, `(source_ip, timestamp)`, `(session_id)`, `(simulation_run_id)`; **unique `(employee_id, request_id)` where `request_id` is not null** | `outcome` in success/failure/denied; record counts not negative |
-| `risk_assessments` | `(employee_id, created_at)`, `(event_id)` | level is a known severity; score 0 to 100 |
+| `risk_assessments` | `(employee_id, created_at)`, `(event_id)` | level is a known risk band; score 0 to 100 |
 | `security_alerts` | `(status, severity)`, `(employee_id, status)`, `(investigation_id)`, `(updated_at)`, `(created_at)`; **unique `employee_id` where status is open or investigating** | known status and severity |
 | `attack_investigations` | `(employee_id, status)`, `(updated_at)`, `(status)`, `(simulation_run_id)`; **unique `employee_id` where status is open or contained** | known status |
 | `containment_actions` | `(employee_id, created_at)`, `(investigation_id)`, `(alert_id)`; **unique `idempotency_key`** | known status |
@@ -324,7 +333,7 @@ A test asks SQLite's `EXPLAIN QUERY PLAN` for 14 of these queries and fails if a
 
 ### What was and was not verified
 
-Run in this repository (`python -m pytest tests -q`, 399 tests): migrations on a fresh database, on a database from an earlier
+Run in this repository (`python -m pytest tests -q`, 433 tests): migrations on a fresh database, on a database from an earlier
 release (including duplicate repair), and the refusal of a newer one; constraint and index behaviour; query plans;
 de-duplication, 12-way same-key and 9-way different-key concurrent ingestion on SQLite; transaction rollback; the
 bounded-query checks; two SOC sessions and a portal session seeing the same data; Streamlit reruns and double clicks against a
@@ -494,8 +503,8 @@ are recorded as blocked.
    *Instant* does not wait) and the number of background employees, then press **Start run**. The run panel shows its
    status, progress, seed, plan fingerprint and what the detector produced (highest level, rules fired, whether an alert
    was raised). The individual stages can also be triggered by hand under *Individual steps*.
-4. Watch the SOC dashboard. Malicious scenarios can raise a Critical alert and an investigation, but none is guaranteed:
-   benign scenarios stay Normal or at most Suspicious, and the same malicious scenario reaches different levels for
+4. Watch the SOC dashboard. Malicious scenarios can reach the Alert risk band and raise an alert and an investigation, but none
+   is guaranteed: benign scenarios stay Normal or at most Watch, and the same malicious scenario reaches different bands for
    different seeds.
 
 **With the API**
@@ -537,8 +546,9 @@ code; the containment buttons edit this application's own records and nothing el
 1. `python app.py all`. Open the SOC Dashboard (8503) as `SEC-9011` and the Simulation Console (8502) in a second window.
 2. In the console pick **Compromised account campaign (full chain)**, *Fixed (reproducible)* seed `1`, pace *Demo*, press
    **Start run**. Point out the run status and seed, and that the console only reports what the backend's detector produced.
-3. In the SOC dashboard watch *Security Overview*. The run raises a Critical alert only if the detector decides to (seed 1 does
-   on the data this project ships; other seeds and scenarios may stay below Critical, and the benign scenarios must).
+3. In the SOC dashboard watch *Security Overview*. The run raises an Alert-band alert only if the detector decides to (seed 1 does
+   on the data this project ships; other seeds and scenarios may stay below Alert, and the benign scenarios must). Point out that the
+   score, the impact severity and the evidence strength are three different readings.
 4. Open the investigation: show the evidence with event IDs and timestamps, the explanation, the missing evidence and the
    alternative explanations. State that "confirmed" appears only for simulation ground truth.
 5. Open **Containment** on the investigation, press **Simulate containment** on "Disable account (simulated)", read the
@@ -570,9 +580,10 @@ Avoid claiming "this protects the bank" and avoid quoting the benchmark figures 
 3. **Resource access.** For every view, download or export the backend checks the permission table
    (`view`/`download` need `read`, `export` needs `write`; self-service pages are open to every employee; an *isolated*
    system denies everyone). The result (`success` or `denied`) is stored as an event with the number of records involved.
-4. **Detection.** Each stored event is run through the pipeline (rules, baseline, ML, correlation, confidence, exposure)
-   and gets a risk assessment row. Nothing is scored in the browser.
-5. **Alert and investigation.** When the correlated confidence reaches the critical threshold, a `security_alerts` row is
+4. **Detection.** Each stored event is run through the pipeline (rules, baseline, ML, correlation, risk score, band, impact,
+   evidence strength, exposure) and gets a risk assessment row. Nothing is scored in the browser.
+5. **Alert and investigation.** When the risk band reaches Alert (score at or above its threshold and at least three independent
+   attack stages), a `security_alerts` row is
    written (with evidence, exposure and recommended actions) and an investigation is opened or updated.
 6. **Response (simulated).** An administrator reviews the investigation in the SOC dashboard and chooses **Simulate
    containment**. The backend edits this application's own records, records the alert/investigation, the requested action,
@@ -789,8 +800,8 @@ What these numbers do and do not show:
 **The five states in the application** (SOC overview and every investigation page): *anomalous activity detected*, *suspicious
 sequence correlated*, *potential data exposure*, *confirmed malicious (simulation ground truth)* and *simulated containment
 completed*. Model outputs are never shown as confirmed; "confirmed" exists only where the simulation provides ground truth,
-and the live engine's confidence components are itemised on the investigation page together with the caveat that one event can
-inform more than one component.
+and the live engine's two score components and every piece of evidence behind them are itemised on the investigation page
+([How the scores are defined](#how-the-scores-are-defined)).
 
 ### Rigorous evaluation (one command)
 
@@ -806,11 +817,13 @@ benchmark, so this is a later time slice of the same users, not a fresh set. Det
 
 ## Detection rules in detail
 
-The rules are data, not code: `backend/detection_rules.json` (19 rules, hot-reloadable). Every rule has a *severity*
-between 0 and 1 and, where relevant, an attack *stage*. A rule only counts as evidence if its severity is at least
+The rules are data, not code: `backend/detection_rules.json` (19 rules, hot-reloadable). Every rule has a *weight*
+between 0 and 1, assigned by hand, and, where relevant, an attack *stage*. The weight says how strongly that rule alone counts
+as evidence; it is **not** impact severity and not a probability (older versions called it "severity"; the stored event flags
+keep that key and expose it as `risk_points`, weight x 100). A rule only counts as evidence if its weight is at least
 `min_evidence_severity` (0.10); weaker flags are kept on the event for context but do not add to the score.
 
-| Rule | Severity | Stage | Fires when |
+| Rule | Weight | Stage | Fires when |
 |---|---|---|---|
 | `unfamiliar_ip` | 0.18 | Initial Access | a login or failed login comes from an IP outside the baseline; for other events once per IP per window |
 | `off_hours_login` | 0.08 | none | login at a weekend or outside 07:00-19:00, **only** if the employee's after-hours rate is below 15% |
@@ -835,7 +848,7 @@ between 0 and 1 and, where relevant, an attack *stage*. A rule only counts as ev
 **Context decides, not the bare event.**
 
 * A new IP alone is a weak signal (0.18). An employee logging in from a new address and opening a permitted document
-  stays Normal or Suspicious; it is the combination with other stages that raises the score.
+  stays Normal or Watch; it is the combination with other stages that raises the score.
 * `off_hours_login` is suppressed for people who regularly work late.
 * `large_export` is relative to that employee's history, with a floor of 500 records.
 * Denials caused by a SOC isolation (`reason = system_isolated`) are not scored against the employee.
@@ -865,39 +878,124 @@ employee created the account (which makes a new account's first logins suspiciou
   discounted by `repeat_factor` 0.25 up to `repeat_cap` 1.5; duplicate requests (same `request_id` or
   `Idempotency-Key`) are stored and scored once.
 
-### Attack confidence (`backend/threat_engine.py`)
+### How the scores are defined
+
+An analyst sees four different things. **None of them is a probability**: this project has no labelled real-world incidents from
+which a probability could be calibrated, so every number is either a model output on its own scale or a hand-assigned weight, and
+the dashboards, API and exports say which (`GET /api/detection/status` returns these definitions, and the Overview shows them under
+"How to read the scores").
+
+| Quantity | Range | What it is | Where it comes from |
+|---|---|---|---|
+| **Heuristic risk score** | 0-100 | a hand-weighted evidence score used to rank activity | `100 x (0.80 x rule evidence + 0.20 x anomaly score)` |
+| **Risk band** | Normal / Watch / Elevated / Alert | the score against calibrated thresholds, limited by independent attack stages | the operating point below; decides triage order and whether an alert is raised |
+| **Impact severity** | None / Low / Medium / High / Critical | what the evidence shows was accessed, exported or changed | rules over the evidence only (below); never uses the score or the model |
+| **Evidence strength** | None / Weak / Moderate / Strong | how well independent evidence corroborates the finding | attack stages spanned by rule evidence, and whether the anomaly model independently agrees |
+
+Smaller numbers inside them: the **anomaly score** (0-1) is the Isolation Forest output rescaled against normal training behaviour
+(the upper edge of typical behaviour maps to 0, a fixed span above it to 1, plus a guard for volumes beyond anything in
+training); a **rule weight** (0-1) is a hand-assigned weight. Neither is a probability.
+
+**The calculation, and why each piece is counted once** (`backend/scoring.py`, `backend/threat_engine.py`):
 
 ```
-confidence = 100 x ( 0.20 x ML anomaly
-                   + 0.30 x rule severity
-                   + 0.25 x correlated evidence
-                   + 0.10 x baseline deviation
-                   + 0.15 x attack stage )
+risk_score = 100 x ( 0.80 x rule_evidence + 0.20 x anomaly_score )          weights in detection_rules.json, sum to 1
 ```
 
-* Each component is first bounded to 0-1 and the weights sum to 1, so the score can never leave 0-100 however many
-  events arrive.
-* **Rule severity** is a noisy-OR of the evidence severities, so many weak signals do not add up linearly.
-* **Correlated evidence** maps the number of independent stages through the curve `[0, 0.12, 0.40, 0.65, 0.82, 0.93, 1.0]`.
-* **Attack stage** uses the weight of the furthest stage reached: Initial Access 0.15, Credential Misuse 0.30,
-  Sensitive Resource Access 0.35, Collection 0.55, Privilege Escalation 0.70, Persistence 0.80, Lateral Movement 0.80,
-  Exfiltration 1.0.
-* **Stage gates:** with fewer than 2 independent stages the score cannot exceed High Risk, with fewer than 3 it cannot
-  be Critical. One loud signal, however strong, therefore cannot raise a critical alert on its own.
-* The whole-number score is floored so it always matches its severity band.
+* **Rule evidence** is a noisy-OR over evidence groups. An event is evidence **once**, through its strongest rule, however many times
+  it appears. Events with the same rule on the same target form one group worth its strongest weight plus 25 % of each further
+  weight (`repeat_factor`), never more than 1.5 times the strongest (`repeat_cap`). Different groups combine as `1 - product(1 - group)`,
+  so many weak signals do not add up linearly.
+* **The anomaly score** comes from a separate model. It sees the same events as the rules, so its share is small, and it never
+  raises the corroboration gate.
+* **Not added to the score:** attack stage, correlation strength and baseline deviation. An earlier version added them as three more
+  components (and used 0.30/0.25/0.10/0.15 weights). They were functions of the same rule evidence, so one unfamiliar IP or one large
+  export was counted by the rule, the stage, the correlation and the baseline. The independent-stage count now **gates the band**
+  instead of adding points.
+* **The gate:** the band implied by the score is lowered to Watch when fewer than 2 independent stages exist, and to Elevated when
+  fewer than 3 exist. One loud signal, however strong, therefore cannot reach Alert alone. The score itself is not changed by the
+  gate; the investigation page shows both ("band from the score alone" and "risk band").
+* The whole-number score is floored so it never reads higher than the exact value.
 
-| Score | Severity |
-|---|---|
-| 0-24 | Normal |
-| 25-49 | Suspicious |
-| 50-79 | High Risk |
-| 80-100 | Critical (raises an alert) |
+**Impact severity** (rules in `scoring.impact_severity`, evidence only): *Critical* when an external transfer is confirmed, or a foothold
+(persistence, lateral movement) exists next to a confirmed export; *High* at or above the bulk threshold of potentially exposed records
+or when privileges were escalated; *Medium* for a confirmed export below bulk, suspicious access to sensitive records, credential
+misuse, sensitive-resource access or collection; *Low* for other suspicious activity; *None* otherwise. Each result carries its reasons.
 
-All thresholds, weights and curves are configurable (`.env` for thresholds, `detection_rules.json` for the rest).
+**Evidence strength:** *None* without rule evidence; *Strong* with at least 3 independent stages, or 2 stages when the model agrees;
+*Moderate* with 2 stages, or 1 stage when the model agrees; otherwise *Weak*. The model "agrees" only when a trained Isolation Forest
+is loaded and its anomaly score reaches `ML_CORROBORATION_THRESHOLD`; the heuristic fallback is never counted as corroboration.
 
-A typical simulated run: the confidence goes about 33 (unfamiliar login) to 66 (restricted access) to **81 at the
-large export, which raises the critical alert and creates the investigation**, then 88, 95 and 97 as the later steps
-arrive, ending near 99.9 after the external transfer. The alert exists before the final transfer happens.
+**Severity is kept apart from certainty.** A bulk export of 25,000 records by one employee, with nothing else going on, is reported as
+*High* impact, one attack stage, a Watch band and at most Moderate evidence: serious if true, uncertain whether it is an attack.
+A chain of weak signals can be the opposite: Alert band and Strong evidence with only Low or Medium impact. The alert and the
+investigation record all three, and `GET /api/alerts` filters on `risk_band` and `impact_severity` separately.
+
+**What the analyst can inspect for any score** (investigation page, "How the heuristic risk score was built", and `GET /api/risk/employees/{id}`
+as `score_breakdown`; the alert keeps the same structure as `score_basis` from when it was raised): the formula; each component with
+what it is, its value, weight and points (they add up to the score); each rule evidence group with its weight, the weight counted,
+the event references (`#id`) and the first and last time; the events that were considered and whether each was counted; the time
+window; the model output (mode, score, raw score, volume guard); the feature deviations the model reacts to (records downloaded
+against the employee's largest earlier session, unfamiliar address, restricted attempts, failed logins, departments, privilege
+attempts, login hour against business hours and their own after-hours rate); the corroboration gate; the thresholds in force and
+where they came from; and the reasons behind the impact and strength readings.
+
+A typical simulated run (test clock pinned to 21:00 local, so the off-hours signal is present; the chain from
+[The simulated attack](#the-simulated-attack-step-by-step)): the heuristic risk score goes 33.1 (unfamiliar login; band Normal at the
+recorded thresholds, impact Low), 84.3 (restricted access; two stages, Elevated, impact Medium), **90.9 at the large export (three
+stages, Alert, impact High; the alert and the investigation are created here)**, then 97.0, 98.8, 99.3 and 99.8 as the later steps arrive.
+The alert exists before the external transfer. These values come from running the chain on this repository's detector with the shipped
+model; other seeds, times of day and scenarios give other values.
+
+#### The operating point (how the thresholds were chosen)
+
+`python -m ml.calibrate_scoring` runs the project's eight seeded scenarios (two benign, six malicious) through the real ingestion and
+detection pipeline on a temporary database, for **validation seeds** 1000-1011 and a disjoint
+set of **test seeds** 2000-2011 (12 each; 96 runs per split: 72 malicious,
+24 benign). The clock is pinned to a weekday at 10:30 local time. It then chooses each band's threshold from the
+**validation runs only**: the lowest threshold whose false-flag rate on the benign validation runs stays inside that band's budget
+(Watch 25%, Elevated 5%, Alert 0%; these budgets are
+policy assumptions about analyst capacity, not measurements), which maximises recall within the budget. The test runs are only
+scored afterwards. The result is written to `backend/operating_point.json` (read at start-up) and
+[reports/calibration/](reports/calibration) (`scoring_calibration.md`, `.json`, `runs.csv`).
+
+Selected thresholds (risk score): **Watch 37, Elevated 37, Alert 37**; anomaly-model corroboration threshold 0.45.
+Each band also needs its independent-stage count (none, 2, 3).
+
+| Band | Threshold | Validation: malicious detected | Validation: benign flagged | Test: malicious detected | Test: benign flagged |
+|---|---|---|---|---|---|
+| Watch | 37 | 67 of 72 (7% missed) | 6 of 24 (25%) | 67 of 72 (7% missed) | 9 of 24 (38%) |
+| Elevated | 37 | 35 of 72 (51% missed) | 0 of 24 (0%) | 35 of 72 (51% missed) | 0 of 24 (0%) |
+| Alert | 37 | 22 of 72 (69% missed) | 0 of 24 (0%) | 23 of 72 (68% missed) | 0 of 24 (0%) |
+
+Per scenario on the held-out test runs (12 runs each; how many reached each band):
+
+| Scenario | Kind | Runs | Watch | Elevated | Alert |
+|---|---|---|---|---|---|
+| Benign employee activity | benign | 12 | 0 | 0 | 0 |
+| Benign high-volume transfer (lookalike) | benign | 12 | 9 | 0 | 0 |
+| Bulk export | malicious | 12 | 12 | 11 | 8 |
+| Compromised-account campaign | malicious | 12 | 12 | 12 | 12 |
+| Multiple low-severity signals | malicious | 12 | 12 | 0 | 0 |
+| Gradual collection and staging | malicious | 12 | 12 | 0 | 0 |
+| Removable-media activity | malicious | 12 | 7 | 0 | 0 |
+| Suspicious external transfer | malicious | 12 | 12 | 12 | 3 |
+
+**The trade-off, in this project's synthetic runs.** Lowering the Watch threshold catches more malicious runs and flags more benign
+ones; `reports/calibration/scoring_calibration.md` tabulates misses and false flags for thresholds 0-100 on validation and test. At
+the selected point the Watch band misses 5 of 72 malicious test runs and flags 9 of 24 benign
+ones (all of them the benign lookalike for bulk export); Alert misses 49 of 72 and flags 0. 18 of the
+23 malicious test runs that reached Alert did so before the target's final scored event.
+
+* Elevated: the budget alone allowed a threshold of 0; it was raised to 37 so the bands stay ordered. For this band the independent-stage requirement, not the score threshold, is what separates benign runs from malicious ones.
+* Alert: the budget alone allowed a threshold of 0; it was raised to 37 so the bands stay ordered. For this band the independent-stage requirement, not the score threshold, is what separates benign runs from malicious ones.
+* Watch: the false-flag rate on held-out test runs (37.5%) exceeds the budget (25%) that held on validation (25.0%); a budget met on validation does not guarantee it on new seeds.
+
+**Limits of this calibration.** The labels are the scenario generator's own (a scenario is malicious by construction), the benign class
+is two scenarios, and the test seeds come from the same generators as the validation seeds, so the test figures are optimistic about
+unseen behaviour. The thresholds are an operating point on synthetic runs: they say how this heuristic behaves here, not how likely an
+alert is to be a real attack, and nothing here has been validated on real employees or incidents. Re-run the command after changing
+rules, weights, the model or the scenarios; the recorded point is not updated automatically.
 
 ### Data exposure assessment (`backend/data_exposure.py`)
 
@@ -971,9 +1069,10 @@ controls below work inside the application and the simulation.
 ### Detective controls (what raises the alarm)
 
 Hybrid detection: Isolation Forest anomaly score, 18 rules, a per-employee 30-day baseline, correlation of related
-events in a 4-hour window, attack-stage classification and a bounded 0-100 confidence. An alert is raised at 80, which
-is designed to be before the last attack step. Unusual-but-innocent behaviour (new IP, late shift, large legitimate job)
-is tuned not to reach that threshold alone.
+events in a 4-hour window, attack-stage classification and a bounded 0-100 heuristic risk score (not a probability). An alert is
+raised when the risk band reaches Alert (score at the calibrated threshold with at least three independent stages), which can be
+before the last attack step. Unusual-but-innocent behaviour (new IP, late shift, large legitimate job) cannot reach Alert alone
+because of the stage gate; it can reach Watch, and the benign high-volume lookalike does so in some runs (see the calibration results).
 
 ### Response controls (simulated containment an administrator can run)
 
@@ -1055,8 +1154,8 @@ when something changed, so filters and navigation are kept. Overview totals cove
 
 | Page | Content |
 |---|---|
-| Security Overview | KPIs (total events, active investigations, critical alerts, high-risk employees, sensitive records accessed, confirmed external transfers), live attack-confidence meter, active threats |
-| Live Event Feed | events with anomaly score, risk contribution and stage; filters for employee, IP, event type, severity, time range |
+| Security Overview | KPIs (security events, active investigations, active alerts, employees in the Elevated or Alert band, sensitive records accessed, confirmed external transfers), a "How to read the scores" panel, a live risk meter (heuristic risk score, risk band, impact severity and evidence strength shown separately), active threats |
+| Live Event Feed | events with anomaly score (0-1), rule weight points and stage; filters for employee, IP, event type, risk band, time range |
 | Attack Investigations | list; selecting one opens the investigation (findings, case file, containment, export, resolve) |
 | Employee Risk Monitor | employees ranked by behavioural and rule evidence only (no names or demographics) |
 | Attack Timeline | the eight stages built from correlated events, current stage highlighted |
@@ -1069,16 +1168,16 @@ used as risk indicators.
 
 ## Investigation and incident response
 
-A critical alert creates one investigation per employee, and every later related event updates it.
+An Alert-band alert creates one investigation per employee, and every later related event updates it.
 
-* **Case file:** sessions, suspicious IPs, related privileged accounts, first and latest suspicious event, confidence,
-  stage, sensitive resources accessed, records exported, potentially exposed and confirmed external transfers.
+* **Case file:** sessions, suspicious IPs, related privileged accounts, first and latest suspicious event, heuristic risk score,
+  risk band, impact severity, evidence strength, stage, sensitive resources accessed, records exported, potentially exposed and confirmed external transfers.
 * **Status:** `open`, `contained` or `resolved`.
 * **Preserved evidence:** related events are collected by employee, session, IP, created account, resource and time and
   copied once into the append-only `investigation_evidence` table with a SHA-256 of the original. Nothing edits events;
   the evidence view and every export compare each copy with the live event (`verified`, `modified`, `missing`).
 * **Explanation** (`investigation_explainer.py`, engine `deterministic-evidence-v1`): deterministic, no LLM or network
-  call. It gives the likely attack type, stage, suspicious activities, supporting evidence, confidence, impact,
+  call. It gives the likely attack type, stage, suspicious activities, supporting evidence, the risk assessment (score, band, impact severity, evidence strength and the full score breakdown),
   recommended containment, missing evidence and alternative explanations, citing real event IDs and timestamps, and
   never names the person behind an account. The application works with no external API.
 * **Classification:** possible insider misuse, compromised credentials, automated account exploitation, privilege
@@ -1110,13 +1209,13 @@ Interactive documentation: `/docs`. Send `Authorization: Bearer <token>` with th
 | POST | `/api/admin/accounts` | IT admin console write | create a privileged account |
 | POST / GET | `/api/events`; `/api/events/me` | any | events for the caller only (identity, IP, device set by the backend); an `Idempotency-Key` header (or `request_id`) makes a retry store the event once |
 | GET | `/api/events` | admin | history with filters |
-| GET / POST | `/api/risk/employees[/{id}]`, `/api/risk/assess` | admin | risk, factors, stages, exposure |
-| GET / PATCH | `/api/alerts[/{id}]` | admin | alerts |
+| GET / POST | `/api/risk/employees[/{id}]`, `/api/risk/assess` | admin | heuristic `risk_score` (0-100, not a probability), `level` (the **risk band**: `normal`, `suspicious`, `high_risk`, `critical` = Normal, Watch, Elevated, Alert), `impact_severity`, `evidence_strength`, factors with event references, stages, exposure, and `score_breakdown` (formula, components, rule evidence, model output, feature deviations, gate, thresholds) |
+| GET / PATCH | `/api/alerts[/{id}]` | admin | alerts with `risk_band`, `impact_severity`, `evidence_strength`, `peak_risk_score` and `score_basis`; filter with `risk_band` and `impact_severity` (there is deliberately no single "severity" field) |
 | GET / POST / PATCH | `/api/investigations[/{id}]` | admin | investigations (PATCH only reopens a resolved one) |
 | GET | `/api/investigations/{id}/explanation`, `/evidence`, `/export` | admin | explanation, preserved evidence, report download |
 | POST | `/api/investigations/{id}/resolve` | admin | `reason` + `confirm: true` |
 | GET / POST | `/api/containment` | admin (POST: containment guard) | simulated actions: `revoke_sessions`, `lock_account`, `restrict_access`, `remove_privileges`, `block_ip`, `isolate_system`, `restore_account`, `unblock_ip`, `release_system`, `resolve_investigation`; body takes `employee_id`, `action_type`, `reason`, `investigation_id`, `alert_id`, `target`, `confirm`, `idempotency_key`; 201 on a new action, 200 with `replayed: true` on a retry, 409 for a no-op or key clash, 429 when rate limited |
-| GET | `/api/soc/version`, `/overview`, `/confidence-history`, `/events`, `/employees`, `/investigations[/{id}]`, `/scopes`, `/timeline`, `/graph`, `/response`, `/audit` | admin | SOC read models; `/events` takes `limit` (capped by `MAX_PAGE_SIZE`) and `before_id` for keyset paging, `/investigations` takes `limit` |
+| GET | `/api/soc/version`, `/overview`, `/risk-history`, `/events`, `/employees`, `/investigations[/{id}]`, `/scopes`, `/timeline`, `/graph`, `/response`, `/audit` | admin | SOC read models; `/events` takes `limit` (capped by `MAX_PAGE_SIZE`) and `before_id` for keyset paging, `/investigations` takes `limit` |
 | GET | `/api/dashboard/stats`, `/api/audit-logs` | admin | KPIs, audit trail |
 | GET / POST | `/api/detection/status`, `/reload`, `/retrain` | admin | model, thresholds, rules |
 | GET / POST | `/api/simulation/scenarios`, `/status`, `/steps`, `/reset` | admin, simulation enabled | scenario catalogue (with per-employee eligibility), simulation state, manual single steps, reset (409 while a run is active) |
@@ -1132,8 +1231,8 @@ Timestamps are stored in UTC and returned as `timestamp` (UTC) and `timestamp_lo
 | `employee_sessions` | token hash, IP, device, created, expires, revoked, synthetic flag |
 | `access_permissions` | employee, resource, `read` or `write` |
 | `security_events` | one row per action: employee, session, UTC time, type, resource, outcome, IP, device, records accessed and downloaded, details JSON, `request_id`, synthetic flag, scenario |
-| `risk_assessments` | per-event scores: anomaly score, risk contribution, confidence, severity, stage, factors |
-| `security_alerts` | critical alerts with evidence, exposure, first and triggering event, recommended actions |
+| `risk_assessments` | per-event assessment: heuristic risk score, risk band (`level`), impact severity, evidence strength, anomaly score, stage, rule-evidence factors, score components |
+| `security_alerts` | alerts (risk band `severity` column; API field `risk_band`) with impact severity, evidence strength, peak heuristic risk score, the score basis when raised, evidence, exposure, first and triggering event, recommended actions |
 | `attack_investigations` | case file and status linked to the alert |
 | `investigation_evidence` | append-only evidence copies with SHA-256 hashes |
 | `containment_actions` | simulated action: type, alert and investigation, employee, reason, initiating administrator, time, status, result and effects (in `details`), idempotency key |
@@ -1153,15 +1252,17 @@ backend/                     FastAPI app, models, detection, correlation, invest
   database.py                engine and connection settings for SQLite and PostgreSQL
   migrations.py              versioned schema migrations (indexes, constraints, de-duplication key)
   db_tools.py                `python -m backend.db_tools copy | upgrade | info`
-  detection_rules.json       configurable rules, weights and parameters
+  detection_rules.json       configurable rules, weights and parameters (all hand-assigned heuristics)
+  scoring.py                 the definitions: risk score formula, risk band gate, impact severity, evidence strength
+  operating_point.json       the recorded risk-band thresholds (written by ml/calibrate_scoring.py)
 data/                        demo_accounts.py (usernames; random passwords come from a git-ignored file or the secret manager), seed_data.py (history), the SQLite file (git-ignored)
-ml/                          features.py, synthetic_data.py, train_model.py, anomaly_detector.py, evaluate_dataset.py, artifacts/ (git-ignored)
+ml/                          features.py, synthetic_data.py, train_model.py, anomaly_detector.py, evaluate_dataset.py, calibrate_scoring.py, artifacts/ (git-ignored)
 ml/cert/                     CERT r4.2 pipeline: schema, validate, prepare, labels, split, leakage, synthetic supplement
 ml/detect/                   window builder, features, models, hybrid risk, benchmark and summary (offline benchmark)
 docs/                        cert-dataset.md, detection-evaluation.md, detection-results/
 docs/cert-dataset.md         CERT dataset setup, field mapping, label rules, caveats
 frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       399 pytest tests
+tests/                       433 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
 requirements.txt  requirements-dev.txt (adds pgserver for the PostgreSQL tests)  .env.example
 ```
@@ -1169,7 +1270,7 @@ requirements.txt  requirements-dev.txt (adds pgserver for the PostgreSQL tests) 
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 399 tests, about eight minutes (a real backend is started several times)
+python -m pytest tests -q          # 433 tests, about eight minutes (a real backend is started several times)
 python -m pip install -r requirements-dev.txt   # optional: adds pgserver so tests/test_postgres.py runs instead of skipping
 ```
 
@@ -1182,11 +1283,11 @@ removes rows each test creates. It covers:
 
 * **Integration:** a normal employee's session is recorded and scored low; a compromised account (unfamiliar IP, restricted
   payroll access, an 8,000-record export, failed administrator logins, IT portal probe, privileged account and login,
-  external transfer) is detected with rising confidence, correlated, alerted **before the external transfer**, shown on
+  external transfer) is detected with a rising heuristic risk score, correlated, alerted **before the external transfer**, shown on
   the timeline and graph, investigated, and contained; a new-IP login to a permitted resource is **not** critical.
 * **Security and reliability:** hashed passwords and session tokens; every endpoint requires authentication except health
   and login; admin endpoints reject employees; employees cannot read other employees' restricted records; invalid
-  paths, queries and bodies never produce a 5xx; audit entries; UTC timestamps; bounded scores that match the severity bands.
+  paths, queries and bodies never produce a 5xx; audit entries; UTC timestamps; bounded scores whose bands follow the thresholds and the stage gate.
 * **Runtime:** data, sessions and the model survive a backend restart; the three Streamlit apps run against a live backend,
   employees are refused by the SOC dashboard, and the apps stay usable when the backend is unreachable.
 * **Detection, ML, SOC and investigation workflow:** normal activity, unfamiliar IP, restricted access, large export,
@@ -1198,6 +1299,13 @@ removes rows each test creates. It covers:
   credentials; per-account and per-address brute-force lockout and per-route rate limits with `Retry-After`; role
   escalation, tampered, expired, revoked and locked sessions; oversized, malformed and mistyped payloads without echoing
   input; generic 500s with no paths or stack traces; CORS, security headers, HTTPS requirement and no cookies.
+* **Scores and explanations** (`tests/test_scoring.py`): score range and monotonicity; the score is exactly its two components;
+  missing evidence (no events, no flagged events, no trained model); duplicate evidence counted once and repeats capped; impact
+  severity derived from evidence alone and reported apart from the score band and the evidence strength; one assessment explained
+  consistently by the risk API, the SOC investigation audit, the stored explanation, the alert and the export; thresholds chosen
+  from validation runs only (changing the test runs cannot move them) and within their false-flag budget; the recorded operating
+  point is the one in force and the one the README quotes; the old columns migrate with their values; and no backend or dashboard
+  text calls a heuristic a "confidence" or a probability.
 * **Persistence and multi-client behaviour** (`tests/test_persistence.py`, `tests/test_postgres.py`): see
   [what was and was not verified](#what-was-and-was-not-verified) for the list; the PostgreSQL file needs `pgserver`.
 * **Simulated containment** (`tests/test_containment_simulation.py`): each action records the alert and investigation, the
@@ -1261,9 +1369,10 @@ been reviewed or penetration-tested. What is in place, and what is not:
 
 * **Local demonstration only.** It is not hardened for production (see [Security notes](#security-notes-and-limitations)): no
   TLS of its own, no MFA, no password reset. Treat the demo accounts as exposed to anyone who can reach the dashboards.
-* **Synthetic data.** The model is trained on generated sessions; its metrics, the rule severities and the scoring weights
-  are hand-tuned for the case study and would need real data and tuning before any real use. The five confidence weights
-  are not learned from labelled outcomes.
+* **Synthetic data.** The model is trained on generated sessions; its metrics, the rule weights and the two score weights
+  (0.80 rules, 0.20 anomaly) are hand-assigned for the case study and would need real data and tuning before any real use; they are
+  not learned from labelled outcomes. The risk-band thresholds were chosen on synthetic validation runs only
+  ([the operating point](#the-operating-point-how-the-thresholds-were-chosen)); the risk score is a ranking heuristic, never a probability.
 * **The volume guard was tuned against the synthetic attacks** (see Machine learning), so its recall is in-sample.
 * **Detection quality is modest and mostly measured on synthetic data.** On the held-out CERT r4.2 users the best unsupervised
   detector has F1 about 0.2 at a 0.3 % window false-positive rate, and the supervised reference shows what labels would add. The
@@ -1282,7 +1391,7 @@ been reviewed or penetration-tested. What is in place, and what is not:
   a change token (default every 3 s) and each open SOC session costs one small request per interval; there is no push channel.
   Two simultaneous critical events for one employee are now serialised and backed by unique indexes, but this was exercised
   with a handful of parallel requests, not under load.
-* **One active investigation per employee.** Once resolved, a later critical alert opens a new one.
+* **One active investigation per employee.** Once resolved, a later Alert-band alert opens a new one.
 * **Explanations are rule-based.** They state only what the stored events show; an LLM is not used.
 * **Evidence retention.** Nothing deletes real events, but *Reset simulation* deletes synthetic events and investigations,
   by design.

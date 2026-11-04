@@ -81,6 +81,10 @@ def test_feature_pipeline_is_consistent_and_uses_all_required_features(dataset):
 
 def test_thresholds_are_configurable(monkeypatch):
     settings = get_settings()
+    assert settings.threat_suspicious_threshold <= settings.threat_high_threshold <= settings.threat_critical_threshold
+    assert settings.thresholds_source in ("calibrated", "uncalibrated defaults", "environment override")
+    hand_picked = replace(settings, threat_suspicious_threshold=25, threat_high_threshold=50, threat_critical_threshold=80)
+    monkeypatch.setattr(detection_engine, "get_settings", lambda: hand_picked)
     assert [detection_engine.level_for(s) for s in (0, 24.9, 25, 49.9, 50, 79.9, 80, 100)] == [
         "normal", "normal", "suspicious", "suspicious", "high_risk", "high_risk", "critical", "critical"]
     custom = replace(settings, threat_suspicious_threshold=10, threat_high_threshold=30, threat_critical_threshold=90)
@@ -94,7 +98,7 @@ def test_rules_are_configurable(monkeypatch):
     assert abs(sum(rules.weights().values()) - 1.0) < 1e-9
     modified = copy.deepcopy(base)
     modified["rules"]["unfamiliar_ip"]["enabled"] = False
-    modified["rules"]["large_export"]["severity"] = 0.9
+    modified["rules"]["large_export"]["weight"] = 0.9
     monkeypatch.setattr(rules, "_raw", lambda: modified)
     rules.rules.cache_clear()
     try:

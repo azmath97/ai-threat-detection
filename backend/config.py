@@ -28,6 +28,23 @@ def _bool(name: str, default: bool) -> bool:
     return default if value is None else value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+UNCALIBRATED_THRESHOLDS = {"suspicious": 25, "high_risk": 50, "critical": 80}
+
+
+def load_operating_point(path: str | Path | None = None) -> dict:
+    """The recorded operating point (risk-band thresholds chosen on validation runs); {} if none has been recorded.
+
+    Written by `python -m ml.calibrate_scoring`. Environment variables THREAT_*_THRESHOLD override it."""
+    import json
+
+    target = Path(path or os.getenv("OPERATING_POINT_PATH", str(BASE_DIR / "backend" / "operating_point.json")))
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) and isinstance(data.get("thresholds"), dict) else {}
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
@@ -70,6 +87,8 @@ class Settings:
     threat_suspicious_threshold: int
     threat_high_threshold: int
     threat_critical_threshold: int
+    thresholds_source: str              # "calibrated", "uncalibrated defaults" or "environment override"
+    ml_corroboration_threshold: float   # anomaly score from which the model counts as corroborating the rules
     alert_min_severity: str
     baseline_days: int
     detection_rules_path: str
@@ -100,6 +119,8 @@ def redact_url(url: str) -> str:
 
 @lru_cache
 def get_settings() -> Settings:
+    _op = load_operating_point()
+    _op_thresholds = {**UNCALIBRATED_THRESHOLDS, **{k: int(v) for k, v in _op.get("thresholds", {}).items() if k in UNCALIBRATED_THRESHOLDS}}
     default_db = f"sqlite:///{(BASE_DIR / 'data' / 'insider_threat.db').as_posix()}"
     db_url = normalize_database_url(_str("DATABASE_URL", default_db))
     if db_url.startswith("sqlite:///./"):
@@ -151,9 +172,13 @@ def get_settings() -> Settings:
         max_page_size=max(10, _int("MAX_PAGE_SIZE", 500)),
         correlation_window_minutes=_int("CORRELATION_WINDOW_MINUTES", 240),
         investigation_window_hours=_int("INVESTIGATION_WINDOW_HOURS", 24),
-        threat_suspicious_threshold=_int("THREAT_SUSPICIOUS_THRESHOLD", 25),
-        threat_high_threshold=_int("THREAT_HIGH_THRESHOLD", 50),
-        threat_critical_threshold=_int("THREAT_CRITICAL_THRESHOLD", 80),
+        threat_suspicious_threshold=_int("THREAT_SUSPICIOUS_THRESHOLD", _op_thresholds["suspicious"]),
+        threat_high_threshold=_int("THREAT_HIGH_THRESHOLD", _op_thresholds["high_risk"]),
+        threat_critical_threshold=_int("THREAT_CRITICAL_THRESHOLD", _op_thresholds["critical"]),
+        thresholds_source=("environment override" if any(os.getenv(n) for n in (
+            "THREAT_SUSPICIOUS_THRESHOLD", "THREAT_HIGH_THRESHOLD", "THREAT_CRITICAL_THRESHOLD"))
+            else "calibrated" if _op else "uncalibrated defaults"),
+        ml_corroboration_threshold=float(os.getenv("ML_CORROBORATION_THRESHOLD", _op.get("ml_corroboration_threshold", 0.5))),
         alert_min_severity=_str("ALERT_MIN_SEVERITY", "critical"),
         baseline_days=_int("BASELINE_DAYS", 30),
         detection_rules_path=_str("DETECTION_RULES_PATH", str(BASE_DIR / "backend" / "detection_rules.json")),

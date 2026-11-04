@@ -12,11 +12,11 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend import investigation_service
+from backend import investigation_service, scoring
 from backend.catalog import SEVERITY_LABELS, STAGE_LABELS, STAGES
 from backend.config import get_settings, to_local
 from backend.database import utcnow
-from backend.detection_engine import level_for, linked_employee_ids
+from backend.detection_engine import linked_employee_ids
 from backend.models import (
     AttackInvestigation,
     ContainmentAction,
@@ -82,7 +82,7 @@ def build(db: Session, investigation: AttackInvestigation, admin: Employee) -> d
                       "last_seen": evs[-1]["timestamp"] if evs else None})
 
     case = inv.case_file or {}
-    level = level_for(inv.risk_score)
+    level = scoring.stored_band(inv.explanation, inv.risk_score_exact)
     first = next((e for e in events if e["event_id"] == inv.first_event_id), None)
     latest = next((e for e in events if e["event_id"] == inv.latest_event_id), None)
     brief = lambda e: None if e is None else {"event_id": e["event_id"], "timestamp": e["timestamp"], "event_type": e["event_type"],
@@ -100,22 +100,27 @@ def build(db: Session, investigation: AttackInvestigation, admin: Employee) -> d
             "investigation_id": inv.id, "employee_id": employee.employee_code, "department": employee.department,
             "job_role": employee.job_role, "status": inv.status, "created_at": _times(inv.created_at),
             "updated_at": _times(inv.updated_at), "resolved_at": _times(inv.closed_at),
-            "attack_confidence": inv.risk_score, "severity": level, "severity_label": SEVERITY_LABELS[level],
+            "heuristic_risk_score": inv.risk_score_exact, "risk_score_note": "hand-weighted evidence score 0-100; not a probability",
+            "risk_band": level, "risk_band_label": SEVERITY_LABELS[level],
+            "impact_severity": inv.impact_severity, "evidence_strength": inv.evidence_strength,
             "current_stage": inv.attack_stage, "current_stage_label": STAGE_LABELS.get(inv.attack_stage, inv.attack_stage),
             "attack_type": (inv.explanation or {}).get("attack_type"), "summary": inv.summary,
             "first_suspicious_event": brief(first), "latest_suspicious_event": brief(latest),
             "sessions": case.get("sessions", []), "suspicious_ips": case.get("suspicious_ips", []),
             "related_accounts": case.get("related_accounts", []), "sensitive_resources": case.get("sensitive_resources", []),
             "alert": None if alert is None else {
-                "alert_id": alert.id, "severity": alert.severity, "status": alert.status, "title": alert.title,
+                "alert_id": alert.id, "risk_band": alert.severity, "impact_severity": alert.impact_severity,
+                "evidence_strength": alert.evidence_strength, "status": alert.status, "title": alert.title,
                 "detected_at": _times(alert.detected_at), "triggering_event_id": alert.event_id,
-                "first_event_id": alert.first_event_id, "attack_confidence": alert.attack_confidence},
+                "first_event_id": alert.first_event_id, "peak_heuristic_risk_score": alert.peak_risk_score,
+                "score_basis": alert.score_basis},
         },
         "attack_timeline": {"stages": lanes, "events": [{k: e[k] for k in ("event_id", "timestamp", "account", "event_type", "resource",
                                                                          "outcome", "source_ip", "stages", "rules")} for e in events]},
         "correlated_events": events,
-        "risk_score_history": [{"assessment_id": a.id, "event_id": a.event_id, "timestamp": _times(a.created_at), "score": a.score,
-                                "level": a.level, "stage": a.stage, "ml_score": a.ml_score} for a in assessments],
+        "risk_score_history": [{"assessment_id": a.id, "event_id": a.event_id, "timestamp": _times(a.created_at), "heuristic_risk_score": a.score,
+                                "risk_band": a.level, "impact_severity": a.impact_severity, "evidence_strength": a.evidence_strength,
+                                "stage": a.stage, "anomaly_score": a.ml_score} for a in assessments],
         "data_exposure_assessment": {**(inv.exposure or {}), "case_totals": case.get("data", {})},
         "containment_actions": [{"action_id": a.id, "action": a.action_type, "target_employee_id": codes.get(a.employee_id),
                                  "investigation_id": a.investigation_id, "alert_id": a.alert_id, "status": a.status,

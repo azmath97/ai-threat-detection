@@ -2,6 +2,8 @@
 import pytest
 from conftest import auth_header
 
+from backend.config import get_settings
+
 ATTACKER_IP = "185.220.101.45"
 STEPS = ["unfamiliar_login", "restricted_access", "large_export", "admin_login_failures",
          "create_privileged_account", "privileged_login", "external_transfer"]
@@ -41,8 +43,10 @@ def test_overview_kpis_come_from_the_database_and_react_to_an_attack(client, adm
     stats = client.get("/api/dashboard/stats", headers=admin).json()
     assert before["kpis"]["total_events"] == stats["events_total"]
     assert before["kpis"]["critical_alerts"] == 0 and before["kpis"]["confirmed_external_transfers"] == 0
-    assert before["thresholds"] == {"suspicious": 25, "high_risk": 50, "critical": 80}
-    assert len(before["events_per_hour"]) == 24 and sum(before["employees_by_severity"].values()) == 11
+    s = get_settings()
+    assert before["thresholds"] == {"suspicious": s.threat_suspicious_threshold, "high_risk": s.threat_high_threshold,
+                                    "critical": s.threat_critical_threshold, "source": s.thresholds_source}
+    assert len(before["events_per_hour"]) == 24 and sum(before["employees_by_risk_band"].values()) == 11
 
     run_steps(client, admin, "david.kumar", STEPS)
     after = soc(client, admin, "overview")
@@ -52,12 +56,12 @@ def test_overview_kpis_come_from_the_database_and_react_to_an_attack(client, adm
     assert k1["confirmed_external_transfers"] == 1
     assert k1["sensitive_records_accessed"] >= k0["sensitive_records_accessed"] + 25_000
     (threat,) = [t for t in after["threats"] if t["employee_id"] == "EMP-1004"]
-    assert threat["level"] == "critical" and threat["confidence"] >= 80 and threat["stage"] == "exfiltration"
+    assert threat["level"] == "critical" and threat["risk_score"] >= 80 and threat["stage"] == "exfiltration"
     assert threat["exposure_status"] == "confirmed_external_transfer" and threat["last_event_at"]["local"]
     assert threat["investigation_status"] == "open" and threat["alert_id"]
-    history = soc(client, admin, "confidence-history", employee_id=threat["employee_pk"])
-    scores = [h["score"] for h in history]
-    assert len(scores) >= 7 and scores == sorted(scores)      # confidence only rises as related evidence arrives
+    history = soc(client, admin, "risk-history", employee_id=threat["employee_pk"])
+    scores = [h["risk_score"] for h in history]
+    assert len(scores) >= 7 and scores == sorted(scores)      # the risk score only rises as related evidence arrives
 
 
 def test_change_token_moves_only_when_something_happens(client, admin):
@@ -77,7 +81,7 @@ def test_live_feed_fields_and_filters(client, admin):
     assert [r["id"] for r in rows] == sorted((r["id"] for r in rows), reverse=True) and feed["latest_id"] == rows[0]["id"]
     row = rows[0]
     assert {"timestamp", "employee_id", "event_type", "source_ip", "resource", "outcome", "anomaly_score",
-            "risk_contribution", "stage", "severity"} <= set(row)
+            "risk_contribution", "stage", "risk_band"} <= set(row)
     assert row["employee_id"] == "EMP-1004" and row["anomaly_score"] is not None and row["synthetic"]
 
     david = soc(client, admin, "events", employee="EMP-1004", ip=ATTACKER_IP)["rows"]
@@ -85,11 +89,11 @@ def test_live_feed_fields_and_filters(client, admin):
     failed = soc(client, admin, "events", event_type="login_failed", employee="EMP-1004")["rows"]
     assert len(failed) >= 5 and all(r["event_type"] == "login_failed" for r in failed)
     assert any(r["stage"] == "credential_misuse" for r in failed)
-    critical = soc(client, admin, "events", severity="critical")["rows"]
-    assert critical and all(r["severity"] == "critical" for r in critical)
+    critical = soc(client, admin, "events", risk_band="critical")["rows"]
+    assert critical and all(r["risk_band"] == "critical" for r in critical)
     assert soc(client, admin, "events", minutes=5, employee="EMP-1004")["rows"]
     assert soc(client, admin, "events", ip="203.0.113.250")["rows"] == []
-    assert client.get("/api/soc/events", headers=admin, params={"severity": "bogus"}).status_code == 422
+    assert client.get("/api/soc/events", headers=admin, params={"risk_band": "bogus"}).status_code == 422
 
 
 def test_investigation_list_and_detail(client, admin):

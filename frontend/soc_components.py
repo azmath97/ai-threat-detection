@@ -1,4 +1,4 @@
-"""SOC dashboard presentation: KPI cards, confidence gauge, stage strip and Plotly charts.
+"""SOC dashboard presentation: KPI cards, risk-score gauge, stage strip and Plotly charts.
 
 Every function here only renders data handed to it by the backend; nothing is computed or hardcoded for display.
 """
@@ -12,7 +12,13 @@ from frontend.theme import SANS, SERIF, SOC_CSS
 
 INK, ACCENT, GREY = "#17212B", "#1E6F5C", "#8B969E"
 SEVERITY_COLOURS = {"normal": "#2F8466", "suspicious": "#D4A02D", "high_risk": "#D9742A", "critical": "#C2403A"}
-SEVERITY_LABELS = {"normal": "Normal", "suspicious": "Suspicious", "high_risk": "High Risk", "critical": "Critical"}
+# Risk band: a band of the heuristic risk score (not impact, not a probability). Impact severity and evidence strength are
+# separate quantities with their own colours so they are never mistaken for the band.
+SEVERITY_LABELS = {"normal": "Normal", "suspicious": "Watch", "high_risk": "Elevated", "critical": "Alert"}
+IMPACT_LABELS = {"none": "None", "low": "Low", "medium": "Medium", "high": "High", "critical": "Critical"}
+IMPACT_COLOURS = {"none": "#8B969E", "low": "#5E6B75", "medium": "#8A5A12", "high": "#9A3F10", "critical": "#8E1F1F"}
+STRENGTH_LABELS = {"none": "No evidence", "weak": "Weak", "moderate": "Moderate", "strong": "Strong"}
+BAND_NOTE = "Risk band: a threshold on the heuristic risk score, limited by how many independent attack stages the evidence spans."
 FONT = SANS.replace('"', "")
 
 ICONS = {   # 24x24 stroke icons (Lucide-style paths)
@@ -32,7 +38,22 @@ def inject() -> None:
 
 
 def severity_badge(level: str) -> str:
-    return f'<span class="sev sev-{level}">{html.escape(SEVERITY_LABELS.get(level, level))}</span>'
+    """The risk band badge."""
+    return f'<span class="sev sev-{level}" title="{html.escape(BAND_NOTE)}">{html.escape(SEVERITY_LABELS.get(level, level))}</span>'
+
+
+def impact_badge(level: str | None) -> str:
+    """Impact severity: a bordered label (not a filled pill), so it reads differently from the risk band."""
+    label = IMPACT_LABELS.get(level or "", "Not assessed")
+    colour = IMPACT_COLOURS.get(level or "", GREY)
+    return (f'<span class="imp" style="color:{colour};border-color:{colour}" title="Impact severity: what the evidence shows was '
+            f'accessed, exported or changed. Independent of the risk score.">Impact {html.escape(label)}</span>')
+
+
+def strength_badge(level: str | None) -> str:
+    label = STRENGTH_LABELS.get(level or "", "Not assessed")
+    return (f'<span class="imp" style="color:{INK};border-color:{GREY}" title="Evidence strength: how well independent evidence '
+            f'corroborates the finding. A qualitative reading, not a probability.">Evidence {html.escape(label)}</span>')
 
 
 def sparkline(values: list[float], colour: str = ACCENT) -> str:
@@ -65,22 +86,24 @@ def kpi_grid(tiles: list[tuple]) -> None:
     st.markdown(f'<div class="kpi-grid">{cards}</div>', unsafe_allow_html=True)
 
 
-def meter(confidence: float, level: str, thresholds: dict) -> str:
+def meter(risk_score: float, level: str, thresholds: dict, impact: str | None = None, strength: str | None = None) -> str:
     """Ring gauge plus a segmented bar; band widths come from the backend's configured thresholds."""
     s, h, c = thresholds["suspicious"], thresholds["high_risk"], thresholds["critical"]
     bands = [("normal", 0, s), ("suspicious", s, h), ("high_risk", h, c), ("critical", c, 100)]
     segments = "".join(f'<div class="band" style="width:{hi - lo}%;background:{SEVERITY_COLOURS[name]}"></div>' for name, lo, hi in bands)
     marks = "".join(f'<span style="left:{v}%">{v}</span>' for v in (0, s, h, c, 100))
     circumference = 2 * 3.14159265 * 56
-    offset = circumference * (1 - min(max(confidence, 0), 100) / 100)
+    offset = circumference * (1 - min(max(risk_score, 0), 100) / 100)
     ring = (f'<div class="m-ring"><svg viewBox="0 0 140 140"><circle class="track" cx="70" cy="70" r="56" fill="none" stroke-width="12"/>'
             f'<circle class="arc" cx="70" cy="70" r="56" fill="none" stroke-width="12" stroke-linecap="round" stroke="{SEVERITY_COLOURS[level]}" '
             f'stroke-dasharray="{circumference:.1f}" stroke-dashoffset="{offset:.1f}"/></svg>'
-            f'<div class="m-score"><b>{confidence:.1f}</b><span class="m-of">of 100</span></div></div>')
-    return (f'<div class="meter">{ring}<div class="m-body"><div class="m-head"><span class="m-title">Attack confidence</span>'
-            f'{severity_badge(level)}</div><div class="m-bar">{segments}<div class="marker" style="left:calc({min(confidence, 100)}% - 1px)"></div></div>'
+            f'<div class="m-score"><b>{risk_score:.1f}</b><span class="m-of">of 100</span></div></div>')
+    return (f'<div class="meter">{ring}<div class="m-body"><div class="m-head"><span class="m-title" title="A hand-weighted evidence score. Not a probability.">Heuristic risk score</span>'
+            f'{severity_badge(level)}{impact_badge(impact) if impact else ""}{strength_badge(strength) if strength else ""}</div>'
+            f'<div class="m-bar">{segments}<div class="marker" style="left:calc({min(risk_score, 100)}% - 1px)"></div></div>'
             f'<div class="m-scale">{marks}</div>'
-            f'<div class="m-legend">Normal &lt; {s} &lt;= Suspicious &lt; {h} &lt;= High Risk &lt; {c} &lt;= Critical</div></div></div>')
+            f'<div class="m-legend">Risk band: Normal &lt; {s} &lt;= Watch; Elevated from {h} (needs 2 independent stages); Alert from {c} '
+            f'(needs 3). Thresholds: {html.escape(str(thresholds.get("source", "")))}. A score is not a probability.</div></div></div>')
 
 
 def stage_strip(stages: list[dict]) -> str:
@@ -129,20 +152,20 @@ def severity_chart(counts: dict) -> go.Figure:
                            marker=dict(colors=[SEVERITY_COLOURS[n] for n in names], line=dict(color="white", width=3)),
                            textinfo="none", hovertemplate="%{label}: %{value} employees<extra></extra>"))
     fig.add_annotation(text=f"<b style='font-size:26px'>{total}</b><br><span style='color:#5E6B75'>employees</span>", showarrow=False)
-    fig.update_layout(title=dict(text="Employees by current severity"))
+    fig.update_layout(title=dict(text="Employees by current risk band"))
     return _layout(fig, 300, showlegend=True, legend=dict(orientation="h", y=-0.02, x=0.5, xanchor="center", font=dict(size=11)),
                    margin=dict(l=20, r=20, t=46, b=20))
 
 
-def confidence_chart(points: list[dict], thresholds: dict) -> go.Figure:
-    fig = go.Figure(go.Scatter(x=[p["time"]["local"] for p in points], y=[p["score"] for p in points], mode="lines+markers",
+def risk_chart(points: list[dict], thresholds: dict) -> go.Figure:
+    fig = go.Figure(go.Scatter(x=[p["time"]["local"] for p in points], y=[p["risk_score"] for p in points], mode="lines+markers",
                                line=dict(color=ACCENT, width=3, shape="hv"), marker=dict(size=7, color="white", line=dict(color=ACCENT, width=2)),
                                fill="tozeroy", fillcolor="rgba(30,111,92,0.08)", text=[p["stage"] or "none" for p in points],
-                               hovertemplate="%{x}<br>confidence %{y}<br>stage %{text}<extra></extra>"))
+                               hovertemplate="%{x}<br>heuristic risk score %{y}<br>stage %{text}<extra></extra>"))
     for name in ("suspicious", "high_risk", "critical"):
         fig.add_hline(y=thresholds[name], line=dict(color=SEVERITY_COLOURS[name], width=1, dash="dot"),
                       annotation_text=SEVERITY_LABELS[name], annotation_position="top left", annotation_font_size=10)
-    fig.update_layout(title=dict(text="Attack confidence over time (from stored assessments)"))
+    fig.update_layout(title=dict(text="Heuristic risk score over time (from stored assessments; not a probability)"))
     fig.update_yaxes(range=[0, 100])
     return _layout(fig, 300)
 

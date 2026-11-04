@@ -42,9 +42,23 @@ ACTION_TO_EVENT = {v: k for k, v in EVENT_TO_ACTION.items()}
 ACTION_REQUIRED_LEVEL = {"view": "read", "download": "read", "export": "write"}
 ACCESS_LEVEL_RANK = {"read": 1, "write": 2}
 
+# Risk band: a band of the heuristic risk score (0-100), limited by how many independent attack stages the evidence shows.
+# It decides triage order and whether an alert is raised. It says nothing about impact and is not a probability.
+# (The identifiers keep their earlier names because they are stored in the database; only the labels changed.)
 SEVERITY_LEVELS = ("normal", "suspicious", "high_risk", "critical")
 SEVERITY_RANK = {level: rank for rank, level in enumerate(SEVERITY_LEVELS)}
-SEVERITY_LABELS = {"normal": "Normal", "suspicious": "Suspicious", "high_risk": "High Risk", "critical": "Critical"}
+SEVERITY_LABELS = {"normal": "Normal", "suspicious": "Watch", "high_risk": "Elevated", "critical": "Alert"}
+
+# Impact severity: how much harm the evidence shows has happened or is under way. Derived from what was accessed,
+# exported or changed, never from the risk score or the anomaly model, so a high-impact event can be reported while the
+# detector is still uncertain.
+IMPACT_LEVELS = ("none", "low", "medium", "high", "critical")
+IMPACT_RANK = {level: rank for rank, level in enumerate(IMPACT_LEVELS)}
+IMPACT_LABELS = {"none": "None", "low": "Low", "medium": "Medium", "high": "High", "critical": "Critical"}
+
+# Evidence strength: a qualitative reading of how well independent evidence corroborates the finding. It is not a probability.
+STRENGTH_LEVELS = ("none", "weak", "moderate", "strong")
+STRENGTH_LABELS = {"none": "No evidence", "weak": "Weak", "moderate": "Moderate", "strong": "Strong"}
 
 # Attack stages in progression order. Evidence decides which are present; no fixed sequence is required.
 STAGES = (

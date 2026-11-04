@@ -23,10 +23,10 @@ def overview(_: AuthContext = Depends(require_admin), db: Session = Depends(get_
     return soc_service.overview(db)
 
 
-@router.get("/confidence-history")
-def confidence_history(employee_id: int = Query(gt=0), minutes: int = Query(120, ge=5, le=1440),
+@router.get("/risk-history")
+def risk_history(employee_id: int = Query(gt=0), minutes: int = Query(120, ge=5, le=1440),
                        _: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
-    return soc_service.confidence_history(db, employee_id, minutes)
+    return soc_service.risk_history(db, employee_id, minutes)
 
 
 @router.get("/events")
@@ -34,7 +34,7 @@ def events(
     employee: str | None = Query(None, max_length=16, description="Employee ID, e.g. EMP-1004"),
     ip: str | None = Query(None, max_length=45),
     event_type: str | None = Query(None),
-    severity: str | None = Query(None),
+    risk_band: str | None = Query(None, description="normal | suspicious | high_risk | critical (Normal / Watch / Elevated / Alert)"),
     minutes: int | None = Query(None, ge=1, le=60 * 24 * 90),
     limit: int = Query(100, ge=1, le=_MAX_PAGE),
     before_id: int | None = Query(None, gt=0, description="Keyset pagination: only events older than this event id"),
@@ -43,9 +43,9 @@ def events(
 ):
     if event_type and event_type not in EVENT_TYPES:
         raise HTTPException(422, f"event_type must be one of {', '.join(EVENT_TYPES)}")
-    if severity and severity not in SEVERITY_LEVELS:
-        raise HTTPException(422, f"severity must be one of {', '.join(SEVERITY_LEVELS)}")
-    return soc_service.event_feed(db, employee=employee, ip=ip, event_type=event_type, severity=severity,
+    if risk_band and risk_band not in SEVERITY_LEVELS:
+        raise HTTPException(422, f"risk_band must be one of {', '.join(SEVERITY_LEVELS)}")
+    return soc_service.event_feed(db, employee=employee, ip=ip, event_type=event_type, risk_band=risk_band,
                                   minutes=minutes, limit=limit, before_id=before_id)
 
 

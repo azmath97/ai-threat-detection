@@ -225,16 +225,19 @@ def build_report(db: Session, employee: Employee, as_of: datetime | None = None,
 
     if threat.correlation and threat.correlation.stages:
         chain = " -> ".join(STAGE_LABELS[s] for s in threat.correlation.stage_history)
-        summary = (f"{employee.employee_code} ({employee.job_role}, {employee.department}): attack confidence {threat.score}/100 "
-                   f"({SEVERITY_LABELS[threat.level]}). Current stage: {threat.stage_label}. Observed stages: {chain}. "
+        summary = (f"{employee.employee_code} ({employee.job_role}, {employee.department}): heuristic risk score {threat.risk_score:.1f}/100 "
+                   f"(not a probability), risk band {SEVERITY_LABELS[threat.level]}; impact severity {threat.impact['label']}; "
+                   f"evidence strength {threat.strength['label']}. Current stage: {threat.stage_label}. Observed stages: {chain}. "
                    f"{exposure['statement']}")
     else:
-        summary = (f"No correlated attack evidence for {employee.employee_code}. Attack confidence {threat.score}/100 "
-                   f"({SEVERITY_LABELS[threat.level]}).")
+        summary = (f"No correlated attack evidence for {employee.employee_code}. Heuristic risk score {threat.risk_score:.1f}/100 "
+                   f"(risk band {SEVERITY_LABELS[threat.level]}).")
     return {
         "attack_stage": threat.stage,
-        "confidence": round(threat.confidence / 100, 4),
+        "risk_score_exact": threat.risk_score,
         "risk_score": threat.score,
+        "impact_severity": threat.impact["level"],
+        "evidence_strength": threat.strength["level"],
         "summary": summary,
         "timeline": timeline,
         "indicators": indicators,

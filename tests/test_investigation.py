@@ -48,7 +48,7 @@ def test_critical_alert_creates_an_investigation_with_a_complete_case_file(clien
     attack(client, admin, "david.kumar", STEPS[:3])                      # stops before the external transfer
     alerts = client.get("/api/alerts", headers=admin).json()
     (alert,) = [a for a in alerts if a["employee_username"] == "david.kumar"]
-    assert alert["severity"] == "critical" and alert["investigation_id"]
+    assert alert["risk_band"] == "critical" and alert["investigation_id"]
     inv = detail(client, admin, alert["investigation_id"])
 
     assert inv["employee_username"] == "david.kumar" and inv["status"] == "open" and inv["id"] == alert["investigation_id"]
@@ -141,7 +141,7 @@ def test_explanation_is_built_only_from_real_events(client, admin):
 
     attack(client, admin, "david.kumar", STEPS[3:])
     full = client.get(f"/api/investigations/{inv_id}/explanation", headers=admin).json()["explanation"]
-    for section in ("attack_type", "current_stage", "suspicious_activities", "supporting_evidence", "confidence", "potential_impact",
+    for section in ("attack_type", "current_stage", "suspicious_activities", "supporting_evidence", "risk_assessment", "potential_impact",
                     "recommended_containment", "missing_evidence", "alternative_explanations", "attribution"):
         assert full[section], section
     assert full["attack_type"]["type"] == "confirmed_external_transfer" and full["current_stage"]["key"] == "exfiltration"
@@ -149,7 +149,7 @@ def test_explanation_is_built_only_from_real_events(client, admin):
     assert all(kinds[k]["supported"] for k in ("confirmed_external_transfer", "privilege_escalation", "unauthorised_data_export",
                                                 "compromised_credentials", "automated_account_exploitation"))
     assert "not who was operating it" in full["attribution"] and "identity" in full["attribution"]
-    assert full["confidence"]["score"] >= 90 and full["synthetic"] is True
+    assert full["risk_assessment"]["risk_score"] >= 90 and full["synthetic"] is True
     assert "bank" in full["simulation_notice"]
 
     # every referenced event is a real stored event, with its real timestamp and address
@@ -302,7 +302,7 @@ def test_export_contains_only_the_selected_investigation(client, admin):
                            "data_exposure_assessment", "containment_actions", "investigation_findings", "evidence_integrity"}
     summary = report["incident_summary"]
     assert summary["investigation_id"] == david_id and summary["employee_id"] == "EMP-1004"
-    assert summary["attack_confidence"] >= 90 and summary["current_stage"] == "exfiltration"
+    assert summary["heuristic_risk_score"] >= 90 and summary["current_stage"] == "exfiltration"
     assert summary["first_suspicious_event"]["event_id"] < summary["latest_suspicious_event"]["event_id"]
     assert report["report"]["generated_by"] == "SEC-9011" and report["report"]["synthetic"] is True
 
@@ -314,7 +314,7 @@ def test_export_contains_only_the_selected_investigation(client, admin):
     assert {e["event_id"] for e in report["attack_timeline"]["events"]} == ids
     assert all(s["event_ids"] and set(s["event_ids"]) <= ids for s in report["attack_timeline"]["stages"] if s["reached"])
     history = report["risk_score_history"]
-    assert history and all(h["event_id"] in ids for h in history) and [h["score"] for h in history] == sorted(h["score"] for h in history)
+    assert history and all(h["event_id"] in ids for h in history) and [h["heuristic_risk_score"] for h in history] == sorted(h["heuristic_risk_score"] for h in history)
     exposure = report["data_exposure_assessment"]
     assert exposure["status"] == "confirmed_external_transfer" and exposure["records_confirmed_external"] == 25_000
     assert exposure["case_totals"]["confirmed_external_transfers"] == 1
@@ -347,9 +347,9 @@ def test_the_complete_workflow_end_to_end(client, admin):
     results = attack(client, admin, "david.kumar", STEPS[:4])
     assert all(r["status"] == "completed" for r in results)
     mine = [a for a in client.get("/api/alerts", headers=admin).json() if a["employee_username"] == "david.kumar"]
-    assert len(mine) == 1, [(a["id"], a["status"], a["severity"], a["detected_at"], a["investigation_id"]) for a in mine]
+    assert len(mine) == 1, [(a["id"], a["status"], a["risk_band"], a["detected_at"], a["investigation_id"]) for a in mine]
     (alert,) = mine
-    assert alert["severity"] == "critical"
+    assert alert["risk_band"] == "critical"
     exposure = alert["exposure"]
     assert not exposure["external_transfer_confirmed"]                  # critical before the final external transfer
     inv = detail(client, admin, alert["investigation_id"])

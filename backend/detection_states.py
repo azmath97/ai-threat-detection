@@ -5,6 +5,8 @@ the simulation knows which events it generated (they are flagged synthetic with 
 "confirmed (simulation ground truth)". Live, non-simulated activity can never reach that state; the CERT dataset
 benchmark has its own ground truth (the official answer key) and is evaluated offline (docs/detection-evaluation.md).
 """
+from backend.config import get_settings
+
 STATE_ORDER = ("anomalous_activity", "suspicious_sequence", "potential_data_exposure", "confirmed_ground_truth", "containment_completed")
 
 STATE_LABELS = {
@@ -16,7 +18,7 @@ STATE_LABELS = {
 }
 
 STATE_DEFINITIONS = {
-    "anomalous_activity": "Model output: the anomaly model scores the current behaviour at or above 0.5 against the employee's baseline. "
+    "anomalous_activity": "Model output: the anomaly score (0-1, not a probability) is at or above the corroboration threshold chosen on validation runs. "
                           "It says the behaviour is unusual, not that it is malicious.",
     "suspicious_sequence": "Correlation output: two or more independent attack stages are linked to the same employee, session, address or "
                            "created account inside the correlation window. An inference from events, not a confirmation.",
@@ -28,7 +30,6 @@ STATE_DEFINITIONS = {
     "containment_completed": "A containment action completed against the simulated environment (application state only; no real network).",
 }
 
-ANOMALY_THRESHOLD = 0.5
 EXPOSURE_VERIFIED_STATUSES = ("confirmed_export", "confirmed_external_transfer")
 
 
@@ -36,15 +37,16 @@ def derive(*, anomaly_score: float, independent_stages: int, exposure_status: st
            containment_actions: int) -> list[dict]:
     """Every state with whether it is active and the basis for that, in a fixed order."""
     verified = exposure_status in EXPOSURE_VERIFIED_STATUSES
+    threshold = get_settings().ml_corroboration_threshold
     active = {
-        "anomalous_activity": anomaly_score >= ANOMALY_THRESHOLD,
+        "anomalous_activity": anomaly_score >= threshold,
         "suspicious_sequence": independent_stages >= 2,
         "potential_data_exposure": exposure_status != "none",
         "confirmed_ground_truth": bool(ground_truth_simulation),
         "containment_completed": containment_actions > 0,
     }
     basis = {
-        "anomalous_activity": f"anomaly score {anomaly_score:.2f} (threshold {ANOMALY_THRESHOLD})",
+        "anomalous_activity": f"anomaly score {anomaly_score:.2f} (threshold {threshold:.2f}, chosen on validation runs)",
         "suspicious_sequence": f"{independent_stages} independent stage(s) correlated",
         "potential_data_exposure": (f"exposure status '{exposure_status}'" + ("; an export or transfer event is itself verified" if verified else
                                                                               "; no verified export or transfer event")),

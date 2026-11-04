@@ -1,0 +1,385 @@
+{
+  "status": "calibrated on synthetic validation runs",
+  "generated_at": "2026-11-04T15:38:19+00:00",
+  "thresholds": {
+    "suspicious": 37,
+    "high_risk": 37,
+    "critical": 37
+  },
+  "ml_corroboration_threshold": 0.45,
+  "selected_on": {
+    "split": "validation",
+    "seeds": [
+      1000,
+      1011
+    ],
+    "runs": 96,
+    "scenarios": {
+      "benign": [
+        "benign_activity",
+        "benign_bulk_transfer"
+      ],
+      "malicious": [
+        "gradual_collection_staging",
+        "bulk_export",
+        "suspicious_external_transfer",
+        "removable_media",
+        "correlated_low_signals",
+        "compromised_account_campaign"
+      ]
+    }
+  },
+  "targets": {
+    "false_flag_budget_on_benign_validation_runs": {
+      "Watch": 0.25,
+      "Elevated": 0.05,
+      "Alert": 0.0
+    },
+    "ml_false_agreement_budget": 0.05,
+    "rule": "lowest threshold whose false-flag rate on benign validation runs is within the band's budget",
+    "stage_gates": {
+      "Watch": 0,
+      "Elevated": 2,
+      "Alert": 3
+    },
+    "note": "the budgets are policy assumptions about analyst capacity, not measurements"
+  },
+  "validation": {
+    "runs": 96,
+    "malicious_runs": 72,
+    "benign_runs": 24,
+    "bands": {
+      "Watch": {
+        "threshold": 37,
+        "tp": 67,
+        "fn": 5,
+        "fp": 6,
+        "tn": 18,
+        "recall": 0.9305555555555556,
+        "miss_rate": 0.06944444444444445,
+        "false_flag_rate": 0.25,
+        "precision": 0.9178082191780822
+      },
+      "Elevated": {
+        "threshold": 37,
+        "tp": 35,
+        "fn": 37,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.4861111111111111,
+        "miss_rate": 0.5138888888888888,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      "Alert": {
+        "threshold": 37,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      }
+    }
+  },
+  "test": {
+    "seeds": [
+      2000,
+      2011
+    ],
+    "runs": 96,
+    "malicious_runs": 72,
+    "benign_runs": 24,
+    "bands": {
+      "Watch": {
+        "threshold": 37,
+        "tp": 67,
+        "fn": 5,
+        "fp": 9,
+        "tn": 15,
+        "recall": 0.9305555555555556,
+        "miss_rate": 0.06944444444444445,
+        "false_flag_rate": 0.375,
+        "precision": 0.881578947368421
+      },
+      "Elevated": {
+        "threshold": 37,
+        "tp": 35,
+        "fn": 37,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.4861111111111111,
+        "miss_rate": 0.5138888888888888,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      "Alert": {
+        "threshold": 37,
+        "tp": 23,
+        "fn": 49,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3194444444444444,
+        "miss_rate": 0.6805555555555556,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      }
+    }
+  },
+  "software": {
+    "python": "3.12.0",
+    "numpy": "2.4.6",
+    "scikit_learn": "1.7.2"
+  },
+  "limitations": [
+    "Run labels are the generator's own: a scenario is malicious by construction. There are two benign scenarios.",
+    "Test seeds are drawn from the same generators as the validation seeds, so test figures are optimistic about unseen behaviour.",
+    "The risk score is a heuristic. These thresholds are an operating point on synthetic runs, not a calibrated probability.",
+    "Not validated on real employees, real incidents or a live banking environment."
+  ],
+  "findings": [
+    "Elevated: the budget alone allowed a threshold of 0; it was raised to 37 so the bands stay ordered. For this band the independent-stage requirement, not the score threshold, is what separates benign runs from malicious ones.",
+    "Alert: the budget alone allowed a threshold of 0; it was raised to 37 so the bands stay ordered. For this band the independent-stage requirement, not the score threshold, is what separates benign runs from malicious ones.",
+    "Watch: the false-flag rate on held-out test runs (37.5%) exceeds the budget (25%) that held on validation (25.0%); a budget met on validation does not guarantee it on new seeds.",
+    "Watch: 67 of 72 malicious test runs detected (93%); 5 missed; 9 of 24 benign runs flagged.",
+    "Elevated: 35 of 72 malicious test runs detected (49%); 37 missed; 0 of 24 benign runs flagged.",
+    "Alert: 23 of 72 malicious test runs detected (32%); 49 missed; 0 of 24 benign runs flagged."
+  ],
+  "tradeoff": {
+    "alert_band_validation": [
+      {
+        "threshold": 0,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 5,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 10,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 15,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 20,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 25,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 30,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 35,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 40,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 45,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 50,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 55,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 60,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 65,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 70,
+        "tp": 22,
+        "fn": 50,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.3055555555555556,
+        "miss_rate": 0.6944444444444444,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 75,
+        "tp": 18,
+        "fn": 54,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.25,
+        "miss_rate": 0.75,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 80,
+        "tp": 18,
+        "fn": 54,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.25,
+        "miss_rate": 0.75,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 85,
+        "tp": 18,
+        "fn": 54,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.25,
+        "miss_rate": 0.75,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 90,
+        "tp": 15,
+        "fn": 57,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.20833333333333334,
+        "miss_rate": 0.7916666666666666,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 95,
+        "tp": 10,
+        "fn": 62,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.1388888888888889,
+        "miss_rate": 0.8611111111111112,
+        "false_flag_rate": 0.0,
+        "precision": 1.0
+      },
+      {
+        "threshold": 100,
+        "tp": 0,
+        "fn": 72,
+        "fp": 0,
+        "tn": 24,
+        "recall": 0.0,
+        "miss_rate": 1.0,
+        "false_flag_rate": 0.0,
+        "precision": null
+      }
+    ]
+  }
+}

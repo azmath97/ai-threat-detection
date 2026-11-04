@@ -160,6 +160,8 @@ class RiskAssessment(Base):
     stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
     components: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     exposure: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    impact_severity: Mapped[str | None] = mapped_column(String(16), nullable=True)      # impact of the evidence, not of the score
+    evidence_strength: Mapped[str | None] = mapped_column(String(16), nullable=True)    # qualitative corroboration, not a probability
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
@@ -179,8 +181,10 @@ class AttackInvestigation(Base):
     status: Mapped[str] = mapped_column(String(16), default="open", index=True)  # open | contained | resolved
     attack_stage: Mapped[str] = mapped_column(String(32), default="none")
     attack_type: Mapped[str] = mapped_column(String(48), default="none", server_default="none")
-    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    risk_score_exact: Mapped[float] = mapped_column(Float, default=0.0)         # heuristic risk score, 0-100 (not a probability)
     risk_score: Mapped[int] = mapped_column(Integer, default=0)
+    impact_severity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    evidence_strength: Mapped[str | None] = mapped_column(String(16), nullable=True)
     summary: Mapped[str] = mapped_column(Text, default="")
     timeline: Mapped[list] = mapped_column(JSON, default=list)
     indicators: Mapped[list] = mapped_column(JSON, default=list)
@@ -242,12 +246,15 @@ class SecurityAlert(Base):
     event_id: Mapped[int | None] = mapped_column(ForeignKey("security_events.id", ondelete="SET NULL"), nullable=True)
     assessment_id: Mapped[int | None] = mapped_column(ForeignKey("risk_assessments.id", ondelete="SET NULL"), nullable=True)
     investigation_id: Mapped[int | None] = mapped_column(ForeignKey("attack_investigations.id", ondelete="SET NULL"), nullable=True)
-    severity: Mapped[str] = mapped_column(String(16))
+    severity: Mapped[str] = mapped_column(String(16))   # the risk band when the alert was raised (see `risk_band`); impact is `impact_severity`
     status: Mapped[str] = mapped_column(String(16), default="open")  # open | investigating | contained | resolved | false_positive
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text)
     risk_score: Mapped[int] = mapped_column(Integer, default=0)
-    attack_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    peak_risk_score: Mapped[float] = mapped_column(Float, default=0.0)  # highest heuristic risk score (0-100) seen; not a probability
+    impact_severity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    evidence_strength: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    score_basis: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # how the score was built when the alert was raised or last raised
     stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
     first_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     evidence: Mapped[list | None] = mapped_column(JSON, nullable=True)
@@ -259,6 +266,10 @@ class SecurityAlert(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
     employee: Mapped[Employee] = relationship()
+
+    @property
+    def risk_band(self) -> str:
+        return self.severity
 
     @property
     def employee_username(self) -> str:

@@ -92,7 +92,7 @@ def run_and_log(action) -> None:
 
 
 RUN_STATUS_TEXT = {"queued": "Queued", "running": "Running", "completed": "Completed", "failed": "Failed", "cancelled": "Cancelled"}
-LEVEL_TEXT = {"normal": "Normal", "suspicious": "Suspicious", "high_risk": "High risk", "critical": "Critical"}
+LEVEL_TEXT = {"normal": "Normal", "suspicious": "Watch", "high_risk": "Elevated", "critical": "Alert"}   # risk bands
 
 
 def render_run(run: dict) -> None:
@@ -108,7 +108,7 @@ def render_run(run: dict) -> None:
         ("Simulated source address", run["source_ip"] or "employee's familiar address"),
         ("Plan fingerprint (SHA-256)", (run["plan_sha256"] or "")[:16] + "..."),
         ("Events stored", f"{observed['events']} ({observed['noise_events']} benign background)"),
-        ("Highest assessed level", LEVEL_TEXT.get(observed["peak_level"], "-") + (f" ({observed['peak_score']}/100)" if observed["peak_score"] is not None else "")),
+        ("Highest risk band reached", LEVEL_TEXT.get(observed["peak_level"], "-") + (f" (heuristic risk score {observed['peak_score']}/100)" if observed["peak_score"] is not None else "")),
         ("Alert raised by the detector", "Yes" if observed["alert_raised"] else "No"),
         ("Rules that fired", ", ".join(observed["rules_fired"]) or "None"),
     ])
@@ -224,7 +224,7 @@ def console() -> None:
                    "seed": r["seed"], "employee": r["target"]["employee_id"] if r["target"] else "-",
                    "events": r["observed"]["events"], "level": LEVEL_TEXT.get(r["observed"]["peak_level"], "-")} for r in history],
                  {"id": "Run", "scenario": "Scenario", "status": "Status", "seed": "Seed", "employee": "Employee",
-                  "events": "Events", "level": "Highest level"})
+                  "events": "Events", "level": "Highest risk band"})
 
     ui.section("Reset")
     confirm = st.checkbox("Confirm reset: removes all synthetic data and undoes containment on affected accounts")

@@ -330,7 +330,8 @@ def test_the_dockerfile_builds_the_model_and_runs_unprivileged():
     text = read("Dockerfile")
     assert "requirements-deploy.txt" in text and "python -m ml.train_model" in text
     assert "USER app" in text and 'CMD ["python", "-m", "deploy.start"]' in text and "HEALTHCHECK" in text
-    assert "/healthz" in text and "SECRET" not in text.upper().replace("SECRETS", "")
+    assert "/healthz" in text and "SECRET_KEY" not in text and "PASSWORD" not in text.upper()
+    assert "LOCAL_SECRET_FILE=/tmp/" in text           # the build's throw-away key never lands in an image layer
     for line in text.splitlines():
         if line.startswith("COPY "):
             for source in line.split()[1:-1]:

@@ -485,9 +485,15 @@ throttle remembers a failed account for five minutes, so `credential-stuffing` r
 **Self-checking version.** `python -m deploy.verify --api http://127.0.0.1:8000 --employee-password ... --admin-password ... --frontend-key ...`
 runs held-export, approval and lock checks and prints PASS or FAIL for each.
 
-**In the browser.** The portal's sign-ins and every refused API call it makes are recorded too, but locally every browser connects
-from the same machine, which the backend attributes to the employee's own registered workstation; failures from an account's own known
-address need 10 to count as brute force, and the older sign-in throttle already answers HTTP 429 after 5. Use the drill for lock demos.
+**In the browser, as a second person.** Run `python app.py all` and keep the SOC dashboard open at http://127.0.0.1:8503. The portal
+treats a browser on this machine as the employee's own workstation (that is what makes normal use look normal), so wrong passwords
+typed at `http://localhost:8501` are recorded but are not an attack: failures from an account's own known address need 10 to count as
+brute force, and the older sign-in throttle already answers HTTP 429 after 5. To be someone else, open the portal through this machine's
+network address instead, for example `http://192.168.0.107:8501` (find yours with `ipconfig`), or from a phone on the same Wi-Fi.
+The portal then reports that address to the backend, which sees an address the account has never used: five wrong passwords for
+`EMP-1010` lock the account and raise the incident, and the SOC page shows the attempts from that address. The address is the real
+network address of the browser, not something typed in a form; the backend believes it only together with `TRUSTED_FRONTEND_KEY`.
+Windows may ask to allow Python through the firewall for network access; it is not needed for `localhost`.
 
 **Bulk export by hand.** As `EMP-1001`, `POST /api/resources/financial-reports/access` with
 `{"action": "export", "record_count": 12000}` returns HTTP 409 and creates a request. In *Authentication Defence*, approve it with a

@@ -36,12 +36,34 @@ FRONTEND_KEY = os.getenv("TRUSTED_FRONTEND_KEY", "")
 CLIENT_IP_HEADER = "X-Westbridge-Client-IP"      # set by the gateway from what the hosting platform observed; never by the browser
 
 
+def pick_client_ip(gateway_value: str | None, peer: str | None) -> str | None:
+    """The address to report for a browser session.
+
+    The gateway's measurement wins (it overwrites anything the browser sent). Without a gateway, which is the local setup, the
+    TCP peer Streamlit sees is reported only when it is not loopback: a browser on this machine stays "the employee's own
+    workstation" for the backend, while a browser on another device or address (the machine's LAN address, a phone on the same
+    network) is reported as what it is."""
+    if gateway_value:
+        return gateway_value
+    if not peer:
+        return None
+    try:
+        import ipaddress
+
+        address = ipaddress.ip_address(peer)
+    except ValueError:
+        return None
+    if address.version == 6 and address.ipv4_mapped:      # Streamlit reports an IPv4 peer on a dual-stack socket as ::ffff:a.b.c.d
+        address = address.ipv4_mapped
+    return None if address.is_loopback else str(address)
+
+
 def _browser_ip() -> str | None:
-    """The end user's address for this Streamlit session, as the gateway measured it (None locally, where there is no gateway)."""
+    """The end user's address for this Streamlit session (see `pick_client_ip`)."""
     try:
         import streamlit as st
 
-        return st.context.headers.get(CLIENT_IP_HEADER) or None
+        return pick_client_ip(st.context.headers.get(CLIENT_IP_HEADER), getattr(st.context, "ip_address", None))
     except Exception:  # noqa: BLE001 - outside a Streamlit run there is simply no browser to ask
         return None
 

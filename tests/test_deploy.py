@@ -530,3 +530,12 @@ def test_the_example_settings_do_not_override_the_calibrated_thresholds():
     """`python app.py setup` copies .env.example; an uncommented THREAT_* line there would silently replace the operating point."""
     active = [line for line in read(".env.example").splitlines() if line.startswith("THREAT_")]
     assert active == []
+
+def test_the_dashboard_reports_a_non_local_browser_address_but_never_a_loopback_one():
+    from frontend.api_client import pick_client_ip
+
+    assert pick_client_ip("203.0.113.9", "127.0.0.1") == "203.0.113.9"           # the gateway's measurement wins
+    assert pick_client_ip(None, "127.0.0.1") is None and pick_client_ip(None, "::1") is None
+    assert pick_client_ip(None, "192.168.0.107") == "192.168.0.107"               # another device or address on the network
+    assert pick_client_ip(None, "::ffff:192.168.0.107") == "192.168.0.107" and pick_client_ip(None, "::ffff:127.0.0.1") is None
+    assert pick_client_ip(None, None) is None and pick_client_ip(None, "not-an-address") is None

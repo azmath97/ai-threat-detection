@@ -31,7 +31,7 @@ from backend.catalog import SEVERITY_RANK
 from backend.config import get_settings
 from backend.database import utcnow
 from backend.event_service import write_audit
-from backend.models import AuthAttempt, AuthIncident, Employee, EmployeeSession, IpBlock, ResponseAction
+from backend.models import AccessDenial, AuthAttempt, AuthIncident, Employee, EmployeeSession, IpBlock, ResponseAction
 
 log = logging.getLogger("auth_defense")
 
@@ -285,6 +285,10 @@ def planned_actions(finding: auth_detection.Finding) -> list[str]:
         "credential_stuffing": ["block_ip"] if critical else [],
         "ip_failure_burst": ["block_ip"] if critical else [],
         "login_after_failures": ["revoke_sessions", "lock_account", "block_ip"] if critical else [],
+        # refused requests: an alert first; only a clearly extreme pattern ends the account's sessions and locks it, or blocks the address
+        "repeated_forbidden_access": ["revoke_sessions", "lock_account"] if critical else [],
+        "idor_probe": ["revoke_sessions", "lock_account"] if critical else [],
+        "unauthenticated_flood": ["block_ip"] if critical else [],
     }[finding.kind]
 
 
@@ -342,15 +346,43 @@ def record_attempt(db: Session, *, ip: str, identifier: str, employee: Employee 
         return []
 
 
+def record_denial(db: Session, *, ip: str, employee: Employee | None, method: str, route: str, object_ref: str | None,
+                  status_code: int) -> list[AuthIncident]:
+    """Store one refused API request, run the detectors and apply the response policy. Never raises (see record_attempt)."""
+    policy = get_policy()
+    if not policy.enabled:
+        return []
+    try:
+        denial = AccessDenial(source_ip=ip[:45], employee_id=employee.id if employee else None, method=method[:8], route=route[:120],
+                              object_ref=(object_ref or None) and object_ref[:64], status_code=status_code, timestamp=utcnow())
+        db.add(denial)
+        db.flush()
+        incidents = []
+        for finding in auth_detection.evaluate_denial(db, denial, employee, policy):
+            incident, _ = upsert_incident(db, finding)
+            if policy.auto_response:
+                apply_policy(db, incident, finding, policy)
+            incidents.append(incident)
+        db.commit()
+        _maybe_purge(db, policy)
+        return incidents
+    except Exception:  # noqa: BLE001 - monitoring must never turn a refusal into a server error
+        db.rollback()
+        log.exception("authentication defence failed for a refused request; it was not recorded")
+        return []
+
+
 def _maybe_purge(db: Session, policy: AuthPolicy) -> None:
-    """Keep the attempt table bounded: drop attempts older than the retention period (at most once an hour)."""
+    """Keep the attempt and denial tables bounded: drop rows older than the retention period (at most once an hour)."""
     global _last_purge
     if policy.attempt_retention_days <= 0 or time.monotonic() - _last_purge < 3600:
         return
     _last_purge = time.monotonic()
     try:
-        db.execute(delete(AuthAttempt).where(AuthAttempt.timestamp < utcnow() - timedelta(days=policy.attempt_retention_days)))
+        cutoff = utcnow() - timedelta(days=policy.attempt_retention_days)
+        db.execute(delete(AuthAttempt).where(AuthAttempt.timestamp < cutoff))
+        db.execute(delete(AccessDenial).where(AccessDenial.timestamp < cutoff))
         db.commit()
     except Exception:  # noqa: BLE001
         db.rollback()
-        log.exception("could not purge old sign-in attempts")
+        log.exception("could not purge old sign-in attempts and refused requests")

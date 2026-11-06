@@ -22,6 +22,7 @@ from backend.errors import ServiceError
 from backend.event_service import write_audit
 from backend.models import (
     INCIDENT_KINDS,
+    AccessDenial,
     AuthAttempt,
     AuthIncident,
     Employee,
@@ -42,7 +43,9 @@ ACTION_LABELS = {"lock_account": "Lock account", "unlock_account": "Unlock accou
                  "block_ip": "Block address (application level)", "unblock_ip": "Remove address block"}
 KIND_LABELS = {"account_brute_force": "Brute force on one account", "credential_stuffing": "Credential stuffing (one address, many accounts)",
                "ip_failure_burst": "Burst of failures from one address", "distributed_account_attack": "One account attacked from many addresses",
-               "login_after_failures": "Successful sign-in after repeated failures"}
+               "login_after_failures": "Successful sign-in after repeated failures",
+               "repeated_forbidden_access": "Repeated refused requests by one account",
+               "idor_probe": "Probing other people's records (IDOR)", "unauthenticated_flood": "Flood of unauthenticated requests"}
 ACTIVE = ("open", "investigating", "contained")
 
 
@@ -79,6 +82,12 @@ def attempt_out(db: Session, a: AuthAttempt) -> dict:
             "reason": a.reason, "device": a.device_info}
 
 
+def denial_out(db: Session, d: AccessDenial) -> dict:
+    return {"id": d.id, "timestamp": _iso(d.timestamp), "source_ip": d.source_ip, "account": _code(db, d.employee_id) or "-",
+            "method": d.method, "route": d.route, "object": d.object_ref, "status_code": d.status_code,
+            "meaning": "no valid session" if d.status_code == 401 else "refused: not permitted"}
+
+
 # ------------------------------------------------------------------------------------------------------------- reads
 @router.get("/overview")
 def overview(hours: int = Query(24, ge=1, le=24 * 30), _: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
@@ -86,6 +95,8 @@ def overview(hours: int = Query(24, ge=1, le=24 * 30), _: AuthContext = Depends(
     since = utcnow() - timedelta(hours=hours)
     by_outcome = dict(db.execute(select(AuthAttempt.outcome, func.count(AuthAttempt.id)).where(AuthAttempt.timestamp >= since)
                                  .group_by(AuthAttempt.outcome)).all())
+    by_status = dict(db.execute(select(AccessDenial.status_code, func.count(AccessDenial.id)).where(AccessDenial.timestamp >= since)
+                                .group_by(AccessDenial.status_code)).all())
     failing_ips = db.scalar(select(func.count(func.distinct(AuthAttempt.source_ip))).where(
         AuthAttempt.timestamp >= since, AuthAttempt.outcome == "failure")) or 0
     by_severity = dict(db.execute(select(AuthIncident.severity, func.count(AuthIncident.id))
@@ -99,6 +110,7 @@ def overview(hours: int = Query(24, ge=1, le=24 * 30), _: AuthContext = Depends(
         "window_hours": hours, "scope": SCOPE_NOTICE,
         "attempts": {"total": sum(by_outcome.values()), "success": by_outcome.get("success", 0), "failure": by_outcome.get("failure", 0),
                      "denied": by_outcome.get("denied", 0), "distinct_failing_addresses": failing_ips},
+        "refused_requests": {"unauthenticated_401": by_status.get(401, 0), "forbidden_403": by_status.get(403, 0)},
         "active_incidents": {"total": sum(by_severity.values()), **{s: by_severity.get(s, 0) for s in SEVERITY_LEVELS if s != "normal"}},
         "pending_approval": pending,
         "locked_accounts": [{"employee_id": e.employee_code, "name": e.full_name, "reason": e.lock_reason, "locked_at": _iso(e.locked_at),
@@ -116,6 +128,9 @@ def overview(hours: int = Query(24, ge=1, le=24 * 30), _: AuthContext = Depends(
                    "stuffing_accounts_alert": policy.stuffing_accounts_alert, "stuffing_accounts_critical": policy.stuffing_accounts_critical,
                    "stuffing_window_minutes": policy.stuffing_window_minutes, "max_auto_locks_per_hour": policy.max_auto_locks_per_hour,
                    "max_auto_blocks_per_hour": policy.max_auto_blocks_per_hour,
+                   "forbidden_alert": policy.forbidden_alert, "forbidden_critical": policy.forbidden_critical,
+                   "idor_alert": policy.idor_alert, "idor_critical": policy.idor_critical, "unauth_alert": policy.unauth_alert,
+                   "unauth_critical": policy.unauth_critical, "access_window_minutes": policy.access_window_minutes,
                    "note": "Starting policy, configurable by environment variables; calibrate against real sign-in traffic."},
     }
 
@@ -158,13 +173,37 @@ def _incident_or_404(db: Session, incident_id: int) -> AuthIncident:
 @router.get("/incidents/{incident_id}")
 def incident_detail(incident_id: int, _: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
     incident = _incident_or_404(db, incident_id)
-    ids = (incident.evidence or {}).get("attempt_ids", [])
+    ev = incident.evidence or {}
+    out = incident_out(db, incident, detail=True)
+    if ev.get("denial_ids"):
+        rows = db.scalars(select(AccessDenial).where(AccessDenial.id.in_(ev["denial_ids"])).order_by(AccessDenial.id.desc()).limit(100))
+        return {**out, "attempts": [], "denials": [denial_out(db, d) for d in rows]}
+    ids = ev.get("attempt_ids", [])
     query = select(AuthAttempt).order_by(AuthAttempt.id.desc()).limit(100)
     if ids:
         query = query.where(AuthAttempt.id.in_(ids))
     elif incident.source_ip:
         query = query.where(AuthAttempt.source_ip == incident.source_ip)
-    return {**incident_out(db, incident, detail=True), "attempts": [attempt_out(db, a) for a in db.scalars(query)]}
+    return {**out, "attempts": [attempt_out(db, a) for a in db.scalars(query)], "denials": []}
+
+
+@router.get("/denials")
+def denials(ip: str | None = Query(None, max_length=45), account: str | None = Query(None, max_length=16),
+            status_filter: int | None = Query(None, alias="status", ge=401, le=403), minutes: int = Query(60, ge=1, le=60 * 24 * 30),
+            limit: int = Query(100, ge=1, le=_MAX_PAGE), before_id: int | None = Query(None, gt=0),
+            _: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
+    """Real API requests the backend refused with 401 or 403 (newest first). Route templates and ids only; never tokens or bodies."""
+    query = select(AccessDenial).where(AccessDenial.timestamp >= utcnow() - timedelta(minutes=minutes)).order_by(AccessDenial.id.desc()).limit(limit)
+    if ip:
+        query = query.where(AccessDenial.source_ip == ip)
+    if account:
+        emp_id = db.scalar(select(Employee.id).where(Employee.employee_code == account.upper()))
+        query = query.where(AccessDenial.employee_id == (emp_id or -1))
+    if status_filter in (401, 403):
+        query = query.where(AccessDenial.status_code == status_filter)
+    if before_id:
+        query = query.where(AccessDenial.id < before_id)
+    return {"rows": [denial_out(db, d) for d in db.scalars(query)]}
 
 
 @router.get("/attempts")

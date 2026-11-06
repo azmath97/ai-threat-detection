@@ -57,6 +57,15 @@ class AuthPolicy:
     # success after failures
     success_after_failures: int
     success_window_minutes: int
+    # refused requests (401 / 403)
+    forbidden_alert: int                # 403s for one account within access_window_minutes: high risk
+    forbidden_critical: int             # ... and critical
+    idor_alert: int                     # different objects refused on one route for one account: probing (high risk)
+    idor_critical: int
+    unauth_alert: int                   # 401s from one address within access_window_minutes: high risk
+    unauth_critical: int
+    access_window_minutes: int
+    denial_record_limit_per_minute: int  # at most this many refused requests are stored per address per minute (flood cap)
     # safeguards
     max_auto_locks_per_hour: int
     max_auto_blocks_per_hour: int
@@ -85,6 +94,14 @@ def get_policy() -> AuthPolicy:
         distributed_window_minutes=_int("DISTRIBUTED_WINDOW_MINUTES", 10),
         success_after_failures=_int("SUCCESS_AFTER_FAILURES", 3),
         success_window_minutes=_int("SUCCESS_AFTER_FAILURES_WINDOW_MINUTES", 10),
+        forbidden_alert=_int("FORBIDDEN_ALERT", 10),
+        forbidden_critical=_int("FORBIDDEN_CRITICAL", 30),
+        idor_alert=_int("IDOR_DISTINCT_ALERT", 5),
+        idor_critical=_int("IDOR_DISTINCT_CRITICAL", 10),
+        unauth_alert=_int("UNAUTH_FLOOD_ALERT", 30),
+        unauth_critical=_int("UNAUTH_FLOOD_CRITICAL", 100),
+        access_window_minutes=_int("ACCESS_WINDOW_MINUTES", 5),
+        denial_record_limit_per_minute=_int("DENIAL_RECORD_LIMIT_PER_MINUTE", 120),
         max_auto_locks_per_hour=_int("MAX_AUTO_LOCKS_PER_HOUR", 10),
         max_auto_blocks_per_hour=_int("MAX_AUTO_BLOCKS_PER_HOUR", 10),
         protected_networks=_networks(os.getenv("PROTECTED_IPS", "")),

@@ -45,3 +45,21 @@ def test_an_analyst_sees_a_real_attack_and_recovers_the_account_through_the_page
     assert backend.get("/api/soc/auth/overview", admin)["locked_accounts"] == []
     done = [a for a in backend.get("/api/soc/auth/actions", admin)["rows"] if a["action"] == "unlock_account"]
     assert done and done[0]["status"] == "completed" and not done[0]["automatic"] and done[0]["performed_by"] == "SEC-9011"
+
+
+def test_the_page_shows_idor_probing_with_the_refused_requests_as_evidence(backend, monkeypatch):
+    from data.demo_accounts import demo_password
+
+    admin = backend.login("SEC-9011", ADMIN_PASSWORD)
+    pks = {e["employee_code"]: e["id"] for e in backend.get("/api/employees", admin)}
+    carol = backend.login("EMP-1003", demo_password("EMP-1003"))
+    for code, pk in [(c, p) for c, p in pks.items() if c != "EMP-1003"][:5]:
+        assert requests.get(f"{backend.url}/api/employees/{pk}", headers=carol, timeout=15).status_code == 403
+
+    at = _sign_in(_run_app("frontend/soc_dashboard.py", backend, monkeypatch), "SEC-9011", ADMIN_PASSWORD)
+    at = at.button(key="nav_Authentication Defence").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    shown = " ".join(str(m.value) for m in at.markdown) + _page_text(at)
+    assert "EMP-1003 was refused 5 different records on /api/employees/{employee_id}" in shown
+    assert "Recent refused requests" in shown or any("Recent refused requests" in str(m.value) for m in at.markdown)
+    assert "/api/employees/{employee_id}" in shown and "simulat" not in shown.lower()

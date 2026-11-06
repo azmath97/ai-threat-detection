@@ -80,7 +80,10 @@ def incident_detail(h: dict, incident_id: int) -> None:
     st.caption(d["severity_note"])
     e = d["evidence"]
     rows = [("Rule", e.get("rule", "-")), ("Window", f"{e['window_minutes']} minutes" if e.get("window_minutes") else "-"),
-            ("Threshold", e.get("threshold", "-")), ("Failures counted", e.get("failures", e.get("failures_before", "-"))),
+            ("Threshold", e.get("threshold", "-")),
+            ("Failures / refusals counted", e.get("failures", e.get("failures_before", e.get("refusals", e.get("distinct_objects", "-"))))),
+            ("Route", e.get("route", ", ".join(e.get("routes", [])) or "-")),
+            ("Objects asked for", ", ".join(e.get("objects", [])) or "-"),
             ("Source addresses", ", ".join(e.get("source_ips", e.get("failure_ips", []))) or d["source_ip"] or "-"),
             ("Accounts involved", ", ".join(e.get("accounts", [])) or d["employee_id"] or "-"),
             ("First seen", h["short"](d["first_seen"]["local"])), ("Last seen", h["short"](d["last_seen"]["local"]))]
@@ -96,10 +99,18 @@ def incident_detail(h: dict, incident_id: int) -> None:
     else:
         st.caption("No response has been applied yet.")
 
-    ui.section("Evidence: the sign-in attempts behind this incident")
-    ui.table([{"time": h["short"](a["timestamp"]["local"]), "ip": a["source_ip"], "account": a["account"], "outcome": a["outcome"],
-               "reason": a["reason"].replace("_", " ")} for a in d["attempts"]],
-             {"time": "Time", "ip": "Source IP", "account": "Account", "outcome": "Outcome", "reason": "Reason"})
+    if d.get("denials"):
+        ui.section("Evidence: the refused requests behind this incident")
+        ui.table([{"time": h["short"](x["timestamp"]["local"]), "ip": x["source_ip"], "account": x["account"],
+                   "request": f"{x['method']} {x['route']}", "object": x["object"] or "-", "status": f"{x['status_code']} {x['meaning']}"}
+                  for x in d["denials"]],
+                 {"time": "Time", "ip": "Source IP", "account": "Account", "request": "Request", "object": "Object asked for",
+                  "status": "Result"})
+    else:
+        ui.section("Evidence: the sign-in attempts behind this incident")
+        ui.table([{"time": h["short"](a["timestamp"]["local"]), "ip": a["source_ip"], "account": a["account"], "outcome": a["outcome"],
+                   "reason": a["reason"].replace("_", " ")} for a in d["attempts"]],
+                 {"time": "Time", "ip": "Source IP", "account": "Account", "outcome": "Outcome", "reason": "Reason"})
 
     ui.section("Respond")
     cols = st.columns(4)
@@ -134,6 +145,9 @@ def render(h: dict) -> None:
         ("Failed sign-ins", f"{a['failure']:,}", f"from {a['distinct_failing_addresses']} address(es)", "warn" if a["failure"] else "", "alert"),
         ("Successful sign-ins", f"{a['success']:,}", f"last {ov['window_hours']} h", "", "users"),
         ("Refused", f"{a['denied']:,}", "address blocked or account locked", "", "activity"),
+        ("Refused requests", f"{ov['refused_requests']['forbidden_403'] + ov['refused_requests']['unauthenticated_401']:,}",
+         f"{ov['refused_requests']['forbidden_403']} not permitted (403), {ov['refused_requests']['unauthenticated_401']} without a session (401)",
+         "warn" if ov["refused_requests"]["forbidden_403"] + ov["refused_requests"]["unauthenticated_401"] else "", "alert"),
         ("Active incidents", inc["total"], f"{inc['critical']} Alert, {inc['high_risk']} Elevated, {inc['suspicious']} Watch",
          "alert" if inc["critical"] else "warn" if inc["total"] else "", "briefcase"),
         ("Locked accounts", len(ov["locked_accounts"]), "refused by this backend", "warn" if ov["locked_accounts"] else "", "users"),
@@ -190,6 +204,14 @@ def render(h: dict) -> None:
                "reason": r["reason"].replace("_", " ")} for r in attempts],
              {"time": "Time", "ip": "Source IP", "account": "Account (unknown names are hashed)", "outcome": "Outcome", "reason": "Reason"})
 
+    ui.section("Recent refused requests")
+    denied = (h["cached"]("auth_denials", "/api/soc/auth/denials", minutes=240, limit=60) or {}).get("rows", [])
+    ui.table([{"time": h["short"](r["timestamp"]["local"]), "ip": r["source_ip"], "account": r["account"],
+               "request": f"{r['method']} {r['route']}", "object": r["object"] or "-", "status": f"{r['status_code']} {r['meaning']}"}
+              for r in denied],
+             {"time": "Time", "ip": "Source IP", "account": "Account", "request": "Request", "object": "Object asked for",
+              "status": "Result"})
+
     ui.section("Response history")
     history = (h["cached"]("auth_actions", "/api/soc/auth/actions", limit=60) or {}).get("rows", [])
     ui.table([{"time": h["short"](r["created_at"]["local"]), "action": r["action_label"], "target": r["target"], "by": r["performed_by"],
@@ -205,6 +227,10 @@ def render(h: dict) -> None:
                               f"{p['ip_block_threshold']} in {p['ip_block_window_minutes']} min: Alert and block for {p['ip_block_minutes']} min"),
             ("Credential stuffing", f"{p['stuffing_accounts_alert']} accounts from one address in {p['stuffing_window_minutes']} min: Elevated; "
                                     f"{p['stuffing_accounts_critical']}: Alert and block"),
+            ("Refused requests", f"{p['forbidden_alert']} refusals (403) by one account in {p['access_window_minutes']} min: Elevated, "
+                                 f"{p['forbidden_critical']}: Alert and the session ends and the account locks; {p['idor_alert']} different records "
+                                 f"on one route: probing (Elevated), {p['idor_critical']}: Alert; {p['unauth_alert']} requests without a "
+                                 f"session from one address: Elevated, {p['unauth_critical']}: Alert and block"),
             ("Safety limits", f"at most {p['max_auto_locks_per_hour']} automatic locks and {p['max_auto_blocks_per_hour']} automatic blocks per hour; "
                               "administrators are never locked automatically; private and protected addresses are never blocked"),
             ("Note", p["note"]),

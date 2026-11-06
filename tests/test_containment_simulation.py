@@ -188,7 +188,8 @@ def test_unauthorised_containment_requests_are_refused_and_audited(client, admin
         assert call({}).status_code == 401
     after = _snapshot(db_path)
     changed = {t for t in after if after[t] != before[t]}
-    assert changed == {"audit_logs"}                                              # only the refusals themselves were recorded
+    assert changed == {"audit_logs", "access_denials"}                            # only the refusals themselves were recorded
+    assert _db(db_path, "select count(*) from access_denials") == [(4,)]          # 2 forbidden + 2 unauthenticated, nothing else
     rows = _db(db_path, "select actor_id, details from audit_logs where action='containment_unauthorized' and id > ?", (alice_login_audit,))
     assert len(rows) == 2 and all(r[0] is not None for r in rows)
     assert _db(db_path, "select status from employees where id=?", (bob,)) == [("active",)]

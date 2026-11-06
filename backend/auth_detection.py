@@ -21,7 +21,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.auth_policy import AuthPolicy
-from backend.models import AuthAttempt, Employee
+from backend.models import AccessDenial, AuthAttempt, Employee
 
 SAMPLE = 500            # at most this many rows are read to describe a pattern; the counts themselves are exact
 MAX_IDS = 50
@@ -174,4 +174,91 @@ def evaluate(db: Session, attempt: AuthAttempt, employee: Employee | None, polic
         found.append(_from_one_address(db, attempt, policy))
     elif attempt.outcome == "success" and employee is not None:
         found.append(_login_after_failures(db, attempt, employee, policy))
+    return [f for f in found if f is not None]
+
+
+# ------------------------------------------------------------------------------------------ refused requests (401 / 403)
+def _denials(db: Session, denial: AccessDenial, minutes: int, *conditions) -> dict:
+    since = denial.timestamp - timedelta(minutes=minutes)
+    where = (AccessDenial.timestamp >= since, AccessDenial.timestamp <= denial.timestamp, *conditions)
+    count = db.scalar(select(func.count(AccessDenial.id)).where(*where)) or 0
+    rows = db.execute(select(AccessDenial.id, AccessDenial.route, AccessDenial.object_ref, AccessDenial.timestamp, AccessDenial.source_ip)
+                      .where(*where).order_by(AccessDenial.id.desc()).limit(SAMPLE)).all()
+    return {"count": count, "ids": sorted(r.id for r in rows)[-MAX_IDS:], "routes": sorted({r.route for r in rows}),
+            "refs": sorted({r.object_ref for r in rows if r.object_ref}), "ips": sorted({r.source_ip for r in rows}),
+            "first": min((r.timestamp for r in rows), default=denial.timestamp),
+            "last": max((r.timestamp for r in rows), default=denial.timestamp)}
+
+
+def _idor_probe(db: Session, denial: AccessDenial, employee: Employee, policy: AuthPolicy) -> Finding | None:
+    """One account refused on many DIFFERENT objects of the same route: enumerating other people's records."""
+    if policy.idor_alert <= 0 or denial.status_code != 403 or not denial.object_ref:
+        return None
+    w = _denials(db, denial, policy.access_window_minutes, AccessDenial.employee_id == employee.id,
+                 AccessDenial.status_code == 403, AccessDenial.route == denial.route, AccessDenial.object_ref.is_not(None))
+    distinct = len(w["refs"])
+    if distinct < policy.idor_alert:
+        return None
+    code = employee.employee_code or employee.username
+    critical = 0 < policy.idor_critical <= distinct
+    return Finding(
+        "idor_probe", "critical" if critical else "high_risk", f"idor_probe:{code}", denial.source_ip, employee,
+        f"{code} was refused {distinct} different records on {denial.route}",
+        f"{code} asked for {distinct} different objects through {denial.route} within {policy.access_window_minutes} minutes and the "
+        f"backend refused every one (alert at {policy.idor_alert}, critical at {policy.idor_critical}). Requesting other people's "
+        "records by changing an identifier is an insecure-direct-object-reference probe. The refusals were enforced by the backend: "
+        "no data was returned.",
+        {"rule": "different objects refused on one route", "window_minutes": policy.access_window_minutes, "route": denial.route,
+         "distinct_objects": distinct, "objects": w["refs"][:MAX_LISTED], "threshold": policy.idor_alert,
+         "critical_threshold": policy.idor_critical, "denial_ids": w["ids"]},
+        w["count"], w["first"], w["last"])
+
+
+def _repeated_forbidden(db: Session, denial: AccessDenial, employee: Employee, policy: AuthPolicy, skip_route: str | None) -> Finding | None:
+    if policy.forbidden_alert <= 0 or denial.status_code != 403:
+        return None
+    conditions = [AccessDenial.employee_id == employee.id, AccessDenial.status_code == 403]
+    if skip_route:                                   # the same refusals are already reported as an IDOR probe: do not count them twice
+        conditions.append(AccessDenial.route != skip_route)
+    w = _denials(db, denial, policy.access_window_minutes, *conditions)
+    if w["count"] < policy.forbidden_alert:
+        return None
+    code = employee.employee_code or employee.username
+    critical = 0 < policy.forbidden_critical <= w["count"]
+    return Finding(
+        "repeated_forbidden_access", "critical" if critical else "high_risk", f"repeated_forbidden_access:{code}", denial.source_ip, employee,
+        f"{code} was refused {w['count']} times in {policy.access_window_minutes} min",
+        f"{w['count']} requests by {code} were refused with 403 within {policy.access_window_minutes} minutes (alert at "
+        f"{policy.forbidden_alert}, critical at {policy.forbidden_critical}). The backend denied each one before returning any data.",
+        {"rule": "repeated forbidden requests by one account", "window_minutes": policy.access_window_minutes, "refusals": w["count"],
+         "routes": w["routes"][:MAX_LISTED], "threshold": policy.forbidden_alert, "critical_threshold": policy.forbidden_critical,
+         "denial_ids": w["ids"]},
+        w["count"], w["first"], w["last"])
+
+
+def _unauthenticated_flood(db: Session, denial: AccessDenial, policy: AuthPolicy) -> Finding | None:
+    if policy.unauth_alert <= 0 or denial.status_code != 401:
+        return None
+    w = _denials(db, denial, policy.access_window_minutes, AccessDenial.source_ip == denial.source_ip, AccessDenial.status_code == 401)
+    if w["count"] < policy.unauth_alert:
+        return None
+    critical = 0 < policy.unauth_critical <= w["count"]
+    return Finding(
+        "unauthenticated_flood", "critical" if critical else "high_risk", f"unauthenticated_flood:{denial.source_ip}", denial.source_ip, None,
+        f"{w['count']} unauthenticated requests from {denial.source_ip} in {policy.access_window_minutes} min",
+        f"{w['count']} requests from {denial.source_ip} within {policy.access_window_minutes} minutes were refused with 401 "
+        f"(no valid session), against {len(w['routes'])} route(s) (alert at {policy.unauth_alert}, critical at {policy.unauth_critical}).",
+        {"rule": "many unauthenticated requests from one address", "window_minutes": policy.access_window_minutes,
+         "refusals": w["count"], "routes": w["routes"][:MAX_LISTED], "threshold": policy.unauth_alert,
+         "critical_threshold": policy.unauth_critical, "denial_ids": w["ids"]},
+        w["count"], w["first"], w["last"])
+
+
+def evaluate_denial(db: Session, denial: AccessDenial, employee: Employee | None, policy: AuthPolicy) -> list[Finding]:
+    """Patterns completed or extended by a newly refused request. Pure reads."""
+    found: list[Finding | None] = []
+    if employee is not None:
+        idor = _idor_probe(db, denial, employee, policy)
+        found += [idor, _repeated_forbidden(db, denial, employee, policy, idor.evidence["route"] if idor else None)]
+    found.append(_unauthenticated_flood(db, denial, policy))
     return [f for f in found if f is not None]

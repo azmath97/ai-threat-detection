@@ -23,6 +23,7 @@ from backend import (
     threat_engine,
 )
 from backend.auth_service import authenticate, find_employee
+from backend.denial_monitor import AccessDenialMiddleware
 from backend.catalog import (
     EVENT_TO_ACTION,
     EVENT_TYPES,
@@ -130,6 +131,7 @@ app = FastAPI(
 )
 # Innermost first. Browsers are not expected to call this API (the dashboards call it server-side with a bearer token and no
 # cookies), so CORS lists explicit origins only, allows no credentials and names the methods and headers it accepts.
+app.add_middleware(AccessDenialMiddleware)          # innermost: sees only what the application itself refused
 app.add_middleware(RequestSizeLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,

@@ -100,7 +100,10 @@ def test_protected_endpoints_reject_missing_and_invalid_tokens(client, method, p
     assert client.request(method, url, headers={"Authorization": "Basic abc"}).status_code == 401
 
 
-def test_admin_only_endpoints_reject_employees_and_accept_security_admins(client, admin):
+def test_admin_only_endpoints_reject_employees_and_accept_security_admins(client, admin, monkeypatch):
+    # An employee calling every administrator route is exactly what the refused-request monitor flags; this test is about the
+    # refusals, so the automatic response (which would end this employee's session part-way) is switched off.
+    monkeypatch.setenv("AUTH_AUTO_RESPONSE", "false")
     employee = auth_header(client, "EMP-1001")
     admin_routes = [(m, p) for m, p, _, is_admin, _ in ROUTES if is_admin]
     assert len(admin_routes) >= 30
@@ -108,6 +111,8 @@ def test_admin_only_endpoints_reject_employees_and_accept_security_admins(client
         response = client.request(method, fill(path), headers=employee, json={} if method != "GET" else None)
         assert response.status_code == 403, (method, path, response.status_code)
     assert client.get("/api/soc/version", headers=admin).status_code == 200
+    raised = {i["kind"] for i in client.get("/api/soc/auth/incidents", headers=admin, params={"status": "all"}).json()["rows"]}
+    assert "repeated_forbidden_access" in raised                              # and the monitor noticed, without acting
 
 
 def test_employees_cannot_read_other_employees_restricted_records(client, admin):

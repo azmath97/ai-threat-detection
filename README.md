@@ -87,7 +87,7 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | SOC read models | `soc_service.py`, `soc_routes.py` |
 | Simulation | `scenario_generator.py` (seeded plans), `simulation_runs.py` (background runs, status, stop), `simulation_service.py` (manual steps, reset), `simulation_routes.py` |
 | Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (526 tests) |
+| Tests | `tests/` (543 tests) |
 
 ## Technology stack
 
@@ -333,7 +333,7 @@ A test asks SQLite's `EXPLAIN QUERY PLAN` for 14 of these queries and fails if a
 
 ### What was and was not verified
 
-Run in this repository (`python -m pytest tests -q`, 526 tests): migrations on a fresh database, on a database from an earlier
+Run in this repository (`python -m pytest tests -q`, 543 tests): migrations on a fresh database, on a database from an earlier
 release (including duplicate repair), and the refusal of a newer one; constraint and index behaviour; query plans;
 de-duplication, 12-way same-key and 9-way different-key concurrent ingestion on SQLite; transaction rollback; the
 bounded-query checks; two SOC sessions and a portal session seeing the same data; Streamlit reruns and double clicks against a
@@ -823,7 +823,11 @@ This is built on the real sign-in endpoint (`POST /api/auth/login`), not on the 
 is stored in `auth_attempts` (success, failure, or denied because the address is blocked or the account is locked). An unknown
 username is stored only as a keyed hash (`unknown:<12 hex>`), so a password typed into the wrong box is never kept, and the audit
 log uses the same hash. Detection reads those stored attempts inside time windows, so counts survive a restart and are the same
-on every backend instance (the older in-memory login throttle is unchanged and still answers 429).
+on every backend instance (the older in-memory login throttle is unchanged and still answers 429). Real `401` and `403`
+responses of the API are recorded too (`access_denials`: the route template, the identifier asked for, the trusted client
+address and, when the token matches a session, the account; never a token, a body or a credential). Refusals caused by our own
+enforcement (a locked account, a blocked address) are not counted, and at most `DENIAL_RECORD_LIMIT_PER_MINUTE` are stored per
+address per minute so a flood cannot fill the database.
 
 | Pattern | Default trigger | What the policy does automatically |
 |---|---|---|
@@ -832,6 +836,13 @@ on every backend instance (the older in-memory login throttle is unchanged and s
 | Burst of failures from one address | 10 failures in 5 min: Elevated; 20 in 10 min: Alert | Alert only; at Alert, block the address for 60 min |
 | One account attacked from many addresses | 6 failures from 3 or more addresses in 10 min | Lock the account for 15 min |
 | Sign-in after repeated failures | 3 or more failures in 10 min, then a success from an address that is **not** registered to the account | Revoke sessions (the new one included, so no token is returned), lock the account, block the address |
+| Repeated refused requests | 10 refusals (403) by one account in 5 min: Elevated; 30: Alert | At Alert, end the account's sessions and lock it |
+| Probing other people's records (IDOR) | 5 different objects refused on one route by one account in 5 min: Elevated; 10: Alert | At Alert, end the sessions and lock the account |
+| Flood of unauthenticated requests | 30 refusals (401) from one address in 5 min: Elevated; 100: Alert | At Alert, block the address for 60 min |
+
+Repeating one forbidden call is told apart from probing many different records, and probing is not also counted as plain
+repetition. The refusals themselves come from the backend's authorization checks (the record is never returned); this adds the
+trail and the response.
 
 A success from the account's own registered address, while the failures came from other addresses, is the owner and raises nothing:
 treating it as a takeover would punish the victim. A success from the owner's own address that also produced the failures
@@ -859,7 +870,7 @@ locally, send `X-Frontend-Key` and `X-Client-IP` yourself, as `tests/test_auth_d
 **SOC page and API** (security administrators only, enforced by the backend): the SOC dashboard has an *Authentication Defence*
 page (incidents, evidence, locked accounts, blocked addresses, recent attempts, response history, unlock/unblock and manual
 responses with a reason and confirmation). Endpoints under `/api/soc/auth`: `overview`, `incidents`, `incidents/{id}`,
-`incidents/{id}/status`, `incidents/{id}/actions`, `attempts`, `actions` (GET) and `actions` (POST, direct response). State
+`incidents/{id}/status`, `incidents/{id}/actions`, `attempts`, `denials`, `actions` (GET) and `actions` (POST, direct response). State
 changes are rate limited, validated, audited and idempotent with an `Idempotency-Key`.
 
 | Setting | Default | Meaning |
@@ -870,6 +881,7 @@ changes are rate limited, validated, audited and idempotent with an `Idempotency
 | `STUFFING_ACCOUNTS_ALERT`, `STUFFING_ACCOUNTS_CRITICAL`, `STUFFING_WINDOW_MINUTES` | 5, 10, 10 | Credential stuffing |
 | `DISTRIBUTED_IPS`, `DISTRIBUTED_FAILURES`, `DISTRIBUTED_WINDOW_MINUTES` | 3, 6, 10 | One account, many addresses |
 | `SUCCESS_AFTER_FAILURES`, `SUCCESS_AFTER_FAILURES_WINDOW_MINUTES` | 3, 10 | Success after failures |
+| `FORBIDDEN_ALERT`, `FORBIDDEN_CRITICAL`, `IDOR_DISTINCT_ALERT`, `IDOR_DISTINCT_CRITICAL`, `UNAUTH_FLOOD_ALERT`, `UNAUTH_FLOOD_CRITICAL`, `ACCESS_WINDOW_MINUTES`, `DENIAL_RECORD_LIMIT_PER_MINUTE` | 10, 30, 5, 10, 30, 100, 5, 120 | Refused requests (401/403) |
 | `MAX_AUTO_LOCKS_PER_HOUR`, `MAX_AUTO_BLOCKS_PER_HOUR`, `PROTECTED_IPS`, `AUTH_ATTEMPT_RETENTION_DAYS` | 10, 10, empty, 30 | Safeguards and retention |
 
 These are starting values, not universal truth: calibrate them against your real sign-in traffic.
@@ -878,13 +890,15 @@ These are starting values, not universal truth: calibrate them against your real
 names, each detector and its thresholds, automatic lock, session revocation, expiry, address blocks and their expiry, private and
 protected addresses, the administrator exemption, detect-only mode, the hourly caps, concurrent attempts (one incident, one
 lock), recovery by an administrator, authorization (401/403), payload validation, idempotent replay, restart persistence, and the
-schema 3 to 4 migration. `tests/test_auth_defense_ui.py` drives the real SOC page against a real backend process, and the page was
-also checked in a browser against real failed sign-ins. **Not verified:** any public deployment, an attacker on a separate
+schema 3 to 4 migration. `tests/test_access_defense.py` (15 tests) covers refused requests: what is and is not recorded, repeated
+refusals, IDOR probing versus repetition, the unauthenticated flood and its block, our own enforcement not being counted, the
+per-address cap, detect-only mode and authorization. `tests/test_auth_defense_ui.py` drives the real SOC page against a real
+backend process (unlocking an account; IDOR evidence), and the page was also checked in a browser against real failed sign-ins. **Not verified:** any public deployment, an attacker on a separate
 device, behaviour on PostgreSQL with several instances (concurrency was tested on SQLite), the thresholds against real
 traffic, or the gateway's address handling behind a real platform proxy.
 
 **Not done in this phase** (still to build): a firewall provider integration (Vercel or another WAF) and its enforcement states,
-Redis, removal of the Simulation Console, detections for IDOR, password changes, bulk-export authorization and geolocation,
+Redis, removal of the Simulation Console, detections for password changes, bulk-export authorization and geolocation,
 progressive login delays, analyst assignment, a Next.js front end, and calibration on real traffic.
 
 ## Detection rules in detail
@@ -1335,7 +1349,7 @@ ml/detect/                   window builder, features, models, hybrid risk, benc
 docs/                        cert-dataset.md, detection-evaluation.md, deployment.md, detection-results/
 docs/cert-dataset.md         CERT dataset setup, field mapping, label rules, caveats
 frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       526 pytest tests
+tests/                       543 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
 requirements.txt  requirements-dev.txt (adds pgserver for the PostgreSQL tests)  requirements-deploy.txt (pinned runtime for the image)
 Dockerfile  .dockerignore  render.yaml  .env.example
@@ -1344,7 +1358,7 @@ Dockerfile  .dockerignore  render.yaml  .env.example
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 526 tests, about eight minutes (a real backend is started several times)
+python -m pytest tests -q          # 543 tests, about eight minutes (a real backend is started several times)
 python -m pip install -r requirements-dev.txt   # optional: adds pgserver so tests/test_postgres.py runs instead of skipping
 ```
 

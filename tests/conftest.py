@@ -128,9 +128,11 @@ def restore_state(request):
     with sqlite3.connect(db_path) as con:
         marks = {t: con.execute(f"select coalesce(max(id), 0) from {t}").fetchone()[0] for t in tables}
     yield
+    from backend.denial_monitor import reset_budget
     from backend.rate_limit import reset_all
 
     reset_all()
+    reset_budget()
     active = client.get("/api/simulation/status", headers=admin).json().get("active_run_id")
     if active:
         client.post(f"/api/simulation/runs/{active}/cancel", headers=admin)
@@ -141,7 +143,7 @@ def restore_state(request):
         for table in ("security_alerts", "attack_investigations", "risk_assessments", "security_events"):
             con.execute(f"delete from {table} where id > ?", (marks[table],))
         # authentication defence: attempts, incidents, actions and blocks belong to the test; accounts locked by it are released
-        for table in ("auth_response_actions", "auth_incidents", "auth_attempts", "ip_blocks"):
+        for table in ("auth_response_actions", "auth_incidents", "auth_attempts", "access_denials", "ip_blocks"):
             con.execute(f"delete from {table}")
         con.execute("update employees set status='active', lock_reason=NULL, locked_at=NULL, lock_expires_at=NULL, locked_by=NULL "
                     "where status='locked'")

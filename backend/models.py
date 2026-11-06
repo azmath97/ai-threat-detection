@@ -417,7 +417,7 @@ class ResponseControl(Base):
 # ------------------------------------------------------------------------------------------ authentication defence
 AUTH_OUTCOMES = ("success", "failure", "denied")
 INCIDENT_KINDS = ("account_brute_force", "credential_stuffing", "ip_failure_burst", "distributed_account_attack",
-                  "login_after_failures")
+                  "login_after_failures", "repeated_forbidden_access", "idor_probe", "unauthenticated_flood")
 INCIDENT_STATUSES = ("open", "investigating", "contained", "resolved", "false_positive")
 ACTION_TYPES = ("lock_account", "unlock_account", "revoke_sessions", "block_ip", "unblock_ip")
 ACTION_STATUSES = ("completed", "failed", "skipped", "pending_approval")
@@ -446,6 +446,30 @@ class AuthAttempt(Base):
     outcome: Mapped[str] = mapped_column(String(12))   # success | failure (wrong credentials) | denied (blocked or locked)
     reason: Mapped[str] = mapped_column(String(32))    # ok | bad_password | unknown_identifier | account_locked | ip_blocked
     device_info: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+
+class AccessDenial(Base):
+    """A real API request the backend refused with 401 or 403 (never the request body, the token or any credential).
+
+    `route` is the route template (for example /api/employees/{employee_id}) and `object_ref` the identifier that was asked for,
+    so probing many different records through one route (IDOR) can be told apart from repeating one forbidden call."""
+
+    __tablename__ = "access_denials"
+    __table_args__ = (
+        Index("ix_denials_employee_time", "employee_id", "timestamp"),
+        Index("ix_denials_ip_time", "source_ip", "timestamp"),
+        Index("ix_denials_time", "timestamp"),
+        CheckConstraint("status_code IN (401, 403)", name="ck_denials_status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    source_ip: Mapped[str] = mapped_column(String(45))
+    employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    method: Mapped[str] = mapped_column(String(8))
+    route: Mapped[str] = mapped_column(String(120))
+    object_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status_code: Mapped[int] = mapped_column(Integer)
 
 
 class AuthIncident(Base):

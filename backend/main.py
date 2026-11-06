@@ -635,7 +635,7 @@ def create_containment(
     body: ContainmentRequest, request: Request, response: Response, auth: AuthContext = Depends(containment_admin),
     db: Session = Depends(get_db),
 ):
-    """Run a simulated containment action against this application's own records. A retry with the same
+    """Run a containment action against this application's own records. A retry with the same
     `idempotency_key` returns the original action with HTTP 200 and `replayed: true`."""
     target = _get_employee_or_404(db, body.employee_id)
     action = response_service.apply_action(

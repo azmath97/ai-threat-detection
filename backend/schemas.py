@@ -107,7 +107,7 @@ class ContainmentRequest(BaseModel):
     action_type: str
     reason: str = Field(min_length=3, max_length=500)
     investigation_id: int | None = Field(default=None, gt=0)
-    alert_id: int | None = Field(default=None, gt=0, description="The alert this simulated action responds to")
+    alert_id: int | None = Field(default=None, gt=0, description="The alert this action responds to")
     confirm: bool = Field(default=False, description="Must be true for disruptive actions")
     target: str | None = Field(default=None, max_length=64, description="IP address or system for block_ip / isolate_system")
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$",
@@ -308,7 +308,7 @@ class ContainmentOut(APIModel):
     employee_id: int
     action_type: str
     status: str
-    status_label: str = "Simulation completed"
+    status_label: str = "Containment completed"
     reason: str
     performed_by: int
     performed_by_username: str | None = None

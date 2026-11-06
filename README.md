@@ -1,24 +1,32 @@
 # AI-Based Insider Threat Detection System
 
-A **simulated threat-detection and response platform**: a cybersecurity case study, not a security product. A fictional
-financial organisation, **Westbridge Bank**, runs an Employee Workspace Portal. A security team watches it through a
-Security Operations Centre (SOC) dashboard. An employee account can be compromised or misused, and the system is built to
-notice that **while it is happening** and before the simulated data leaves.
+A real-time security-monitoring and response platform for a fictional financial organisation, **Westbridge Bank**. Employees use
+an Employee Workspace Portal; a security team watches the same backend through a Security Operations Centre (SOC) dashboard.
+The backend records every sign-in and every refused request as it happens, detects brute force, credential stuffing,
+probing of other people's records, bulk exports and compromised-account behaviour, and responds automatically. It is a research
+and teaching project, not a security product, and it has not been validated against real traffic.
 
-## Scope: what is real and what is simulated
+## Scope: what is enforced and what is not
 
-* **Detection is real code on synthetic events.** The rules, baseline, anomaly model, correlation and scoring run on events
-  stored in this project's own database. All data is synthetic; there are no real credentials, personal data or banking data.
-* **Containment is a simulation.** "Disable account", "Block IP", "Isolate system" and the other actions edit this
-  application's own records (an account's status, session rows, permission rows, a block list, isolation flags, alert and
-  investigation status), and this backend's own login and permission code then honours them. Nothing else happens. The
-  project does not block real network traffic, does not disable real accounts, does not quarantine real devices, does not
-  send email, does not contact a directory, firewall or endpoint agent, and does not protect a real bank. No such
-  integration exists or is configured.
-* **Every simulated action is recorded:** the alert and/or investigation it concerns, the requested action, who initiated it,
-  when, the result and the list of records it changed, plus an audit-log entry. The UI says "Simulate containment" and
-  "Simulation completed" for that reason.
-* It has not been validated for live use.
+* **Detection runs on the requests this application actually receives.** Every sign-in attempt, refused request and export
+  is stored, evaluated inside time windows, and turned into an incident with its evidence. The accounts, employees and
+  historical activity are synthetic: there are no real credentials, personal data or banking data.
+* **Enforcement is real inside this application.** A locked account cannot sign in and its sessions stop working; a blocked
+  address is refused by the login code; removed permissions deny access; a bulk export is held until a security administrator
+  approves it. The backend checks all of this on every request, and each action is recorded with who or what did it, when and
+  why.
+* **Nothing outside this application is touched.** Specifically, the project:
+  * does not block real network traffic;
+  * does not disable real accounts;
+  * does not quarantine real devices;
+  * does not send email or contact a directory, firewall or endpoint agent;
+  * does not protect a real bank.
+
+  No such integration exists or is configured. An address "block" is a refusal by this application's own code, not a firewall rule.
+* **Containment actions are auditable.** Each one records the alert and/or investigation, the requested action, who
+  initiated it, when, the result and the records it changed, plus an audit-log entry. The buttons say "Run containment" and
+  the result "Containment completed" for that reason.
+* The score thresholds are untuned starting values, and the benchmark results in this README are on historical or synthetic data.
 
 * **One FastAPI backend and one configured database are the single source of truth** (SQLite for local development,
   PostgreSQL for anything deployed; see [Database and persistence](#database-and-persistence)). The portal, the SOC
@@ -28,9 +36,9 @@ notice that **while it is happening** and before the simulated data leaves.
   threshold on that score, limited by how many independent attack stages the evidence spans), a separate **impact severity**
   (what the evidence shows was accessed or changed) and a qualitative **evidence strength**. See
   [How the scores are defined](#how-the-scores-are-defined).
-* **Simulated containment has visible effects inside the application:** a simulated account disable stops logins to this
-  application, a simulated IP block makes its login code refuse that address, and removing privileges deletes permission
-  rows. It never touches a real network.
+* **Containment has visible effects inside the application:** disabling an account stops logins to this application, an IP
+  block makes its login code refuse that address, and removing privileges deletes permission rows. It never touches a
+  real network.
 
 ## Contents
 
@@ -47,7 +55,7 @@ notice that **while it is happening** and before the simulated data leaves.
 11. [Machine learning in detail](#machine-learning-in-detail)
 12. [Detection rules in detail](#detection-rules-in-detail)
 13. [Baseline, correlation, scoring and data exposure](#baseline-correlation-scoring-and-data-exposure)
-14. [The simulated attack, step by step](#the-simulated-attack-step-by-step)
+14. [The lab's attack stages, step by step](#the-labs-attack-stages-step-by-step)
 15. [How attacks are prevented, contained and what is not prevented](#how-attacks-are-prevented-contained-and-what-is-not-prevented)
 16. [Employee Portal](#employee-workspace-portal) and [SOC dashboard](#soc-dashboard)
 17. [Investigation and incident response](#investigation-and-incident-response)
@@ -183,7 +191,7 @@ Copy-Item .env.example .env        # bash: cp .env.example .env
 | `LOGIN_MAX_FAILURES`, `LOGIN_LOCKOUT_SECONDS` | `5`, `300` | failed sign-ins per employee ID before a temporary lockout (HTTP 429) |
 | `LOGIN_IP_MAX_FAILURES`, `LOGIN_IP_WINDOW_SECONDS` | `20`, `300` | failed sign-ins from one source address before it is locked out |
 | `RATE_LIMITS_ENABLED`, `RATE_LIMIT_SENSITIVE_PER_MINUTE`, `RATE_LIMIT_HEAVY_PER_MINUTE`, `RATE_LIMIT_EMPLOYEE_PER_MINUTE` | `true`, `30`, `6`, `60` | per-caller, per-route limits for administrator state changes, expensive actions (reset, retrain, reload, payroll export, account creation) and employee actions (HTTP 429 with `Retry-After`) |
-| `CONTAINMENT_MAX_PER_MINUTE` | `30` | simulated containment requests one administrator may submit per minute (HTTP 429 beyond it) |
+| `CONTAINMENT_MAX_PER_MINUTE` | `30` | containment requests one administrator may submit per minute (HTTP 429 beyond it) |
 | `API_TIMEOUT_SECONDS` | `20` | how long the dashboards wait for the API (raise it for a free host that sleeps) |
 | `API_HOST`, `API_PORT`, `API_BASE_URL` | `127.0.0.1`, `8000`, `http://127.0.0.1:8000` | where the backend listens and where dashboards find it |
 | `CORRELATION_WINDOW_MINUTES` | `240` | correlation window |
@@ -392,7 +400,7 @@ Stop with Ctrl+C. All state stays in `data/insider_threat.db`.
 > **Status: prepared and rehearsed locally; not deployed.** No hosting account was available, so this repository contains no live
 > URL and none is claimed. The Dockerfile and [render.yaml](render.yaml) have never been built or applied. Run the checks in
 > [docs/deployment.md](docs/deployment.md#5-required-checks-after-deploying) against your own deployment before relying on it.
-> This is an educational, simulated demo with synthetic data, not production banking security.
+> This is an educational demo with synthetic data, not production banking security.
 
 The platform is three processes (the FastAPI backend and two Streamlit apps) and one public port is available on most hosts,
 so it deploys as **one Docker service**: [deploy/start.py](deploy/start.py) runs the three processes on loopback and
@@ -448,49 +456,42 @@ Vercel cannot host this architecture at all (long-running processes, WebSockets,
 
 ## How to exercise the platform
 
-The platform reacts to **real requests**. There is no attack generator in the product and no administrator console that writes
-events: the portal, the API and the defences below are the only sources. (The old seeded scenario generator still exists, but only
-as an offline tool for tests and calibration; see [the offline scenario lab](#the-offline-scenario-lab).)
-
-**1. The verifier (quickest, and it checks itself).** Set `TRUSTED_FRONTEND_KEY` in `.env` to a random value of 24 or more
-characters, restart the stack, then run:
+The platform reacts to **real requests**. There is no attack generator inside the product and no administrator console that writes
+events: the portal, the API and the defences below are the only sources. To watch them work, use the **attack drill**, an ordinary
+command-line client that sends real HTTP requests to the running backend, the way attacker tooling or a misbehaving employee would
+(the scenario generator that used to live in the product is now an offline test tool; see [the offline scenario lab](#the-offline-scenario-lab)).
 
 ```powershell
-python -m deploy.verify --api http://127.0.0.1:8000 `
-    --employee-password (Get-Content data\demo_credentials.local.json | ConvertFrom-Json).'alice.morgan' `
-    --admin-password (Get-Content data\demo_credentials.local.json | ConvertFrom-Json).'soc.admin' `
-    --frontend-key <the same TRUSTED_FRONTEND_KEY>
+python app.py setup && python app.py all          # .env gets a random TRUSTED_FRONTEND_KEY; leave this running
+python -m deploy.attack_drill brute-force         # in a second terminal
 ```
 
-It sends real requests to the running backend: refused administrator requests, an export of 12,000 records that is held for
-approval and then approved and used once, and five failed sign-ins for `EMP-1010` from the documentation address
-`203.0.113.77` that lock the account and are then unlocked by an administrator. Each check prints PASS or FAIL. What it causes
-stays in the audit trail and in the SOC page (*Authentication Defence*). Without `--frontend-key` the lock check is skipped and
-says so.
+| Command | What it sends | What the platform does |
+|---|---|---|
+| `brute-force` | five wrong passwords for `EMP-1010` from outside address `203.0.113.50` | records every attempt, locks the account, revokes its sessions, raises an incident with the five attempts as evidence |
+| `credential-stuffing` | one common password against all 11 accounts from `198.51.100.77` | raises an incident, then refuses that address in this application's login code (not a firewall rule) |
+| `idor` | `EMP-1003` requests ten other employees' records one by one | every request is refused (no data returned), recorded, raised as probing, and the account is locked at the Alert level |
+| `bulk-export` | `EMP-1001` asks to export 15,000 records | held (HTTP 409) until a security administrator approves it in *Authentication Defence*; approval is single-use |
+| `compromised-account` | `EMP-1001`'s valid password used from an address it has never used: probes five restricted resources, then two 9,000-record exports | goes through the normal event pipeline: baseline, rules, anomaly model, correlation, risk score; the detector decides whether to raise an alert and an investigation |
+| `recover` | (as the SOC administrator) unlocks accounts and unblocks addresses | returns the demo to a clean state |
 
-**2. By hand.** Any HTTP client works. A client address is believed only together with the shared key, so send both headers:
+Every call is a genuine request to the real endpoints; what you see is the backend's own answer, and no event is flagged as test
+data. Outside addresses are RFC 5737 documentation addresses. A client address is believed only together with the shared
+`TRUSTED_FRONTEND_KEY` (the drill reads it from `.env`), which is how the backend tells an attacker's address from the machine you
+are sitting at; without it every browser on one machine looks like the employee's own workstation. Employee passwords come from the
+local demo credentials file and stand in for stolen ones. Point the drill only at your own backend. Order matters a little: the sign-in
+throttle remembers a failed account for five minutes, so `credential-stuffing` right after `brute-force` shows HTTP 429 for `EMP-1010`.
 
-```powershell
-$base = "http://127.0.0.1:8000"; $key = "<your TRUSTED_FRONTEND_KEY>"
-$h = @{ "X-Frontend-Key" = $key; "X-Client-IP" = "203.0.113.50" }
-1..5 | ForEach-Object {
-    try { Invoke-RestMethod "$base/api/auth/login" -Method Post -Headers $h -ContentType application/json `
-          -Body (@{ employee_id = "EMP-1008"; password = "not-the-password-$_" } | ConvertTo-Json) } catch { $_.Exception.Response.StatusCode.value__ }
-}
-```
+**Self-checking version.** `python -m deploy.verify --api http://127.0.0.1:8000 --employee-password ... --admin-password ... --frontend-key ...`
+runs held-export, approval and lock checks and prints PASS or FAIL for each.
 
-The fifth failure locks `EMP-1008` for 15 minutes. Open the SOC dashboard, *Authentication Defence*, to see the incident, its
-evidence, the automatic response and the unlock button.
-
-**3. In the browser.** The portal's sign-ins and every refused API call it makes are recorded too. Locally, though, every browser
-connects from the same machine, which the backend attributes to the employee's own registered workstation. Failures from an
-account's own known address need 10 to count as brute force, while the older sign-in throttle already answers HTTP 429 after 5, so
-a lock is not reached from the browser on one machine. Use method 1 or 2 for the lock, which also shows why the client address
-is never taken from the browser.
+**In the browser.** The portal's sign-ins and every refused API call it makes are recorded too, but locally every browser connects
+from the same machine, which the backend attributes to the employee's own registered workstation; failures from an account's own known
+address need 10 to count as brute force, and the older sign-in throttle already answers HTTP 429 after 5. Use the drill for lock demos.
 
 **Bulk export by hand.** As `EMP-1001`, `POST /api/resources/financial-reports/access` with
-`{"action": "export", "record_count": 12000}` returns HTTP 409 and creates a request. In the SOC page, *Authentication Defence*,
-approve it with a note, then repeat the call with `"approval_id": <id>`: it succeeds once and the approval is spent.
+`{"action": "export", "record_count": 12000}` returns HTTP 409 and creates a request. In *Authentication Defence*, approve it with a
+note, then repeat the call with `"approval_id": <id>`: it succeeds once and the approval is spent.
 
 ## The offline scenario lab
 
@@ -517,23 +518,27 @@ audited.
 
 ## Demo script (about 10 minutes)
 
-What to say first: *"This is an educational research platform on synthetic data. Sign-in monitoring, the account lock and the
-address block are real enforcement inside this application. It does not control a firewall, a network or a real bank, and the
-older investigation containment buttons only change this application's own records."* Then:
+Say at the start: *"This is a research platform on synthetic employees and data. It watches the requests it actually receives and
+enforces its decisions itself: it locks accounts, refuses addresses and holds exports inside this application. It does not control a
+firewall or a network, and it has not been validated on real traffic."* Then:
 
-1. `python app.py setup`, add a random `TRUSTED_FRONTEND_KEY` (24+ characters) to `.env`, and `python app.py all`. Open the SOC
-   dashboard (8503) as `SEC-9011`, go to *Authentication Defence* and show it quiet.
-2. Run the verifier or the PowerShell loop from [How to exercise the platform](#how-to-exercise-the-platform).
-3. Refresh *Authentication Defence*: a locked account, an incident with the five attempts as evidence, the threshold and window,
-   the automatic response (policy name, who or what did it, expiry) and the statement of what it does not do.
-4. Unlock the account in the SOC page with a reason. Show the response history and the audit log.
-5. Show the held-export flow (the *Bulk export by hand* paragraph): the 409 response, the request waiting in the SOC page, the
-   approval, the single use, and the second attempt being refused.
-6. Open the *Attack Investigations* and *Response Centre* pages for the investigation workflow. Without the lab there are no seeded
-   alerts, so these pages show only what real or test traffic produced.
+1. `python app.py setup`, then `python app.py all`. Open the SOC dashboard (http://127.0.0.1:8503) as `SEC-9011` (see
+   `python app.py credentials`) and go to *Authentication Defence*. It is quiet. Open the portal (8501) beside it as an employee.
+2. In a second terminal run `python -m deploy.attack_drill brute-force`. Refresh *Authentication Defence*: a locked account, an incident
+   whose evidence is the five attempts with their times and address, the threshold and window, the automatic response (policy,
+   who or what acted, expiry) and the statement of what it does not do. Try to sign the employee in with the right password: refused.
+3. Unlock the account in the SOC page with a reason. Show the response history and the *Audit Logs* page.
+4. Run `credential-stuffing`: one incident across many accounts, then the address refused by this application.
+5. Run `idor` (probing other people's records: nothing returned, everything recorded, account locked) and `bulk-export` (HTTP 409, then
+   approve it in the SOC page and show that the approval can be used once).
+6. Run `compromised-account`. This is the insider-threat path: open *Live Event Feed*, *Employee Risk Monitor* and *Attack
+   Investigations* to show the evidence, the explanation, the heuristic risk score (not a probability), the impact severity and the
+   evidence strength. In the investigation, use **Run containment**; read the confirmation panel, tick it, run it, and show
+   "Containment completed", the history row and the audit entry.
+7. `python -m deploy.attack_drill recover` to reset the demo.
 
-Avoid saying "the attack was blocked at the network" or "this protects the bank". The scores are heuristics, not probabilities,
-and the benchmark figures are not a guarantee; see Known limitations and `docs/detection-evaluation.md`.
+Avoid saying "the attack was blocked at the network", "this protects the bank" or quoting the benchmark figures as a guarantee; see
+Known limitations and `docs/detection-evaluation.md`.
 
 ## How it works, end to end
 
@@ -553,7 +558,7 @@ and the benchmark figures are not a guarantee; see Known limitations and `docs/d
 5. **Alert and investigation.** When the risk band reaches Alert (score at or above its threshold and at least three independent
    attack stages), a `security_alerts` row is
    written (with evidence, exposure and recommended actions) and an investigation is opened or updated.
-6. **Response (simulated).** An administrator reviews the investigation in the SOC dashboard and chooses **Simulate
+6. **Response.** An administrator reviews the investigation in the SOC dashboard and chooses **Run
    containment**. The backend edits this application's own records, records the alert/investigation, the requested action,
    the administrator, the time and the result, and writes an audit log; the next login or request from the affected account
    or IP is refused by this backend. No external system is involved.
@@ -1013,7 +1018,7 @@ attempts, login hour against business hours and their own after-hours rate); the
 where they came from; and the reasons behind the impact and strength readings.
 
 A typical simulated run (test clock pinned to 21:00 local, so the off-hours signal is present; the chain from
-[The simulated attack](#the-simulated-attack-step-by-step)): the heuristic risk score goes 33.1 (unfamiliar login; band Normal at the
+[the lab's attack stages](#the-labs-attack-stages-step-by-step)): the heuristic risk score goes 33.1 (unfamiliar login; band Normal at the
 recorded thresholds, impact Low), 84.3 (restricted access; two stages, Elevated, impact Medium), **90.9 at the large export (three
 stages, Alert, impact High; the alert and the investigation are created here)**, then 97.0, 98.8, 99.3 and 99.8 as the later steps arrive.
 The alert exists before the external transfer. These values come from running the chain on this repository's detector with the shipped
@@ -1084,7 +1089,7 @@ transfer was **confirmed**. The status is one of:
 
 A large export alone is reported as an export, **never** as exfiltration.
 
-## The simulated attack, step by step
+## The lab's attack stages, step by step
 
 These are the stages of the offline scenario lab's manual steps (`POST /api/simulation/steps`, `LAB_MODE=true` only, never in
 production) and the ones its *Compromised account campaign* scenario draws from. Defaults for the manual steps: attacker address `203.0.113.45` (an
@@ -1146,15 +1151,15 @@ raised when the risk band reaches Alert (score at the calibrated threshold with 
 before the last attack step. Unusual-but-innocent behaviour (new IP, late shift, large legitimate job) cannot reach Alert alone
 because of the stage gate; it can reach Watch, and the benign high-volume lookalike does so in some runs (see the calibration results).
 
-### Response controls (simulated containment an administrator can run)
+### Response controls (containment an administrator can run)
 
-Every action is a **simulation** against this application's own records (see [Scope](#scope-what-is-real-and-what-is-simulated)).
+Every action changes this application's own records, which it then enforces (see [Scope](#scope-what-is-enforced-and-what-is-not)).
 It needs a security-administrator session, a written reason and, for disruptive actions, `confirm: true`.
 
 **What is recorded** (table `containment_actions`, shown in the Response Centre, the investigation page, the audit log and the
 evidence export): the alert (`alert_id`) and/or investigation the action concerns (give either; if you give only an
 investigation, its alert is recorded), the requested action, the employee, who initiated it (`performed_by`), when
-(`created_at`, UTC), the result (`status` `completed`, shown as "Simulation completed"), the human-readable `result` and
+(`created_at`, UTC), the result (`status` `completed`, shown as "Containment completed"), the human-readable `result` and
 `effects` (exactly which records changed), `scope` = `simulated_application_state` and `external_systems_contacted` = `[]`.
 Failures are audited as `containment_failed` with the same identifiers.
 
@@ -1171,14 +1176,14 @@ Failures are audited as `containment_failed` with the same identifiers.
 
 | Action | Effect in this application's records (nothing external) |
 |---|---|
-| Disable account, simulated (`lock_account`) | the account record's status becomes locked and its session rows are revoked; this backend then returns 403 for new logins |
-| Revoke sessions, simulated (`revoke_sessions`) | the employee's open session rows are marked revoked (409 if none are active) |
-| Block IP in this application, simulated (`block_ip`) | the address is added to this application's block list; its login code refuses the address and that address's session rows are revoked. No firewall or network device is involved |
-| Remove privileges, simulated (`remove_privileges`) | write permission rows become read; on an account created during an incident (such as `svc.backupNN`) every permission row is deleted |
-| Restrict sensitive access, simulated (`restrict_access`) | the employee's confidential and restricted permission rows, or only the chosen resource's, are deleted |
-| Isolate system record, simulated (`isolate_system`) | the resource is flagged isolated; the permission check denies every employee until it is released |
+| Disable account (`lock_account`) | the account record's status becomes locked and its session rows are revoked; this backend then returns 403 for new logins |
+| Revoke sessions (`revoke_sessions`) | the employee's open session rows are marked revoked (409 if none are active) |
+| Block IP in this application (`block_ip`) | the address is added to this application's block list; its login code refuses the address and that address's session rows are revoked. No firewall or network device is involved |
+| Remove privileges (`remove_privileges`) | write permission rows become read; on an account created during an incident (such as `svc.backupNN`) every permission row is deleted |
+| Restrict sensitive access (`restrict_access`) | the employee's confidential and restricted permission rows, or only the chosen resource's, are deleted |
+| Isolate system record (`isolate_system`) | the resource is flagged isolated; the permission check denies every employee until it is released |
 | Resolve investigation (`resolve_investigation`) | marks the investigation and its alerts resolved with a reason (a later critical alert opens a new one) |
-| Restore account, unblock IP, release system (simulated) | undo the disruptive actions; no confirmation needed |
+| Restore account, unblock IP, release system | undo the disruptive actions; no confirmation needed |
 
 Security events, investigation evidence and risk assessments are never modified by containment (a test compares table digests
 before and after every action type). Backend modules import no network, mail, subprocess or cloud client (also tested), so
@@ -1232,7 +1237,7 @@ when something changed, so filters and navigation are kept. Overview totals cove
 | Employee Risk Monitor | employees ranked by behavioural and rule evidence only (no names or demographics) |
 | Attack Timeline | the eight stages built from correlated events, current stage highlighted |
 | Attack Graph | accounts, IPs, sessions, systems, privileged accounts and external destinations from stored events |
-| Response Centre | recommended simulated containment ("Simulate containment"), active simulated controls, history with results, manual simulated response |
+| Response Centre | recommended containment ("Run containment"), active controls, history with results, manual response |
 | Audit Logs | alerts, investigation updates, containment, administrator actions, failed responses |
 
 The risk monitor deliberately ranks only by activity evidence; names, demographics or other personal traits are never
@@ -1286,7 +1291,7 @@ Interactive documentation: `/docs`. Send `Authorization: Bearer <token>` with th
 | GET / POST / PATCH | `/api/investigations[/{id}]` | admin | investigations (PATCH only reopens a resolved one) |
 | GET | `/api/investigations/{id}/explanation`, `/evidence`, `/export` | admin | explanation, preserved evidence, report download |
 | POST | `/api/investigations/{id}/resolve` | admin | `reason` + `confirm: true` |
-| GET / POST | `/api/containment` | admin (POST: containment guard) | simulated actions: `revoke_sessions`, `lock_account`, `restrict_access`, `remove_privileges`, `block_ip`, `isolate_system`, `restore_account`, `unblock_ip`, `release_system`, `resolve_investigation`; body takes `employee_id`, `action_type`, `reason`, `investigation_id`, `alert_id`, `target`, `confirm`, `idempotency_key`; 201 on a new action, 200 with `replayed: true` on a retry, 409 for a no-op or key clash, 429 when rate limited |
+| GET / POST | `/api/containment` | admin (POST: containment guard) | actions: `revoke_sessions`, `lock_account`, `restrict_access`, `remove_privileges`, `block_ip`, `isolate_system`, `restore_account`, `unblock_ip`, `release_system`, `resolve_investigation`; body takes `employee_id`, `action_type`, `reason`, `investigation_id`, `alert_id`, `target`, `confirm`, `idempotency_key`; 201 on a new action, 200 with `replayed: true` on a retry, 409 for a no-op or key clash, 429 when rate limited |
 | GET | `/api/soc/version`, `/overview`, `/risk-history`, `/events`, `/employees`, `/investigations[/{id}]`, `/scopes`, `/timeline`, `/graph`, `/response`, `/audit` | admin | SOC read models; `/events` takes `limit` (capped by `MAX_PAGE_SIZE`) and `before_id` for keyset paging, `/investigations` takes `limit` |
 | GET | `/api/dashboard/stats`, `/api/audit-logs` | admin | KPIs, audit trail |
 | GET / POST | `/api/detection/status`, `/reload`, `/retrain` | admin | model, thresholds, rules |
@@ -1307,7 +1312,7 @@ Timestamps are stored in UTC and returned as `timestamp` (UTC) and `timestamp_lo
 | `security_alerts` | alerts (risk band `severity` column; API field `risk_band`) with impact severity, evidence strength, peak heuristic risk score, the score basis when raised, evidence, exposure, first and triggering event, recommended actions |
 | `attack_investigations` | case file and status linked to the alert |
 | `investigation_evidence` | append-only evidence copies with SHA-256 hashes |
-| `containment_actions` | simulated action: type, alert and investigation, employee, reason, initiating administrator, time, status, result and effects (in `details`), idempotency key |
+| `containment_actions` | action: type, alert and investigation, employee, reason, initiating administrator, time, status, result and effects (in `details`), idempotency key |
 | `response_controls` | the active blocks, isolations and restrictions the enforcement points consult |
 | `audit_logs` | actor, action, target, IP, details, time |
 | `simulation_runs` | one row per scenario run: scenario, seed and seed mode, status, parameters, full plan and its SHA-256, per-action results, progress, error, timestamps; events and investigations reference it through `simulation_run_id` |
@@ -1451,9 +1456,9 @@ been reviewed or penetration-tested. What is in place, and what is not:
 * **Detection quality is modest and mostly measured on synthetic data.** On the held-out CERT r4.2 users the best unsupervised
   detector has F1 about 0.2 at a 0.3 % window false-positive rate, and the supervised reference shows what labels would add. The
   benchmark's early-warning evidence covers only incidents that span many days. See docs/detection-evaluation.md.
-* **Simulated containment.** Blocking, isolating, locking and privilege removal change this application's records only; there is
-  no firewall, directory, email or endpoint integration, and the SOC dashboard says so on every page and on the Response
-  Centre. The README and UI use "simulate" and "Simulation completed" for that reason.
+* **Containment is application-level.** Blocking, isolating, locking and privilege removal change this application's records,
+  which it enforces itself; there is no firewall, directory, email or endpoint integration, and the Response Centre says so.
+  An address block does not stop traffic reaching the host, only this application's own login.
 * **Source IPs:** the backend trusts only the TCP peer. On one machine every client is loopback, so
   `MAP_LOOPBACK_TO_WORKSTATION` attributes it to the employee's registered workstation IP; with split hosting the
   shared `TRUSTED_FRONTEND_KEY` does the same for requests from your own dashboards. `X-Forwarded-For` is ignored. Anyone

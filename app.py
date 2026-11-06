@@ -21,8 +21,8 @@ load_dotenv(ROOT / ".env")      # so API_HOST / API_PORT / API_BASE_URL can live
 API_HOST = os.getenv("API_HOST", "127.0.0.1")
 API_PORT = int(os.getenv("API_PORT", "8000"))
 FRONTENDS = {
-    "portal": ("frontend/employee_portal.py", 8501),
-    "soc": ("frontend/soc_dashboard.py", 8503),
+    "portal": ("frontend/employee_portal.py", int(os.getenv("PORTAL_PORT", "8501"))),
+    "soc": ("frontend/soc_dashboard.py", int(os.getenv("SOC_PORT", "8503"))),
 }
 
 
@@ -37,13 +37,15 @@ def setup() -> None:
         print(f"{env_file.name} already exists; left unchanged.")
     else:
         lines = example.read_text(encoding="utf-8").splitlines()
-        lines = [f"SECRET_KEY={secrets.token_urlsafe(48)}" if line.startswith("SECRET_KEY=") else line for line in lines]
+        lines = [f"SECRET_KEY={secrets.token_urlsafe(48)}" if line.startswith("SECRET_KEY=")
+                 else f"TRUSTED_FRONTEND_KEY={secrets.token_urlsafe(32)}" if line.startswith("TRUSTED_FRONTEND_KEY=") else line
+                 for line in lines]
         env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
         try:
             env_file.chmod(0o600)
         except OSError:
             pass
-        print(f"Created {env_file.name} with a random SECRET_KEY (git-ignored).")
+        print(f"Created {env_file.name} with a random SECRET_KEY and TRUSTED_FRONTEND_KEY (git-ignored).")
     from data.demo_accounts import credentials_file, load_passwords
 
     existed = credentials_file().exists()

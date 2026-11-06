@@ -64,7 +64,7 @@ def export(investigation_id: int, request: Request, export_format: str = Query("
 def resolve(investigation_id: int, body: InvestigationResolve, request: Request, response: Response,
             auth: AuthContext = Depends(containment_admin), db: Session = Depends(get_db)):
     """Mark the investigation resolved in this application. Needs a reason and explicit confirmation; recorded as an audited
-    simulated action, and retries with the same `idempotency_key` return the original action (HTTP 200)."""
+    action, and retries with the same `idempotency_key` return the original action (HTTP 200)."""
     inv = _get(db, investigation_id)
     action = response_service.apply_action(db, auth.employee, inv.employee, "resolve_investigation", body.reason, inv.id,
                                            ip=resolve_ip(request, auth.employee), confirm=body.confirm,

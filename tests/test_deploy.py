@@ -525,3 +525,8 @@ def test_every_third_party_import_of_the_application_is_in_the_deployment_requir
     # imported only inside try/except to report versions (scipy is installed anyway as a dependency of scikit-learn)
     optional = {"pgserver", "scipy"}
     assert not (set(missing) - optional), missing
+
+def test_the_example_settings_do_not_override_the_calibrated_thresholds():
+    """`python app.py setup` copies .env.example; an uncommented THREAT_* line there would silently replace the operating point."""
+    active = [line for line in read(".env.example").splitlines() if line.startswith("THREAT_")]
+    assert active == []

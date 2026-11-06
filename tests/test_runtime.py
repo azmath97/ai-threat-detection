@@ -192,19 +192,19 @@ def test_response_centre_runs_simulated_containment_with_a_confirmation_and_reco
     at = at.button(key="nav_Response Centre").click().run()
     assert not at.exception, [e.value for e in at.exception]
     labels = [b.label for b in at.button]
-    assert "Simulate containment" in labels and not any(name in ("Review", "Execute action") for name in labels)
-    at = next(b for b in at.button if b.label == "Simulate containment").click().run()
+    assert "Run containment" in labels and not any(name in ("Review", "Execute action") for name in labels)
+    at = next(b for b in at.button if b.label == "Run containment").click().run()
     assert not at.exception, [e.value for e in at.exception]
     text = _page_text(at)
-    assert "Confirm simulated containment" in text and "No external system is contacted" in text
+    assert "Confirm containment" in text and "No external system is contacted" in text
     before = backend.get("/api/containment", admin)
-    at = next(c for c in at.checkbox if c.label.startswith("I confirm that I want to run this simulated action")).check().run()
-    at = next(b for b in at.button if b.label == "Run simulation").click().run()
+    at = next(c for c in at.checkbox if c.label.startswith("I confirm that I want to run this action")).check().run()
+    at = next(b for b in at.button if b.label == "Run action").click().run()
     assert not at.exception, [e.value for e in at.exception]
     after = backend.get("/api/containment", admin)
     assert len(after) == len(before) + 1
     new = after[0]
-    assert new["result"].startswith("Simulation completed: ") and new["simulated"] and new["idempotency_key"]
+    assert new["result"].startswith("Containment completed: ") and new["simulated"] and new["idempotency_key"]
     assert new["external_systems_contacted"] == [] and new["performed_by_username"] == "soc.admin"
     requests.post(f"{backend.url}/api/simulation/reset", headers=admin, timeout=30).raise_for_status()
 
@@ -231,3 +231,41 @@ def test_the_deployment_verifier_exercises_the_real_defences_and_the_data_surviv
 def test_the_verifier_says_plainly_when_it_cannot_run_the_brute_force_check(backend):
     run = _verify(backend, "--employee-password", EMPLOYEE_PASSWORD)
     assert run.returncode == 0 and "SKIP  brute-force lock and recovery" in run.stdout, run.stdout[-1500:]
+
+def _drill(backend: Backend, scenario: str, *extra: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, "-m", "deploy.attack_drill", scenario, "--api", backend.url,
+                           "--key", backend.env["TRUSTED_FRONTEND_KEY"], *extra],
+                          cwd=ROOT, env=backend.env, capture_output=True, text=True, timeout=240)
+
+
+def test_the_attack_drill_triggers_real_detection_and_response_and_recover_undoes_it(tmp_path):
+    fresh = Backend(tmp_path)
+    fresh.start()
+    try:
+        admin = fresh.login("SEC-9011", ADMIN_PASSWORD)
+        brute = _drill(fresh, "brute-force")
+        assert brute.returncode == 0 and brute.stdout.count("HTTP 401") == 5, brute.stdout + brute.stderr[-500:]
+        assert "not-the-password" not in brute.stdout
+        overview = fresh.get("/api/soc/auth/overview", admin)
+        assert [a["employee_id"] for a in overview["locked_accounts"]] == ["EMP-1010"]
+
+        compromised = _drill(fresh, "compromised-account")
+        assert compromised.returncode == 0 and "signed in with the valid password" in compromised.stdout, compromised.stdout
+        alerts = fresh.get("/api/alerts", admin)
+        assert any(a["status"] == "open" for a in alerts), "the real pipeline raised no alert for the compromised account"
+        assert all(e["is_synthetic"] is False for e in fresh.get("/api/events", admin, limit=50)["items"])   # real requests, not lab data
+        assert fresh.get("/api/soc/investigations", admin, status="active")
+
+        recovered = _drill(fresh, "recover")
+        assert recovered.returncode == 0 and "unlock EMP-1010: HTTP 201" in recovered.stdout, recovered.stdout
+        assert fresh.get("/api/soc/auth/overview", admin)["locked_accounts"] == []
+        assert "Nothing to recover" in _drill(fresh, "recover").stdout
+    finally:
+        fresh.stop()
+
+
+def test_the_drill_refuses_to_run_without_the_shared_key_for_address_dependent_scenarios(backend):
+    run = subprocess.run([sys.executable, "-m", "deploy.attack_drill", "brute-force", "--api", backend.url, "--key", ""],
+                         cwd=ROOT, env={k: v for k, v in backend.env.items() if k != "TRUSTED_FRONTEND_KEY"},
+                         capture_output=True, text=True, timeout=60)
+    assert run.returncode == 2 and "TRUSTED_FRONTEND_KEY" in run.stderr

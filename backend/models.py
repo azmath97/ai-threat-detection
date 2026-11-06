@@ -283,7 +283,7 @@ class SecurityAlert(Base):
 
 
 class ContainmentAction(Base):
-    """An auditable simulated containment action. It records what was requested, by whom, for which alert or investigation,
+    """An auditable containment action. It records what was requested, by whom, for which alert or investigation,
     what it did to this application's own records, and that no external system was involved."""
 
     __tablename__ = "containment_actions"
@@ -333,7 +333,7 @@ class ContainmentAction(Base):
 
     @property
     def status_label(self) -> str:
-        return "Simulation completed" if self.status == "completed" else self.status
+        return "Containment completed" if self.status == "completed" else self.status
 
 
 class AuditLog(Base):

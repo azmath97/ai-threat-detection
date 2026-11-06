@@ -1,4 +1,4 @@
-"""Containment is an auditable simulation: it records what was asked, by whom and with what result, changes only this
+"""Containment is auditable and local: it records what was asked, by whom and with what result, changes only this
 application's records, is idempotent on retry, is guarded against abuse, and never reaches an external service."""
 import ast
 import hashlib
@@ -64,7 +64,7 @@ def test_a_simulated_action_records_the_alert_investigation_initiator_time_and_r
     assert response.status_code == 201, response.text
     action = response.json()
     assert action["simulated"] is True and action["scope"] == SCOPE_KEY and action["status"] == "completed"
-    assert action["status_label"] == "Simulation completed" and action["result"].startswith("Simulation completed: ")
+    assert action["status_label"] == "Containment completed" and action["result"].startswith("Containment completed: ")
     assert action["alert_id"] == alert_id and action["investigation_id"] == inv_id and action["employee_id"] == target
     assert action["performed_by_username"] == "soc.admin" and action["reason"] == "Simulated drill"
     assert action["external_systems_contacted"] == [] and action["replayed"] is False
@@ -101,14 +101,14 @@ def test_the_response_centre_and_export_state_the_scope_and_carry_the_result(cli
     run, alert_id, inv_id = _incident(client, admin)
     done = _contain(client, admin, employee_id=run["target"]["id"], action_type="lock_account", investigation_id=inv_id).json()
     centre = client.get("/api/soc/response", headers=admin).json()
-    assert centre["scope_notice"] == SCOPE_NOTICE and "nothing protects a real organisation" in SCOPE_NOTICE
+    assert centre["scope_notice"] == SCOPE_NOTICE and "does not contact or change any firewall" in SCOPE_NOTICE
     entry = next(h for h in centre["history"] if h["id"] == done["id"])
     assert entry["simulated"] is True and entry["result"] == done["result"] and entry["alert_id"] == alert_id
-    assert "(simulated)" in entry["label"]
+    assert "simulated" not in entry["label"].lower()
     report = client.get(f"/api/investigations/{inv_id}/export", headers=admin, params={"format": "json"}).json()
     exported = next(a for a in report["containment_actions"] if a["action_id"] == done["id"])
     assert exported["simulated"] is True and exported["scope"] == SCOPE_KEY and exported["result"] == done["result"]
-    assert "simulations that changed only this application's own records" in report["report"]["notice"]
+    assert "changed only this application's own records" in report["report"]["notice"]
     detail = client.get(f"/api/soc/investigations/{inv_id}", headers=admin).json()
     assert detail["containment_actions"][0]["simulated"] is True and detail["containment_actions"][0]["result"] == done["result"]
 
@@ -165,7 +165,7 @@ def test_resolving_an_investigation_is_idempotent_with_a_key(client, admin, db_p
     first = client.post(f"/api/investigations/{inv_id}/resolve", headers=admin, json=body)
     again = client.post(f"/api/investigations/{inv_id}/resolve", headers=admin, json=body)
     assert first.status_code == 201 and again.status_code == 200 and again.json()["replayed"] is True
-    assert first.json()["id"] == again.json()["id"] and first.json()["result"].startswith("Simulation completed")
+    assert first.json()["id"] == again.json()["id"] and first.json()["result"].startswith("Containment completed")
     assert _since(db_path, "containment_actions", mark, "action_type='resolve_investigation'") == 1
     assert client.post(f"/api/investigations/{inv_id}/resolve", headers=admin, json={"reason": "Again", "confirm": True}).status_code == 409
 
@@ -301,11 +301,11 @@ def test_the_backend_has_no_code_path_to_external_systems():
 
 
 # ------------------------------------------------------------------------------------------------ claims and wording
-def test_labels_and_notices_describe_a_simulation():
-    assert all("(simulated)" in label for action, (label, _, _) in ACTION_INFO.items() if action != "resolve_investigation")
-    for needle in ("simulation", "No firewall", "nothing protects a real organisation"):
+def test_labels_and_notices_state_the_real_scope():
+    assert not any("simulat" in label.lower() for _, (label, _, _) in ACTION_INFO.items())
+    for needle in ("inside this application", "own records", "does not contact or change any firewall"):
         assert needle.lower() in SCOPE_NOTICE.lower()
-    assert response_service.RESULT_PREFIX == "Simulation completed: "
+    assert response_service.RESULT_PREFIX == "Containment completed: "
 
 
 FORBIDDEN_CLAIMS = [r"threat blocked", r"attack blocked", r"attack stopped", r"quarantin", r"protects? (the |a )?(real )?bank",
@@ -326,11 +326,10 @@ def test_no_user_facing_text_claims_real_enforcement():
     assert not hits, hits
 
 
-def test_the_readme_describes_a_simulated_platform_and_states_the_limits():
+def test_the_readme_states_what_is_enforced_and_what_is_not():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "simulated threat-detection and response platform" in text.lower()
     for statement in ("does not block real network traffic", "does not disable real accounts", "does not quarantine real devices",
                       "does not protect a real bank"):
         assert statement in text, statement
-    for scripted in ("Demo script", "Simulate containment", "Simulation completed"):
+    for scripted in ("Demo script", "Run containment", "Containment completed"):
         assert scripted in text

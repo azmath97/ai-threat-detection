@@ -1,4 +1,4 @@
-"""Simulated containment actions executed by security administrators.
+"""Containment actions executed by security administrators against this application's own state.
 
 Nothing here contacts a firewall, identity provider, endpoint agent, mail server or network: every action edits this
 application's own database records (account status, session rows, permission rows, a block list, isolation flags,
@@ -31,11 +31,10 @@ from backend.models import (
 )
 
 SCOPE_KEY = "simulated_application_state"
-SCOPE_NOTICE = ("Containment here is a controlled application simulation. Actions change this application's own records "
-                "(accounts, sessions, permissions, blocked addresses, isolated systems) and are enforced by this backend only. "
-                "No firewall, directory service, endpoint agent, email service or real network is contacted or changed, and "
-                "nothing protects a real organisation.")
-RESULT_PREFIX = "Simulation completed: "
+SCOPE_NOTICE = ("Containment acts inside this application: it changes its own records (accounts, sessions, permissions, "
+                "blocked addresses, isolated systems) and this backend enforces them on every request. It does not contact or "
+                "change any firewall, directory service, endpoint agent, email service or network.")
+RESULT_PREFIX = "Containment completed: "
 
 ACTION_TYPES = (
     "revoke_sessions", "lock_account", "restrict_access", "remove_privileges", "block_ip", "isolate_system",
@@ -45,15 +44,15 @@ NEEDS_CONFIRMATION = {"revoke_sessions", "lock_account", "restrict_access", "rem
                       "resolve_investigation"}
 ACCOUNT_CONTAINMENT = {"revoke_sessions", "lock_account", "restrict_access", "remove_privileges"}
 ACTION_INFO = {
-    "revoke_sessions": ("Revoke sessions (simulated)", "Marks the account's session records in this application as revoked, so the backend rejects them.", "employee"),
-    "lock_account": ("Disable account (simulated)", "Sets the account record to locked in this application and revokes its session records; this backend then refuses the login.", "employee"),
-    "restrict_access": ("Restrict sensitive access (simulated)", "Deletes confidential and restricted permission rows (or only the chosen resource) from this application's access table.", "employee"),
-    "remove_privileges": ("Remove privileges (simulated)", "Downgrades write permission rows to read; deletes all permission rows of accounts created during the incident.", "employee"),
-    "block_ip": ("Block IP in this application (simulated)", "Adds the address to this application's block list; its login code rejects the address and its session records are revoked. No firewall is involved.", "ip"),
-    "isolate_system": ("Isolate system record (simulated)", "Flags the resource as isolated in this application, so its permission check denies everyone until released.", "system"),
-    "restore_account": ("Restore account (simulated)", "Sets the account record back to active and restores permission rows removed by earlier simulated containment.", "employee"),
-    "unblock_ip": ("Unblock IP (simulated)", "Removes the address from this application's block list.", "ip"),
-    "release_system": ("Release system (simulated)", "Clears the isolation flag on the resource record.", "system"),
+    "revoke_sessions": ("Revoke sessions", "Marks the account's session records in this application as revoked, so the backend rejects them.", "employee"),
+    "lock_account": ("Disable account", "Sets the account record to locked in this application and revokes its session records; this backend then refuses the login.", "employee"),
+    "restrict_access": ("Restrict sensitive access", "Deletes confidential and restricted permission rows (or only the chosen resource) from this application's access table.", "employee"),
+    "remove_privileges": ("Remove privileges", "Downgrades write permission rows to read; deletes all permission rows of accounts created during the incident.", "employee"),
+    "block_ip": ("Block IP in this application", "Adds the address to this application's block list; its login code rejects the address and its session records are revoked. No firewall is involved.", "ip"),
+    "isolate_system": ("Isolate system record", "Flags the resource as isolated in this application, so its permission check denies everyone until released.", "system"),
+    "restore_account": ("Restore account", "Sets the account record back to active and restores permission rows removed by earlier containment.", "employee"),
+    "unblock_ip": ("Unblock IP", "Removes the address from this application's block list.", "ip"),
+    "release_system": ("Release system", "Clears the isolation flag on the resource record.", "system"),
     "resolve_investigation": ("Resolve investigation", "Marks the investigation and its alerts resolved in this application. Preserved evidence is kept.", "investigation"),
 }
 

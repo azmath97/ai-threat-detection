@@ -92,9 +92,9 @@ def build(db: Session, investigation: AttackInvestigation, admin: Employee) -> d
             "format_version": FORMAT_VERSION, "generated_at": _times(utcnow()), "generated_by": admin.employee_code,
             "timezone": get_settings().display_timezone, "investigation_id": inv.id,
             "synthetic": inv.is_synthetic or any(e["synthetic"] for e in events),
-            "notice": ("Synthetic data from a local simulation. Containment actions affected only the simulated environment, "
+            "notice":             ("Synthetic data. Containment actions changed only this application's own state, "
                        "not a real banking network." if inv.is_synthetic else "Evidence export for a single investigation.")
-                      + " Containment actions in this report are simulations that changed only this application's own records.",
+                      + " Containment actions in this report changed only this application's own records.",
         },
         "incident_summary": {
             "investigation_id": inv.id, "employee_id": employee.employee_code, "department": employee.department,

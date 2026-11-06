@@ -172,9 +172,9 @@ def test_evaluate_dataset_rejects_a_file_missing_required_columns(tmp_path):
 
 
 # ------------------------------------------------------------------ containment scope
-def test_containment_is_labelled_as_a_simulation(client, admin):
+def test_containment_states_its_real_scope(client, admin):
     centre = client.get("/api/soc/response", headers=admin).json()
-    assert centre["scope_notice"] == SCOPE_NOTICE and "No firewall" in SCOPE_NOTICE
+    assert centre["scope_notice"] == SCOPE_NOTICE and "does not contact or change any firewall" in SCOPE_NOTICE
     employees = client.get("/api/employees", headers=admin).json()
     target = next(e["id"] for e in employees if e["username"] == "jack.silva")
     done = client.post("/api/containment", headers=admin, json={

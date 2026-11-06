@@ -143,7 +143,7 @@ def restore_state(request):
         for table in ("security_alerts", "attack_investigations", "risk_assessments", "security_events"):
             con.execute(f"delete from {table} where id > ?", (marks[table],))
         # authentication defence: attempts, incidents, actions and blocks belong to the test; accounts locked by it are released
-        for table in ("auth_response_actions", "auth_incidents", "auth_attempts", "access_denials", "ip_blocks"):
+        for table in ("auth_response_actions", "auth_incidents", "auth_attempts", "access_denials", "export_requests", "ip_blocks"):
             con.execute(f"delete from {table}")
         con.execute("update employees set status='active', lock_reason=NULL, locked_at=NULL, lock_expires_at=NULL, locked_by=NULL "
                     "where status='locked'")

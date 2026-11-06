@@ -21,7 +21,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.auth_policy import AuthPolicy
-from backend.models import AccessDenial, AuthAttempt, Employee
+from backend.models import AccessDenial, AuthAttempt, Employee, ExportRequest
 
 SAMPLE = 500            # at most this many rows are read to describe a pattern; the counts themselves are exact
 MAX_IDS = 50
@@ -252,6 +252,34 @@ def _unauthenticated_flood(db: Session, denial: AccessDenial, policy: AuthPolicy
          "refusals": w["count"], "routes": w["routes"][:MAX_LISTED], "threshold": policy.unauth_alert,
          "critical_threshold": policy.unauth_critical, "denial_ids": w["ids"]},
         w["count"], w["first"], w["last"])
+
+
+# ------------------------------------------------------------------------------------------------ refused / pending exports
+def evaluate_export(db: Session, request: ExportRequest, employee: Employee, policy: AuthPolicy) -> list[Finding]:
+    """Repeated bulk-export requests that were refused, left pending or denied: someone trying to take data out in bulk."""
+    if policy.export_attempt_alert <= 0:
+        return []
+    since = request.created_at - timedelta(minutes=policy.export_attempt_window_minutes)
+    where = (ExportRequest.employee_id == employee.id, ExportRequest.status.in_(("refused", "pending", "denied")),
+             ExportRequest.created_at >= since, ExportRequest.created_at <= request.created_at)
+    count = db.scalar(select(func.count(ExportRequest.id)).where(*where)) or 0
+    if count < policy.export_attempt_alert:
+        return []
+    rows = db.execute(select(ExportRequest.id, ExportRequest.resource, ExportRequest.records, ExportRequest.reason, ExportRequest.created_at)
+                      .where(*where).order_by(ExportRequest.id.desc()).limit(SAMPLE)).all()
+    code = employee.employee_code or employee.username
+    critical = 0 < policy.export_attempt_critical <= count
+    return [Finding(
+        "bulk_export_attempt", "critical" if critical else "high_risk", f"bulk_export_attempt:{code}", request.source_ip, employee,
+        f"{code} made {count} bulk-export requests that were not simply allowed in {policy.export_attempt_window_minutes} min",
+        f"{count} requests by {code} to take large amounts of data were held for approval or refused within "
+        f"{policy.export_attempt_window_minutes} minutes (alert at {policy.export_attempt_alert}, critical at "
+        f"{policy.export_attempt_critical}). Nothing was released: each request was stopped before any data was processed.",
+        {"rule": "repeated bulk-export requests that were refused or held", "window_minutes": policy.export_attempt_window_minutes,
+         "attempts": count, "resources": sorted({r.resource for r in rows}), "records_requested": [r.records for r in rows][:MAX_LISTED],
+         "reasons": sorted({r.reason for r in rows}), "threshold": policy.export_attempt_alert,
+         "critical_threshold": policy.export_attempt_critical, "export_request_ids": sorted(r.id for r in rows)[-MAX_IDS:]},
+        count, min((r.created_at for r in rows), default=request.created_at), max((r.created_at for r in rows), default=request.created_at))]
 
 
 def evaluate_denial(db: Session, denial: AccessDenial, employee: Employee | None, policy: AuthPolicy) -> list[Finding]:

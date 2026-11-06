@@ -87,7 +87,7 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | SOC read models | `soc_service.py`, `soc_routes.py` |
 | Simulation | `scenario_generator.py` (seeded plans), `simulation_runs.py` (background runs, status, stop), `simulation_service.py` (manual steps, reset), `simulation_routes.py` |
 | Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (543 tests) |
+| Tests | `tests/` (563 tests) |
 
 ## Technology stack
 
@@ -333,7 +333,7 @@ A test asks SQLite's `EXPLAIN QUERY PLAN` for 14 of these queries and fails if a
 
 ### What was and was not verified
 
-Run in this repository (`python -m pytest tests -q`, 543 tests): migrations on a fresh database, on a database from an earlier
+Run in this repository (`python -m pytest tests -q`, 563 tests): migrations on a fresh database, on a database from an earlier
 release (including duplicate repair), and the refusal of a newer one; constraint and index behaviour; query plans;
 de-duplication, 12-way same-key and 9-way different-key concurrent ingestion on SQLite; transaction rollback; the
 bounded-query checks; two SOC sessions and a portal session seeing the same data; Streamlit reruns and double clicks against a
@@ -839,10 +839,22 @@ address per minute so a flood cannot fill the database.
 | Repeated refused requests | 10 refusals (403) by one account in 5 min: Elevated; 30: Alert | At Alert, end the account's sessions and lock it |
 | Probing other people's records (IDOR) | 5 different objects refused on one route by one account in 5 min: Elevated; 10: Alert | At Alert, end the sessions and lock the account |
 | Flood of unauthenticated requests | 30 refusals (401) from one address in 5 min: Elevated; 100: Alert | At Alert, block the address for 60 min |
+| Repeated bulk-export requests | 3 requests held for approval or refused in 30 min: Elevated; 6: Alert | At Alert, end the account's sessions and lock it |
 
 Repeating one forbidden call is told apart from probing many different records, and probing is not also counted as plain
 repetition. The refusals themselves come from the backend's authorization checks (the record is never returned); this adds the
 trail and the response.
+
+**Bulk exports and downloads** are authorized on the server **before** anything is processed (`backend/export_policy.py`), on every
+real path: the resource-access API, the telemetry endpoint, the payroll export and document downloads. A request is allowed, or:
+more than 10,000 records in one request is **held for approval** (a pending request, HTTP 409, no data returned); more than
+100,000 in one request is **refused outright** (403, approval cannot lift it); and an account that would exceed its rolling
+**hourly allowance** of 25,000 records is refused (429 with `Retry-After`). Large is not treated as malicious: staff with write access
+in the resource's own department get 5 times the hourly allowance, and an approved request bypasses the hourly allowance (never
+the absolute limit). A security administrator approves or denies on the SOC page; an approval is **single-use, bound to one
+account, resource, action and size, and expires** (60 min by default), it cannot be decided by the requester, and nothing is
+released by approving: the employee must repeat the request with `approval_id`. Employees can list their own requests at
+`GET /api/portal/exports`. Simulation traffic is exempt because it never touches real data.
 
 A success from the account's own registered address, while the failures came from other addresses, is the owner and raises nothing:
 treating it as a takeover would punish the victim. A success from the owner's own address that also produced the failures
@@ -870,7 +882,8 @@ locally, send `X-Frontend-Key` and `X-Client-IP` yourself, as `tests/test_auth_d
 **SOC page and API** (security administrators only, enforced by the backend): the SOC dashboard has an *Authentication Defence*
 page (incidents, evidence, locked accounts, blocked addresses, recent attempts, response history, unlock/unblock and manual
 responses with a reason and confirmation). Endpoints under `/api/soc/auth`: `overview`, `incidents`, `incidents/{id}`,
-`incidents/{id}/status`, `incidents/{id}/actions`, `attempts`, `denials`, `actions` (GET) and `actions` (POST, direct response). State
+`incidents/{id}/status`, `incidents/{id}/actions`, `attempts`, `denials`, `export-requests` (GET), `export-requests/{id}/decision`,
+`actions` (GET) and `actions` (POST, direct response). State
 changes are rate limited, validated, audited and idempotent with an `Idempotency-Key`.
 
 | Setting | Default | Meaning |
@@ -882,6 +895,8 @@ changes are rate limited, validated, audited and idempotent with an `Idempotency
 | `DISTRIBUTED_IPS`, `DISTRIBUTED_FAILURES`, `DISTRIBUTED_WINDOW_MINUTES` | 3, 6, 10 | One account, many addresses |
 | `SUCCESS_AFTER_FAILURES`, `SUCCESS_AFTER_FAILURES_WINDOW_MINUTES` | 3, 10 | Success after failures |
 | `FORBIDDEN_ALERT`, `FORBIDDEN_CRITICAL`, `IDOR_DISTINCT_ALERT`, `IDOR_DISTINCT_CRITICAL`, `UNAUTH_FLOOD_ALERT`, `UNAUTH_FLOOD_CRITICAL`, `ACCESS_WINDOW_MINUTES`, `DENIAL_RECORD_LIMIT_PER_MINUTE` | 10, 30, 5, 10, 30, 100, 5, 120 | Refused requests (401/403) |
+| `EXPORT_APPROVAL_THRESHOLD`, `EXPORT_HARD_LIMIT`, `EXPORT_HOURLY_LIMIT`, `EXPORT_OWNER_MULTIPLIER`, `EXPORT_APPROVAL_MINUTES` | 10000, 100000, 25000, 5, 60 | Export and download authorization |
+| `EXPORT_ATTEMPT_ALERT`, `EXPORT_ATTEMPT_CRITICAL`, `EXPORT_ATTEMPT_WINDOW_MINUTES` | 3, 6, 30 | Repeated bulk-export requests |
 | `MAX_AUTO_LOCKS_PER_HOUR`, `MAX_AUTO_BLOCKS_PER_HOUR`, `PROTECTED_IPS`, `AUTH_ATTEMPT_RETENTION_DAYS` | 10, 10, empty, 30 | Safeguards and retention |
 
 These are starting values, not universal truth: calibrate them against your real sign-in traffic.
@@ -893,12 +908,17 @@ lock), recovery by an administrator, authorization (401/403), payload validation
 schema 3 to 4 migration. `tests/test_access_defense.py` (15 tests) covers refused requests: what is and is not recorded, repeated
 refusals, IDOR probing versus repetition, the unauthenticated flood and its block, our own enforcement not being counted, the
 per-address cap, detect-only mode and authorization. `tests/test_auth_defense_ui.py` drives the real SOC page against a real
-backend process (unlocking an account; IDOR evidence), and the page was also checked in a browser against real failed sign-ins. **Not verified:** any public deployment, an attacker on a separate
+backend process (unlocking an account; IDOR evidence; approving a held export), and the page was also checked in a browser
+against real failed sign-ins. `tests/test_export_defense.py` (16 tests) covers every export outcome: unaffected normal sizes,
+held-for-approval, single-use approvals (including eight simultaneous uses of one approval), binding to account, resource,
+action and size, denial and expiry, the absolute limit, the hourly allowance and the owner multiplier, the payroll export, the
+incident and its response, authorization and validation, and the simulation exemption. **Not verified:** any public deployment, an attacker on a separate
 device, behaviour on PostgreSQL with several instances (concurrency was tested on SQLite), the thresholds against real
 traffic, or the gateway's address handling behind a real platform proxy.
 
 **Not done in this phase** (still to build): a firewall provider integration (Vercel or another WAF) and its enforcement states,
-Redis, removal of the Simulation Console, detections for password changes, bulk-export authorization and geolocation,
+Redis, removal of the Simulation Console, detections for password changes and geolocation, a portal screen for employees to
+track their own export requests (the API exists),
 progressive login delays, analyst assignment, a Next.js front end, and calibration on real traffic.
 
 ## Detection rules in detail
@@ -1349,7 +1369,7 @@ ml/detect/                   window builder, features, models, hybrid risk, benc
 docs/                        cert-dataset.md, detection-evaluation.md, deployment.md, detection-results/
 docs/cert-dataset.md         CERT dataset setup, field mapping, label rules, caveats
 frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       543 pytest tests
+tests/                       563 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
 requirements.txt  requirements-dev.txt (adds pgserver for the PostgreSQL tests)  requirements-deploy.txt (pinned runtime for the image)
 Dockerfile  .dockerignore  render.yaml  .env.example
@@ -1358,7 +1378,7 @@ Dockerfile  .dockerignore  render.yaml  .env.example
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 543 tests, about eight minutes (a real backend is started several times)
+python -m pytest tests -q          # 563 tests, about eight minutes (a real backend is started several times)
 python -m pip install -r requirements-dev.txt   # optional: adds pgserver so tests/test_postgres.py runs instead of skipping
 ```
 

@@ -66,6 +66,15 @@ class AuthPolicy:
     unauth_critical: int
     access_window_minutes: int
     denial_record_limit_per_minute: int  # at most this many refused requests are stored per address per minute (flood cap)
+    # exports and downloads
+    export_approval_threshold: int       # EXPORT_APPROVAL_THRESHOLD: more records than this in one request needs a security approval
+    export_hard_limit: int               # EXPORT_HARD_LIMIT: never more than this in one request, approved or not
+    export_hourly_limit: int             # EXPORT_HOURLY_LIMIT: records one account may take per rolling hour
+    export_owner_multiplier: int         # staff with write access in the resource's own department get this many times the hourly limit
+    export_approval_minutes: int         # how long an approval stays usable
+    export_attempt_alert: int            # refused or pending bulk requests by one account within the window: high risk
+    export_attempt_critical: int
+    export_attempt_window_minutes: int
     # safeguards
     max_auto_locks_per_hour: int
     max_auto_blocks_per_hour: int
@@ -102,6 +111,14 @@ def get_policy() -> AuthPolicy:
         unauth_critical=_int("UNAUTH_FLOOD_CRITICAL", 100),
         access_window_minutes=_int("ACCESS_WINDOW_MINUTES", 5),
         denial_record_limit_per_minute=_int("DENIAL_RECORD_LIMIT_PER_MINUTE", 120),
+        export_approval_threshold=_int("EXPORT_APPROVAL_THRESHOLD", 10_000),
+        export_hard_limit=_int("EXPORT_HARD_LIMIT", 100_000),
+        export_hourly_limit=_int("EXPORT_HOURLY_LIMIT", 25_000),
+        export_owner_multiplier=max(1, _int("EXPORT_OWNER_MULTIPLIER", 5)),
+        export_approval_minutes=max(1, _int("EXPORT_APPROVAL_MINUTES", 60)),
+        export_attempt_alert=_int("EXPORT_ATTEMPT_ALERT", 3),
+        export_attempt_critical=_int("EXPORT_ATTEMPT_CRITICAL", 6),
+        export_attempt_window_minutes=_int("EXPORT_ATTEMPT_WINDOW_MINUTES", 30),
         max_auto_locks_per_hour=_int("MAX_AUTO_LOCKS_PER_HOUR", 10),
         max_auto_blocks_per_hour=_int("MAX_AUTO_BLOCKS_PER_HOUR", 10),
         protected_networks=_networks(os.getenv("PROTECTED_IPS", "")),

@@ -389,7 +389,7 @@ def test_migration_4_upgrades_a_version_3_database_in_place(tmp_path):
     db = create_engine(f"sqlite:///{(tmp_path / 'v3.db').as_posix()}")
     migrations.upgrade(db)
     with db.begin() as conn:
-        for table in ("auth_response_actions", "auth_incidents", "auth_attempts", "access_denials", "ip_blocks"):
+        for table in ("auth_response_actions", "auth_incidents", "auth_attempts", "access_denials", "export_requests", "ip_blocks"):
             conn.exec_driver_sql(f"DROP TABLE {table}")
         for column in ("lock_reason", "locked_at", "lock_expires_at", "locked_by"):
             conn.exec_driver_sql(f"ALTER TABLE employees DROP COLUMN {column}")
@@ -397,7 +397,7 @@ def test_migration_4_upgrades_a_version_3_database_in_place(tmp_path):
     assert migrations.current_version(db) == 3
     assert migrations.upgrade(db) == [4]
     names = set(inspect(db).get_table_names())
-    assert {"auth_attempts", "auth_incidents", "auth_response_actions", "ip_blocks", "access_denials"} <= names
+    assert {"auth_attempts", "auth_incidents", "auth_response_actions", "ip_blocks", "access_denials", "export_requests"} <= names
     assert {"lock_reason", "locked_at", "lock_expires_at", "locked_by"} <= {c["name"] for c in inspect(db).get_columns("employees")}
     assert migrations.upgrade(db) == []
 

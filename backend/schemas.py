@@ -44,6 +44,7 @@ class LoginRequest(BaseModel):
 class ResourceAccessRequest(BaseModel):
     action: Literal["view", "download", "export"] = "view"
     record_count: int = Field(default=0, ge=0, le=10_000_000)
+    approval_id: int | None = Field(default=None, gt=0, description="An approved export request (see 409 responses) that covers this export")
 
 
 class EventCreate(BaseModel):

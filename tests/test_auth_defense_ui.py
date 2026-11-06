@@ -47,6 +47,31 @@ def test_an_analyst_sees_a_real_attack_and_recovers_the_account_through_the_page
     assert done and done[0]["status"] == "completed" and not done[0]["automatic"] and done[0]["performed_by"] == "SEC-9011"
 
 
+def test_an_analyst_approves_a_held_bulk_export_through_the_page(backend, monkeypatch):
+    from data.demo_accounts import demo_password
+
+    admin = backend.login("SEC-9011", ADMIN_PASSWORD)
+    bob = backend.login("EMP-1002", demo_password("EMP-1002"))
+    body = {"action": "export", "record_count": 15_000}
+    held = requests.post(f"{backend.url}/api/resources/payroll-records/access", headers=bob, json=body, timeout=15)
+    assert held.status_code == 409
+    (request,) = [r for r in backend.get("/api/soc/auth/export-requests", admin, status="pending")["rows"]]
+
+    at = _sign_in(_run_app("frontend/soc_dashboard.py", backend, monkeypatch), "SEC-9011", ADMIN_PASSWORD)
+    at = at.button(key="nav_Authentication Defence").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    shown = " ".join(str(m.value) for m in at.markdown) + _page_text(at)
+    assert "Export approvals (1 waiting)" in shown and "15,000" in shown and "simulat" not in shown.lower()
+
+    at.text_input(key=f"export_note_{request['id']}").input("Confirmed with the payroll data owner")
+    at = next(b for b in at.button if b.label == "Approve").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    after = backend.get("/api/soc/auth/export-requests", admin, status="approved")["rows"]
+    assert [r["id"] for r in after] == [request["id"]] and after[0]["decided_by"] == "SEC-9011"
+    retry = requests.post(f"{backend.url}/api/resources/payroll-records/access", headers=bob, json={**body, "approval_id": request["id"]}, timeout=15)
+    assert retry.status_code == 200
+
+
 def test_the_page_shows_idor_probing_with_the_refused_requests_as_evidence(backend, monkeypatch):
     from data.demo_accounts import demo_password
 

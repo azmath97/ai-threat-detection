@@ -12,6 +12,7 @@ from backend import (
     auth_defense_routes,
     baseline as baseline_service,
     event_service,
+    export_policy,
     investigation_routes,
     investigation_service,
     portal_routes,
@@ -307,8 +308,10 @@ def access_resource(
     result, permitted = event_service.access_resource(
         db, auth.employee, resource_id, body.action, source_ip=resolve_ip(request, auth.employee),
         session=auth.session, record_count=body.record_count, device_info=device_info(request),
-        request_id=idempotency_key(request),
+        request_id=idempotency_key(request), approval_id=body.approval_id,
     )
+    if result.export_decision is not None and not result.export_decision.allowed:
+        raise export_policy.http_error(result.export_decision)
     if not permitted:
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"You do not have permission to {body.action} {meta['name']}")
     label = SENSITIVITY_LABELS[meta["sensitivity"]]

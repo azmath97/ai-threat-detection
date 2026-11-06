@@ -417,7 +417,7 @@ class ResponseControl(Base):
 # ------------------------------------------------------------------------------------------ authentication defence
 AUTH_OUTCOMES = ("success", "failure", "denied")
 INCIDENT_KINDS = ("account_brute_force", "credential_stuffing", "ip_failure_burst", "distributed_account_attack",
-                  "login_after_failures", "repeated_forbidden_access", "idor_probe", "unauthenticated_flood")
+                  "login_after_failures", "repeated_forbidden_access", "idor_probe", "unauthenticated_flood", "bulk_export_attempt")
 INCIDENT_STATUSES = ("open", "investigating", "contained", "resolved", "false_positive")
 ACTION_TYPES = ("lock_account", "unlock_account", "revoke_sessions", "block_ip", "unblock_ip")
 ACTION_STATUSES = ("completed", "failed", "skipped", "pending_approval")
@@ -539,6 +539,42 @@ class ResponseAction(Base):
 
     incident: Mapped[AuthIncident | None] = relationship(back_populates="actions")
     performer: Mapped[Employee | None] = relationship(foreign_keys=[performed_by])
+
+
+EXPORT_STATUSES = ("pending", "approved", "denied", "used", "expired", "refused")
+
+
+class ExportRequest(Base):
+    """A download or export the backend did not simply allow: it needs a security administrator's approval (pending, then
+    approved or denied), or it was refused outright (above the absolute cap or the rolling hourly limit). An approval is
+    single-use, bound to one account, resource, action and size, and expires. Allowed exports leave only their normal event."""
+
+    __tablename__ = "export_requests"
+    __table_args__ = (
+        Index("ix_export_requests_employee_time", "employee_id", "created_at"),
+        Index("ix_export_requests_status", "status"),
+        CheckConstraint(_in("status", EXPORT_STATUSES), name="ck_export_requests_status"),
+        CheckConstraint(_in("action", ("download", "export")), name="ck_export_requests_action"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"))
+    resource: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(16))
+    records: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(12), default="pending")
+    reason: Mapped[str] = mapped_column(String(32))          # approval_required | over_hard_limit | hourly_limit
+    detail: Mapped[str] = mapped_column(String(300), default="")
+    source_ip: Mapped[str] = mapped_column(String(45))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)   # decision deadline, then the approval's validity
+    decided_by: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+    employee: Mapped[Employee] = relationship(foreign_keys=[employee_id])
+    decider: Mapped[Employee | None] = relationship(foreign_keys=[decided_by])
 
 
 class IpBlock(Base):

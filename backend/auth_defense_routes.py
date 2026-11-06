@@ -10,12 +10,12 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from backend import auth_response
+from backend import auth_response, export_policy
 from backend.auth_policy import get_policy
-from backend.catalog import SEVERITY_LEVELS
+from backend.catalog import RESOURCES, SEVERITY_LEVELS
 from backend.config import get_settings, to_local
 from backend.database import get_db, utcnow
 from backend.errors import ServiceError
@@ -26,6 +26,7 @@ from backend.models import (
     AuthAttempt,
     AuthIncident,
     Employee,
+    ExportRequest,
     IpBlock,
     ResponseAction,
 )
@@ -45,7 +46,8 @@ KIND_LABELS = {"account_brute_force": "Brute force on one account", "credential_
                "ip_failure_burst": "Burst of failures from one address", "distributed_account_attack": "One account attacked from many addresses",
                "login_after_failures": "Successful sign-in after repeated failures",
                "repeated_forbidden_access": "Repeated refused requests by one account",
-               "idor_probe": "Probing other people's records (IDOR)", "unauthenticated_flood": "Flood of unauthenticated requests"}
+               "idor_probe": "Probing other people's records (IDOR)", "unauthenticated_flood": "Flood of unauthenticated requests",
+               "bulk_export_attempt": "Repeated bulk-export requests that were held or refused"}
 ACTIVE = ("open", "investigating", "contained")
 
 
@@ -82,6 +84,15 @@ def attempt_out(db: Session, a: AuthAttempt) -> dict:
             "reason": a.reason, "device": a.device_info}
 
 
+def export_request_out(db: Session, r: ExportRequest) -> dict:
+    labels = {"pending": "Awaiting approval", "approved": "Approved (not yet used)", "denied": "Denied", "used": "Approved and used",
+              "expired": "Expired", "refused": "Refused (limit)"}
+    return {"id": r.id, "employee_id": _code(db, r.employee_id), "resource": r.resource, "resource_name": RESOURCES.get(r.resource, {}).get("name", r.resource),
+            "action": r.action, "records": r.records, "status": r.status, "status_label": labels[r.status], "reason": r.reason,
+            "detail": r.detail, "source_ip": r.source_ip, "created_at": _iso(r.created_at), "expires_at": _iso(r.expires_at),
+            "decided_by": _code(db, r.decided_by), "decided_at": _iso(r.decided_at), "decision_note": r.decision_note, "used_at": _iso(r.used_at)}
+
+
 def denial_out(db: Session, d: AccessDenial) -> dict:
     return {"id": d.id, "timestamp": _iso(d.timestamp), "source_ip": d.source_ip, "account": _code(db, d.employee_id) or "-",
             "method": d.method, "route": d.route, "object": d.object_ref, "status_code": d.status_code,
@@ -113,6 +124,7 @@ def overview(hours: int = Query(24, ge=1, le=24 * 30), _: AuthContext = Depends(
         "refused_requests": {"unauthenticated_401": by_status.get(401, 0), "forbidden_403": by_status.get(403, 0)},
         "active_incidents": {"total": sum(by_severity.values()), **{s: by_severity.get(s, 0) for s in SEVERITY_LEVELS if s != "normal"}},
         "pending_approval": pending,
+        "pending_exports": db.scalar(select(func.count(ExportRequest.id)).where(ExportRequest.status == "pending")) or 0,
         "locked_accounts": [{"employee_id": e.employee_code, "name": e.full_name, "reason": e.lock_reason, "locked_at": _iso(e.locked_at),
                              "expires_at": _iso(e.lock_expires_at), "locked_by": e.locked_by,
                              "automatic": (e.locked_by or "").startswith("policy:")} for e in locked],
@@ -129,6 +141,11 @@ def overview(hours: int = Query(24, ge=1, le=24 * 30), _: AuthContext = Depends(
                    "stuffing_window_minutes": policy.stuffing_window_minutes, "max_auto_locks_per_hour": policy.max_auto_locks_per_hour,
                    "max_auto_blocks_per_hour": policy.max_auto_blocks_per_hour,
                    "forbidden_alert": policy.forbidden_alert, "forbidden_critical": policy.forbidden_critical,
+                   "export_approval_threshold": policy.export_approval_threshold, "export_hard_limit": policy.export_hard_limit,
+                   "export_hourly_limit": policy.export_hourly_limit, "export_owner_multiplier": policy.export_owner_multiplier,
+                   "export_approval_minutes": policy.export_approval_minutes, "export_attempt_alert": policy.export_attempt_alert,
+                   "export_attempt_critical": policy.export_attempt_critical,
+                   "export_attempt_window_minutes": policy.export_attempt_window_minutes,
                    "idor_alert": policy.idor_alert, "idor_critical": policy.idor_critical, "unauth_alert": policy.unauth_alert,
                    "unauth_critical": policy.unauth_critical, "access_window_minutes": policy.access_window_minutes,
                    "note": "Starting policy, configurable by environment variables; calibrate against real sign-in traffic."},
@@ -175,16 +192,68 @@ def incident_detail(incident_id: int, _: AuthContext = Depends(require_admin), d
     incident = _incident_or_404(db, incident_id)
     ev = incident.evidence or {}
     out = incident_out(db, incident, detail=True)
+    if ev.get("export_request_ids"):
+        rows = db.scalars(select(ExportRequest).where(ExportRequest.id.in_(ev["export_request_ids"])).order_by(ExportRequest.id.desc()).limit(100))
+        return {**out, "attempts": [], "denials": [], "export_requests": [export_request_out(db, r) for r in rows]}
     if ev.get("denial_ids"):
         rows = db.scalars(select(AccessDenial).where(AccessDenial.id.in_(ev["denial_ids"])).order_by(AccessDenial.id.desc()).limit(100))
-        return {**out, "attempts": [], "denials": [denial_out(db, d) for d in rows]}
+        return {**out, "attempts": [], "denials": [denial_out(db, d) for d in rows], "export_requests": []}
     ids = ev.get("attempt_ids", [])
     query = select(AuthAttempt).order_by(AuthAttempt.id.desc()).limit(100)
     if ids:
         query = query.where(AuthAttempt.id.in_(ids))
     elif incident.source_ip:
         query = query.where(AuthAttempt.source_ip == incident.source_ip)
-    return {**out, "attempts": [attempt_out(db, a) for a in db.scalars(query)], "denials": []}
+    return {**out, "attempts": [attempt_out(db, a) for a in db.scalars(query)], "denials": [], "export_requests": []}
+
+
+@router.get("/export-requests")
+def export_requests(req_status: str = Query("pending", alias="status", pattern="^(pending|all|approved|denied|used|expired|refused)$"),
+                    limit: int = Query(100, ge=1, le=_MAX_PAGE), _: AuthContext = Depends(require_admin), db: Session = Depends(get_db)):
+    """Bulk downloads and exports held for approval or refused, newest first. Reading closes requests whose time has run out."""
+    if export_policy.expire_stale(db):
+        db.commit()
+    query = select(ExportRequest).order_by(ExportRequest.id.desc()).limit(limit)
+    if req_status != "all":
+        query = query.where(ExportRequest.status == req_status)
+    return {"rows": [export_request_out(db, r) for r in db.scalars(query)],
+            "rules": {"approval_threshold": get_policy().export_approval_threshold, "hard_limit": get_policy().export_hard_limit,
+                      "hourly_limit": get_policy().export_hourly_limit, "owner_multiplier": get_policy().export_owner_multiplier,
+                      "approval_minutes": get_policy().export_approval_minutes}}
+
+
+class ExportDecision(BaseModel):
+    decision: Literal["approve", "deny"]
+    note: str = Field(min_length=5, max_length=300)
+    valid_minutes: int | None = Field(default=None, ge=1, le=60 * 24, description="How long an approval stays usable")
+
+
+@router.post("/export-requests/{request_id}/decision")
+def decide_export(request_id: int, body: ExportDecision, auth: AuthContext = Depends(admin_limited("export_decision")),
+                  db: Session = Depends(get_db)):
+    """Approve or deny a pending export request. An approval is single-use, bound to the requester, resource, action and size, and
+    expires. You cannot decide your own request. Nothing is released by this call: the requester must repeat the export."""
+    export_policy.expire_stale(db)
+    row = db.get(ExportRequest, request_id)
+    if row is None:
+        raise HTTPException(404, "Export request not found")
+    if row.employee_id == auth.employee.id:
+        raise HTTPException(422, "You cannot decide your own export request")
+    now = utcnow()
+    approve = body.decision == "approve"
+    expires = now + timedelta(minutes=body.valid_minutes or get_policy().export_approval_minutes) if approve else None
+    changed = db.execute(update(ExportRequest).where(ExportRequest.id == request_id, ExportRequest.status == "pending").values(
+        status="approved" if approve else "denied", decided_by=auth.employee.id, decided_at=now, decision_note=body.note.strip(),
+        expires_at=expires)).rowcount
+    if not changed:
+        db.rollback()
+        raise HTTPException(409, f"This request is no longer pending ({row.status})")
+    write_audit(db, "export_approved" if approve else "export_denied", actor_id=auth.employee.id, target_type="export_request",
+                target_id=request_id, details={"requester": _code(db, row.employee_id), "resource": row.resource, "records": row.records,
+                                               "note": body.note.strip()[:200], "valid_until": expires.isoformat() if expires else None})
+    db.commit()
+    db.refresh(row)
+    return export_request_out(db, row)
 
 
 @router.get("/denials")

@@ -99,7 +99,12 @@ def incident_detail(h: dict, incident_id: int) -> None:
     else:
         st.caption("No response has been applied yet.")
 
-    if d.get("denials"):
+    if d.get("export_requests"):
+        ui.section("Evidence: the export requests behind this incident")
+        ui.table([{"time": h["short"](x["created_at"]["local"]), "resource": x["resource_name"], "action": x["action"],
+                   "records": f"{x['records']:,}", "status": x["status_label"], "why": x["detail"]} for x in d["export_requests"]],
+                 {"time": "Time", "resource": "Resource", "action": "Action", "records": "Records", "status": "State", "why": "Why it was held"})
+    elif d.get("denials"):
         ui.section("Evidence: the refused requests behind this incident")
         ui.table([{"time": h["short"](x["timestamp"]["local"]), "ip": x["source_ip"], "account": x["account"],
                    "request": f"{x['method']} {x['route']}", "object": x["object"] or "-", "status": f"{x['status_code']} {x['meaning']}"}
@@ -135,6 +140,34 @@ def incident_detail(h: dict, incident_id: int) -> None:
                 st.rerun()
 
 
+def export_approvals(h: dict) -> None:
+    """Bulk downloads and exports waiting for a security administrator. Approving releases nothing by itself."""
+    data = h["cached"]("auth_exports", "/api/soc/auth/export-requests", status="pending") or {}
+    rows = data.get("rows", [])
+    rules = data.get("rules", {})
+    ui.section(f"Export approvals ({len(rows)} waiting)")
+    st.caption(f"A request for more than {rules.get('approval_threshold', 0):,} records waits here. An approval is single-use, tied to that account, "
+               f"resource and size, and lasts {rules.get('approval_minutes', 0)} minutes. Nothing is released until the employee repeats the request.")
+    if not rows:
+        st.caption("No export is waiting for approval.")
+    for r in rows:
+        with st.form(f"export_{r['id']}"):
+            st.markdown(f"**#{r['id']} {r['employee_id']}** wants to {r['action']} **{r['records']:,}** records of {r['resource_name']} "
+                        f"({h['short'](r['created_at']['local'])}). {r['detail']}")
+            note = st.text_input("Decision note (recorded in the audit log)", key=f"export_note_{r['id']}")
+            approve, deny, _ = st.columns([1, 1, 4])
+            choice = "approve" if approve.form_submit_button("Approve", type="primary") else "deny" if deny.form_submit_button("Deny") else None
+            if choice:
+                try:
+                    h["api"]().post(f"/api/soc/auth/export-requests/{r['id']}/decision", {"decision": choice, "note": note})
+                except ApiError as exc:
+                    ui.notice("error", exc.detail)
+                else:
+                    st.session_state["flash_ok"] = f"Export request #{r['id']} {'approved' if choice == 'approve' else 'denied'}."
+                    st.session_state["_cache"] = {}
+                    st.rerun()
+
+
 def render(h: dict) -> None:
     ov = h["cached"]("auth_ov", "/api/soc/auth/overview")
     if ov is None:
@@ -157,6 +190,8 @@ def render(h: dict) -> None:
         ui.notice("warn", f"{ov['pending_approval']} automatic action(s) are waiting for an analyst because an hourly safety limit was reached.")
     if not ov["policy"]["auto_response"]:
         ui.notice("info", "Automatic response is off: incidents are raised but nothing is locked or blocked without an analyst.")
+
+    export_approvals(h)
 
     ui.section("Incidents")
     status = h["pselect"]("Show", ["active", "all", "resolved", "false_positive"], "ai_status",
@@ -231,6 +266,11 @@ def render(h: dict) -> None:
                                  f"{p['forbidden_critical']}: Alert and the session ends and the account locks; {p['idor_alert']} different records "
                                  f"on one route: probing (Elevated), {p['idor_critical']}: Alert; {p['unauth_alert']} requests without a "
                                  f"session from one address: Elevated, {p['unauth_critical']}: Alert and block"),
+            ("Exports and downloads", f"more than {p['export_approval_threshold']:,} records in one request needs a security approval; never more than "
+                                      f"{p['export_hard_limit']:,}; {p['export_hourly_limit']:,} records per account per hour "
+                                      f"({p['export_owner_multiplier']}x for staff who own the data); {p['export_attempt_alert']} held or refused "
+                                      f"requests in {p['export_attempt_window_minutes']} min: Elevated, {p['export_attempt_critical']}: Alert and the "
+                                      "session ends and the account locks"),
             ("Safety limits", f"at most {p['max_auto_locks_per_hour']} automatic locks and {p['max_auto_blocks_per_hour']} automatic blocks per hour; "
                               "administrators are never locked automatically; private and protected addresses are never blocked"),
             ("Note", p["note"]),

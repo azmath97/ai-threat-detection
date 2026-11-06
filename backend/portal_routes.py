@@ -6,8 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend import portal_data
-from backend import controls
+from backend import controls, export_policy, portal_data
 from backend.auth_service import create_account
 from backend.catalog import RESOURCES
 from backend.database import get_db
@@ -46,6 +45,16 @@ class Ctx:
         reason = {"reason": "system_isolated"} if controls.is_isolated(self.db, resource) else {}
         self.log(event_type, resource, outcome="denied", details={**(details or {}), **reason, "action": action})
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"Access to {RESOURCES[resource]['name']} is not permitted for your role")
+
+    def authorize_export(self, resource: str, action: str, event_type: str, records: int, approval_id: int | None = None):
+        """Server-side export policy (size limits, security approval, hourly allowance), decided before the data is processed."""
+        decision = export_policy.authorize(self.db, self.auth.employee, resource, action, records, ip=self.ip, approval_id=approval_id)
+        if decision.allowed:
+            return decision
+        self.log(event_type, resource, outcome="denied",
+                 details={"action": action, "requested_records": records, "reason": decision.reason,
+                          "export_request_id": decision.request.id if decision.request else None})
+        raise export_policy.http_error(decision)
 
 
 def _ctx(request: Request, auth: AuthContext = Depends(get_auth), db: Session = Depends(get_db)) -> Ctx:
@@ -96,12 +105,13 @@ def payroll_register(ctx: Ctx = Depends(_ctx)):
 
 
 @router.post("/portal/payroll/export")
-def payroll_export(ctx: Ctx = Depends(_ctx)):
+def payroll_export(approval_id: int | None = Query(None, gt=0), ctx: Ctx = Depends(_ctx)):
     enforce("payroll_export", ctx.auth.employee.id, "heavy")
     ctx.require("payroll-records", "export", "data_export", {"view": "register"})
     rows = portal_data.payroll_register(_staff(ctx.db))
+    ctx.authorize_export("payroll-records", "export", "data_export", len(rows), approval_id)
     ctx.log("data_export", "payroll-records", accessed=len(rows), downloaded=len(rows),
-            details={"format": "csv", "view": "register"})
+            details={"format": "csv", "view": "register", **({"export_approval_id": approval_id} if approval_id else {})})
     return {"filename": f"payroll_register_{rows[0]['period']}.csv", "media_type": "text/csv",
             "content": portal_data.rows_to_csv(rows), "record_count": len(rows)}
 
@@ -154,9 +164,24 @@ def download_document(doc_id: str, ctx: Ctx = Depends(_ctx)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
     ctx.require(doc["resource"], "download", "file_download", {"document_id": doc["id"], "title": doc["title"]})
     filename, media_type, text = portal_data.document_content(doc)
+    ctx.authorize_export(doc["resource"], "download", "file_download", 1)
     ctx.log("file_download", doc["resource"], accessed=1, downloaded=1,
             details={"document_id": doc["id"], "title": doc["title"], "filename": filename})
     return Response(text, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# ----------------------------------------------------------------- my export requests
+@router.get("/portal/exports")
+def my_export_requests(ctx: Ctx = Depends(_ctx)):
+    """The signed-in employee's own held or refused bulk-export requests and their state (never anyone else's)."""
+    from backend.models import ExportRequest
+
+    export_policy.expire_stale(ctx.db)
+    rows = ctx.db.scalars(select(ExportRequest).where(ExportRequest.employee_id == ctx.auth.employee.id)
+                          .order_by(ExportRequest.id.desc()).limit(50))
+    return [{"id": r.id, "resource": r.resource, "action": r.action, "records": r.records, "status": r.status, "reason": r.reason,
+             "created_at": r.created_at.isoformat(), "expires_at": r.expires_at.isoformat() if r.expires_at else None,
+             "decision_note": r.decision_note} for r in rows]
 
 
 # ----------------------------------------------------------------- directory

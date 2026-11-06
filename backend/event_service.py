@@ -41,6 +41,7 @@ class EventResult:
     alert: SecurityAlert | None
     threat: "threat_engine.ThreatAssessment | None" = None
     duplicate: bool = False
+    export_decision: object | None = None        # export_policy.Decision when an export or download was checked
 
 
 def write_audit(
@@ -208,10 +209,24 @@ def access_resource(
     is_synthetic: bool = False,
     scenario: str | None = None,
     request_id: str | None = None,
+    approval_id: int | None = None,
 ) -> tuple[EventResult, bool]:
-    """Authorise a resource action against the permission table and log the outcome."""
+    """Authorise a resource action against the permission table and log the outcome.
+
+    A permitted download or export of real data is also checked against the export policy before it is processed (size
+    limits, security approval, hourly allowance). Simulation traffic (is_synthetic) is exempt: it never touches real data."""
     permitted = has_access(db, employee.id, resource, action)
+    decision = None
+    if permitted and not is_synthetic and action in ("download", "export"):
+        from backend import export_policy                      # imported here: export_policy builds on auth_response, which uses this module
+
+        decision = export_policy.authorize(db, employee, resource, action, record_count, ip=source_ip, approval_id=approval_id)
+        permitted = decision.allowed
     reason = {"reason": "system_isolated"} if not permitted and controls.is_isolated(db, resource) else {}
+    if decision is not None and not decision.allowed:
+        reason = {"reason": decision.reason, "export_request_id": decision.request.id if decision.request else None}
+    elif decision is not None and decision.approval_id:
+        reason = {"export_approval_id": decision.approval_id}
     result = record_event(
         db,
         employee,
@@ -228,6 +243,7 @@ def access_resource(
         scenario=scenario,
         request_id=request_id,
     )
+    result.export_decision = decision
     return result, permitted
 
 

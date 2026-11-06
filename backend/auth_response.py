@@ -31,7 +31,16 @@ from backend.catalog import SEVERITY_RANK
 from backend.config import get_settings
 from backend.database import utcnow
 from backend.event_service import write_audit
-from backend.models import AccessDenial, AuthAttempt, AuthIncident, Employee, EmployeeSession, IpBlock, ResponseAction
+from backend.models import (
+    AccessDenial,
+    AuthAttempt,
+    AuthIncident,
+    Employee,
+    EmployeeSession,
+    ExportRequest,
+    IpBlock,
+    ResponseAction,
+)
 
 log = logging.getLogger("auth_defense")
 
@@ -289,6 +298,7 @@ def planned_actions(finding: auth_detection.Finding) -> list[str]:
         "repeated_forbidden_access": ["revoke_sessions", "lock_account"] if critical else [],
         "idor_probe": ["revoke_sessions", "lock_account"] if critical else [],
         "unauthenticated_flood": ["block_ip"] if critical else [],
+        "bulk_export_attempt": ["revoke_sessions", "lock_account"] if critical else [],
     }[finding.kind]
 
 
@@ -346,6 +356,26 @@ def record_attempt(db: Session, *, ip: str, identifier: str, employee: Employee 
         return []
 
 
+def record_export_request(db: Session, request, employee: Employee) -> list[AuthIncident]:
+    """Run the bulk-export detector for a request that was held or refused. Runs inside the caller's transaction (a savepoint),
+    so a fault here never loses the request itself or fails the export response."""
+    policy = get_policy()
+    if not policy.enabled:
+        return []
+    try:
+        with db.begin_nested():
+            incidents = []
+            for finding in auth_detection.evaluate_export(db, request, employee, policy):
+                incident, _ = upsert_incident(db, finding)
+                if policy.auto_response:
+                    apply_policy(db, incident, finding, policy)
+                incidents.append(incident)
+        return incidents
+    except Exception:  # noqa: BLE001
+        log.exception("authentication defence failed for a bulk-export request")
+        return []
+
+
 def record_denial(db: Session, *, ip: str, employee: Employee | None, method: str, route: str, object_ref: str | None,
                   status_code: int) -> list[AuthIncident]:
     """Store one refused API request, run the detectors and apply the response policy. Never raises (see record_attempt)."""
@@ -382,6 +412,7 @@ def _maybe_purge(db: Session, policy: AuthPolicy) -> None:
         cutoff = utcnow() - timedelta(days=policy.attempt_retention_days)
         db.execute(delete(AuthAttempt).where(AuthAttempt.timestamp < cutoff))
         db.execute(delete(AccessDenial).where(AccessDenial.timestamp < cutoff))
+        db.execute(delete(ExportRequest).where(ExportRequest.created_at < cutoff, ExportRequest.status != "pending"))
         db.commit()
     except Exception:  # noqa: BLE001
         db.rollback()

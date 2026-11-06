@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 from conftest import auth_header, employee_id, run_scenario, wait_for_run
 
-from backend import scenario_generator as gen
-from backend import simulation_runs as runs
+from lab import scenario_generator as gen
+from lab import simulation_runs as runs
 from backend.database import SessionLocal
 from backend.models import Employee, SimulationRun
 
@@ -160,7 +160,7 @@ def test_pacing_is_bounded_and_instant_skips_waiting():
 
 def test_the_generator_and_runner_never_create_alerts_scores_or_investigations():
     for name in ("scenario_generator.py", "simulation_runs.py"):
-        text = Path(__file__).resolve().parent.parent.joinpath("backend", name).read_text(encoding="utf-8")
+        text = Path(__file__).resolve().parent.parent.joinpath("lab", name).read_text(encoding="utf-8")
         for forbidden in ("SecurityAlert(", "RiskAssessment(", "AttackInvestigation(", "upsert_investigation", "_maybe_raise_alert"):
             assert forbidden not in text, (name, forbidden)
 

@@ -46,7 +46,7 @@ def test_states_and_audit_follow_a_simulated_attack_through_containment(client, 
     david = next(e["id"] for e in employees if e["username"] == "david.kumar")
     from conftest import run_steps
 
-    from backend.simulation_service import STEP_IDS
+    from lab.simulation_service import STEP_IDS
 
     done = run_steps(client, admin, "david.kumar", STEP_IDS, records=8000)
     assert all(r["status"] == "completed" for r in done)

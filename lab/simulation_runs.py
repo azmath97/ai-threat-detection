@@ -18,8 +18,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend import run_context
-from backend import scenario_generator as gen
-from backend import simulation_service as legacy
+from lab import scenario_generator as gen
+from lab import simulation_service as legacy
 from backend.auth_service import authenticate
 from backend.catalog import SEVERITY_RANK
 from backend.config import get_settings

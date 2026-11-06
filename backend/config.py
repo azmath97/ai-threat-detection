@@ -53,7 +53,7 @@ class Settings:
     display_timezone: str
     cors_origins: list[str]
     auto_seed: bool
-    simulation_enabled: bool
+    lab_mode: bool                      # LAB_MODE: mount the offline scenario lab (tests and calibration only; refused in production)
     map_loopback_to_workstation: bool
     trusted_frontend_key: str
     app_env: str
@@ -141,7 +141,7 @@ def get_settings() -> Settings:
         display_timezone=_str("DISPLAY_TIMEZONE", "Asia/Kolkata"),
         cors_origins=[o.strip().rstrip("/") for o in _str("CORS_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501,http://localhost:8503,http://127.0.0.1:8503").split(",") if o.strip()],
         auto_seed=_bool("AUTO_SEED", True),
-        simulation_enabled=_bool("SIMULATION_ENABLED", True),
+        lab_mode=_bool("LAB_MODE", False),
         map_loopback_to_workstation=_bool("MAP_LOOPBACK_TO_WORKSTATION", True),
         trusted_frontend_key=_str("TRUSTED_FRONTEND_KEY", ""),
         app_env=app_env,
@@ -215,6 +215,9 @@ def validate_for_environment(settings: Settings | None = None) -> None:
         raise RuntimeError("CORS_ORIGINS must list explicit origins; invalid: " + ", ".join(problems))
     if s.app_env != "production":
         return
+    if s.lab_mode:
+        raise RuntimeError("LAB_MODE is the offline scenario lab for tests and calibration; it must not be enabled when "
+                           "APP_ENV=production (production security events come only from real requests)")
     lowered = s.secret_key.lower()
     if not s.secret_key or len(s.secret_key) < 32 or any(lowered.startswith(p) for p in PLACEHOLDER_SECRETS):
         raise RuntimeError("APP_ENV=production requires SECRET_KEY, set by the environment or your secret manager, to be a "

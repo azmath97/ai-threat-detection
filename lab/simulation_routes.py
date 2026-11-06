@@ -1,4 +1,4 @@
-"""Administrator-only simulation endpoints. Unavailable to employees and when SIMULATION_ENABLED=false."""
+"""Lab-only simulation endpoints (mounted only when LAB_MODE=true). Administrators only; never part of the deployed application."""
 import ipaddress
 import re
 from typing import Literal
@@ -8,9 +8,9 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend import scenario_generator as gen
-from backend import simulation_runs as runs
-from backend import simulation_service as sim
+from lab import scenario_generator as gen
+from lab import simulation_runs as runs
+from lab import simulation_service as sim
 from backend.config import get_settings
 from backend.database import get_db
 from backend.models import Employee, SimulationRun
@@ -22,8 +22,8 @@ _LABEL = re.compile(r"^[a-z0-9_]{1,64}$")
 
 
 def require_simulation(auth: AuthContext = Depends(require_admin)) -> AuthContext:
-    if not get_settings().simulation_enabled:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Simulation environment is disabled")
+    if not get_settings().lab_mode:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "The scenario lab is disabled")
     return auth
 
 

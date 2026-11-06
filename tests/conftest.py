@@ -14,6 +14,8 @@ os.environ["LOCAL_SECRET_FILE"] = str(Path(_tmp, "local_secret"))
 os.environ["DEMO_CREDENTIALS_FILE"] = str(Path(_tmp, "demo_credentials.json"))      # random per test run, generated on first use
 os.environ.pop("DEMO_PASSWORDS_JSON", None)
 os.environ["APP_ENV"] = "development"
+# The offline scenario lab (lab/) drives the tests' attack chains; it is mounted only in lab mode and never in the deployed app.
+os.environ["LAB_MODE"] = "true"
 # Lets tests present a source address the way the dashboards do (X-Frontend-Key + X-Client-IP); see tests/test_auth_defense.py.
 os.environ["TRUSTED_FRONTEND_KEY"] = "test-frontend-key-0123456789abcdef"
 for _name in ("SENSITIVE", "HEAVY", "EMPLOYEE"):        # the suite makes many rapid calls; limit tests set their own low values

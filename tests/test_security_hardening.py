@@ -40,7 +40,7 @@ def _all_passwords_json():
 
 
 def _env(**extra):
-    env = {k: v for k, v in os.environ.items() if k not in ("SECRET_KEY", "DEMO_PASSWORDS_JSON", "DEMO_CREDENTIALS_FILE")}
+    env = {k: v for k, v in os.environ.items() if k not in ("SECRET_KEY", "DEMO_PASSWORDS_JSON", "DEMO_CREDENTIALS_FILE", "LAB_MODE")}
     return {**env, **extra}
 
 
@@ -147,7 +147,7 @@ def test_setup_command_creates_env_with_a_random_secret_and_credentials_idempote
 
 # ----------------------------------------------------------------------------------------- missing configuration
 def test_production_validation_covers_secret_cors_and_credentials(fresh_credentials, tmp_path):
-    base = replace(get_settings(), app_env="production", secret_key="r" * 40, trusted_frontend_key="",
+    base = replace(get_settings(), app_env="production", secret_key="r" * 40, trusted_frontend_key="", lab_mode=False,
                    database_url="postgresql+psycopg://u:p@db.example.test/w")
     fresh_credentials.setenv("DEMO_CREDENTIALS_FILE", str(tmp_path / "absent.json"))
     with pytest.raises(RuntimeError, match="demo credentials"):
@@ -183,9 +183,10 @@ def test_settings_never_fall_back_to_a_known_secret_or_privileged_password(monke
         assert dev.secret_key and dev.secret_key not in ("dev-only-secret-" + "change-me", "test-secret")
         assert dev.simulation_privileged_password and dev.simulation_privileged_password != "Synthetic#" + "Priv2026"
         monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("LAB_MODE", "false")
         get_settings.cache_clear()
         prod = get_settings()
-        assert prod.secret_key == ""                                          # absent stays absent: nothing is invented
+        assert prod.secret_key == ""                                            # absent stays absent: nothing is invented
         with pytest.raises(RuntimeError, match="SECRET_KEY"):
             validate_for_environment(prod)
         monkeypatch.setenv("SECRET_KEY", "k" * 40)
@@ -361,7 +362,7 @@ def test_every_state_changing_route_needs_a_role_or_is_a_documented_self_service
 
 
 def test_simulation_controls_are_refused_when_the_simulation_is_disabled(client, admin, monkeypatch):
-    monkeypatch.setattr("backend.simulation_routes.get_settings", lambda: replace(get_settings(), simulation_enabled=False))
+    monkeypatch.setattr("lab.simulation_routes.get_settings", lambda: replace(get_settings(), lab_mode=False))
     for method, path in (("post", "/api/simulation/runs"), ("post", "/api/simulation/steps"), ("post", "/api/simulation/reset"),
                          ("get", "/api/simulation/status")):
         assert client.request(method.upper(), path, headers=admin).status_code == 403, path

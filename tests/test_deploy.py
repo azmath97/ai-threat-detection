@@ -395,8 +395,8 @@ def test_the_dockerfile_builds_the_model_and_runs_unprivileged():
                 assert (ROOT / source).exists(), f"Dockerfile copies a missing path: {source}"
 
 
-def test_the_image_contains_everything_the_application_imports(tmp_path):
-    """Copy only what the Dockerfile copies into an empty folder and import every entry point from there."""
+def _copy_the_image(tmp_path):
+    """Copy only what the Dockerfile copies into an empty folder (what the deployed container contains)."""
     for line in read("Dockerfile").splitlines():
         if not line.startswith("COPY "):
             continue
@@ -409,19 +409,60 @@ def test_the_image_contains_everything_the_application_imports(tmp_path):
             else:
                 target.mkdir(parents=True, exist_ok=True)
                 shutil.copy(src, target / src.name if target.is_dir() or dest.endswith("/") else target)
-    code = ("import backend.main, backend.simulation_service, data.seed_data, data.demo_accounts, ml.train_model, ml.anomaly_detector, "
+
+
+def _run_in_the_image(tmp_path, code, **env_overrides):
+    env = {**os.environ, "SECRET_KEY": "x" * 40, "DATABASE_URL": f"sqlite:///{(tmp_path / 'scratch.db').as_posix()}",
+           "LOCAL_SECRET_FILE": str(tmp_path / "local_secret"), "ML_MODEL_PATH": str(tmp_path / "model.joblib"), "PYTHONPATH": "",
+           "LAB_MODE": "false", **env_overrides}
+    return subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+
+
+def test_the_image_contains_everything_the_application_imports(tmp_path):
+    """Import every entry point from a copy that holds only what the Dockerfile copies."""
+    _copy_the_image(tmp_path)
+    code = ("import backend.main, data.seed_data, data.demo_accounts, ml.train_model, ml.anomaly_detector, "
             "deploy.start, deploy.gateway, deploy.preflight, deploy.verify, deploy.make_secrets, os\n"
             "assert os.path.realpath(backend.main.__file__).startswith(os.path.realpath(os.getcwd())); print('imports-ok')")
-    env = {**os.environ, "SECRET_KEY": "x" * 40, "DATABASE_URL": f"sqlite:///{(tmp_path / 'scratch.db').as_posix()}",
-           "LOCAL_SECRET_FILE": str(tmp_path / "local_secret"), "ML_MODEL_PATH": str(tmp_path / "model.joblib"), "PYTHONPATH": ""}
-    result = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    result = _run_in_the_image(tmp_path, code)
     assert result.returncode == 0 and "imports-ok" in result.stdout, result.stderr[-1500:]
+
+
+def test_the_deployed_image_has_no_scenario_simulator_and_refuses_lab_mode(tmp_path):
+    _copy_the_image(tmp_path)
+    assert not (tmp_path / "lab").exists()
+    routes = _run_in_the_image(tmp_path, "import backend.main as m; print(sorted({r.path for r in m.app.routes if 'simulation' in r.path}))")
+    assert routes.returncode == 0 and routes.stdout.strip() == "[]", routes.stderr[-800:]
+    refused = _run_in_the_image(tmp_path, "import backend.main", LAB_MODE="true")
+    assert refused.returncode != 0 and "lab/ package) is not installed" in refused.stderr
+
+
+def test_no_deployed_code_imports_the_lab_except_the_guarded_lab_mode_hook():
+    offenders = []
+    for package in ("backend", "frontend", "deploy", "data", "ml"):
+        for path in (ROOT / package).rglob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                names = [a.name for a in node.names] if isinstance(node, ast.Import) else \
+                    [node.module] if isinstance(node, ast.ImportFrom) and node.module and node.level == 0 else []
+                if any(n == "lab" or n.startswith("lab.") for n in names):
+                    offenders.append(str(path.relative_to(ROOT)))
+    assert sorted(set(offenders)) == [str(Path("backend") / "main.py")], offenders
+
+
+def test_production_refuses_to_start_with_lab_mode_on():
+    from dataclasses import replace
+
+    from backend import config
+
+    settings = replace(config.get_settings(), app_env="production", lab_mode=True)
+    with pytest.raises(RuntimeError, match="LAB_MODE"):
+        config.validate_for_environment(settings)
 
 
 def test_the_docker_context_excludes_secrets_and_local_data():
     ignored = set(read(".dockerignore").split())
     for pattern in (".env", ".env.*", "data/demo_credentials.local.json", "data/.local_secret", "data/*.db", "data/external",
-                    "data/processed", ".git", "tests", "*.pem", "*.key"):
+                    "data/processed", ".git", "tests", "lab", "*.pem", "*.key"):
         assert pattern in ignored, pattern
 
 
@@ -444,7 +485,7 @@ def test_the_example_environment_file_has_no_real_values_for_deployment_secrets(
                 assert line.split("=", 1)[1].split("#")[0].strip() == "", line
 
 
-LOCAL_PACKAGES = {"backend", "frontend", "ml", "data", "deploy", "app", "tests"}
+LOCAL_PACKAGES = {"backend", "frontend", "ml", "data", "deploy", "app", "tests", "lab"}
 IMPORT_TO_DISTRIBUTION = {"sklearn": "scikit-learn", "dotenv": "python-dotenv", "argon2": "argon2-cffi", "yaml": "pyyaml"}
 
 

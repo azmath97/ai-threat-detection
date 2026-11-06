@@ -366,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         "DATABASE_URL": f"sqlite:///{(work / 'calibration.db').as_posix()}", "AUTO_SEED": "true", "APP_ENV": "development",
         "SECRET_KEY": "calibration-run-secret-not-used-elsewhere", "ML_MODEL_PATH": str(work / "model.joblib"),
         "LOCAL_SECRET_FILE": str(work / "local_secret"), "DEMO_CREDENTIALS_FILE": str(work / "demo_credentials.json"),
-        "OPERATING_POINT_PATH": str(work / "none.json"),
+        "OPERATING_POINT_PATH": str(work / "none.json"), "LAB_MODE": "true",       # calibration drives the offline scenario lab
         "RATE_LIMIT_SENSITIVE_PER_MINUTE": "1000000", "RATE_LIMIT_HEAVY_PER_MINUTE": "1000000",
         "RATE_LIMIT_EMPLOYEE_PER_MINUTE": "1000000", "ARGON2_TIME_COST": "1", "ARGON2_MEMORY_KIB": "8", "ARGON2_PARALLELISM": "1",
     })

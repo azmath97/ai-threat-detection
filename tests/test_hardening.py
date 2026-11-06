@@ -47,7 +47,7 @@ def test_trusted_frontend_is_disabled_without_a_configured_key(client, db_path, 
 
 
 def test_production_refuses_sqlite_unless_explicitly_allowed():
-    base = replace(get_settings(), secret_key="s" * 40, trusted_frontend_key=KEY, auto_seed=False, app_env="production")
+    base = replace(get_settings(), secret_key="s" * 40, trusted_frontend_key=KEY, auto_seed=False, app_env="production", lab_mode=False)
     sqlite_settings = replace(base, database_url="sqlite:///./x.db", allow_sqlite_in_production=False)
     with pytest.raises(RuntimeError, match="DATABASE_URL"):
         validate_for_environment(sqlite_settings)
@@ -56,7 +56,7 @@ def test_production_refuses_sqlite_unless_explicitly_allowed():
 
 
 def test_production_refuses_missing_default_or_short_secrets():
-    base = replace(get_settings(), database_url="postgresql+psycopg://u:p@db.example.test/w")
+    base = replace(get_settings(), database_url="postgresql+psycopg://u:p@db.example.test/w", lab_mode=False)
     validate_for_environment(replace(base, app_env="development"))
     for bad in ("", "dev-only-secret-" + "change-me", "change-me-for-anything-other-than-a-local-demo", "short", "secret" + "x" * 40):
         with pytest.raises(RuntimeError, match="SECRET_KEY"):

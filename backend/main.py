@@ -19,7 +19,6 @@ from backend import (
     response_service,
     rules,
     scoring,
-    simulation_routes,
     soc_routes,
     threat_engine,
 )
@@ -95,12 +94,13 @@ logger = logging.getLogger("insider_threat")
 async def lifespan(_app: FastAPI):
     validate_for_environment()
     init_db()
-    from backend import simulation_runs
+    if get_settings().lab_mode:                                    # the offline lab only: a run interrupted by a restart is closed
+        from lab import simulation_runs
 
-    with SessionLocal() as db:
-        interrupted = simulation_runs.recover_interrupted(db)
-    if interrupted:
-        logger.warning("Marked %s interrupted simulation run(s) as failed", interrupted)
+        with SessionLocal() as db:
+            interrupted = simulation_runs.recover_interrupted(db)
+        if interrupted:
+            logger.warning("Marked %s interrupted lab run(s) as failed", interrupted)
     detector = ensure_model()  # loads the saved Isolation Forest (trains one on first start); falls back if unavailable
     logger.info("Anomaly detection mode: %s", detector.status()["mode"])
     if get_settings().auto_seed:
@@ -148,7 +148,12 @@ install_error_handlers(app)
 
 
 app.include_router(portal_routes.router)
-app.include_router(simulation_routes.router)
+if _settings.lab_mode:
+    try:
+        from lab import simulation_routes
+    except ImportError as exc:                                     # the image deliberately does not contain the lab
+        raise RuntimeError("LAB_MODE is set but the offline scenario lab (the lab/ package) is not installed") from exc
+    app.include_router(simulation_routes.router)
 app.include_router(soc_routes.router)
 app.include_router(auth_defense_routes.router)
 app.include_router(investigation_routes.router)

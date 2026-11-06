@@ -87,7 +87,7 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | SOC read models | `soc_service.py`, `soc_routes.py` |
 | Simulation | `scenario_generator.py` (seeded plans), `simulation_runs.py` (background runs, status, stop), `simulation_service.py` (manual steps, reset), `simulation_routes.py` |
 | Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (479 tests) |
+| Tests | `tests/` (526 tests) |
 
 ## Technology stack
 
@@ -333,7 +333,7 @@ A test asks SQLite's `EXPLAIN QUERY PLAN` for 14 of these queries and fails if a
 
 ### What was and was not verified
 
-Run in this repository (`python -m pytest tests -q`, 479 tests): migrations on a fresh database, on a database from an earlier
+Run in this repository (`python -m pytest tests -q`, 526 tests): migrations on a fresh database, on a database from an earlier
 release (including duplicate repair), and the refusal of a newer one; constraint and index behaviour; query plans;
 de-duplication, 12-way same-key and 9-way different-key concurrent ingestion on SQLite; transaction rollback; the
 bounded-query checks; two SOC sessions and a portal session seeing the same data; Streamlit reruns and double clicks against a
@@ -817,6 +817,76 @@ reference 0.208), and the hybrid missed both scenario-3 incidents. The CERT test
 benchmark, so this is a later time slice of the same users, not a fresh set. Details, caveats and the leakage tests are in
 [docs/detection-evaluation.md](docs/detection-evaluation.md#10-rigorous-evaluation-protocol-one-command).
 
+## Authentication defence: real sign-in monitoring and response
+
+This is built on the real sign-in endpoint (`POST /api/auth/login`), not on the simulation. Every attempt that reaches the backend
+is stored in `auth_attempts` (success, failure, or denied because the address is blocked or the account is locked). An unknown
+username is stored only as a keyed hash (`unknown:<12 hex>`), so a password typed into the wrong box is never kept, and the audit
+log uses the same hash. Detection reads those stored attempts inside time windows, so counts survive a restart and are the same
+on every backend instance (the older in-memory login throttle is unchanged and still answers 429).
+
+| Pattern | Default trigger | What the policy does automatically |
+|---|---|---|
+| Brute force on one account | 5 failures in 5 min (10 if every failure came from the account's own registered addresses) | Lock the account for 15 min and revoke its sessions |
+| Credential stuffing | 5 different accounts failed from one address in 10 min: Elevated; 10 accounts or 20 failures: Alert | Alert only; at Alert, block the address for 60 min |
+| Burst of failures from one address | 10 failures in 5 min: Elevated; 20 in 10 min: Alert | Alert only; at Alert, block the address for 60 min |
+| One account attacked from many addresses | 6 failures from 3 or more addresses in 10 min | Lock the account for 15 min |
+| Sign-in after repeated failures | 3 or more failures in 10 min, then a success from an address that is **not** registered to the account | Revoke sessions (the new one included, so no token is returned), lock the account, block the address |
+
+A success from the account's own registered address, while the failures came from other addresses, is the owner and raises nothing:
+treating it as a takeover would punish the victim. A success from the owner's own address that also produced the failures
+(typos) is flagged for review only. The bands are rule-based and **not probabilities**; every incident stores the thresholds
+and the attempt ids it was built from, and shows them on the SOC page.
+
+**What "blocked" and "locked" mean here.** Enforcement is real inside this application: a locked account cannot sign in or use any
+token, and a blocked address is refused on every request (`get_auth`, `authenticate`). An address block is an
+**application-level block, not a firewall rule**: it does not stop traffic reaching the host, and the SOC page says so. There is
+no firewall integration in this phase.
+
+**Safeguards.** Security administrators are never locked automatically (an attacker could lock the SOC out); loopback, private,
+shared and link-local addresses, addresses in `PROTECTED_IPS` and any employee's registered address are never blocked; automatic
+locks and blocks are capped per hour, beyond which the action waits for an analyst (`pending approval`); automatic locks and
+blocks expire; a lock by an analyst never expires by itself; locking is a compare-and-set, so concurrent attempts lock once;
+unlocking never restores sessions that were revoked. `AUTH_AUTO_RESPONSE=false` gives detect-only mode.
+
+**Source address.** Clients cannot supply their address. The backend believes `X-Client-IP` only on a request that also carries
+the shared `X-Frontend-Key` (`TRUSTED_FRONTEND_KEY`); the dashboards send it, taking it from the gateway, which overwrites anything
+the browser sent and reads `X-Forwarded-For` only when `TRUST_FORWARDED_FOR=true` (set automatically on Render, where a proxy
+is in front), and then only the last entry. In the single-container deployment the key is generated at each start. Locally there
+is no gateway, so loopback requests are still attributed to the employee's registered workstation: to see unfamiliar addresses
+locally, send `X-Frontend-Key` and `X-Client-IP` yourself, as `tests/test_auth_defense.py` does.
+
+**SOC page and API** (security administrators only, enforced by the backend): the SOC dashboard has an *Authentication Defence*
+page (incidents, evidence, locked accounts, blocked addresses, recent attempts, response history, unlock/unblock and manual
+responses with a reason and confirmation). Endpoints under `/api/soc/auth`: `overview`, `incidents`, `incidents/{id}`,
+`incidents/{id}/status`, `incidents/{id}/actions`, `attempts`, `actions` (GET) and `actions` (POST, direct response). State
+changes are rate limited, validated, audited and idempotent with an `Idempotency-Key`.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `AUTH_DEFENSE_ENABLED` / `AUTH_AUTO_RESPONSE` | `true` / `true` | Record and detect / apply the response policy |
+| `ACCOUNT_LOCKOUT_THRESHOLD`, `ACCOUNT_FAILURE_WINDOW_MINUTES`, `KNOWN_IP_LOCKOUT_THRESHOLD`, `ACCOUNT_LOCK_MINUTES` | 5, 5, 10, 15 | One-account brute force |
+| `IP_ALERT_FAILURES`, `IP_ALERT_WINDOW_MINUTES`, `IP_BLOCK_THRESHOLD`, `IP_BLOCK_WINDOW_MINUTES`, `IP_BLOCK_MINUTES` | 10, 5, 20, 10, 60 | One-address bursts and blocks |
+| `STUFFING_ACCOUNTS_ALERT`, `STUFFING_ACCOUNTS_CRITICAL`, `STUFFING_WINDOW_MINUTES` | 5, 10, 10 | Credential stuffing |
+| `DISTRIBUTED_IPS`, `DISTRIBUTED_FAILURES`, `DISTRIBUTED_WINDOW_MINUTES` | 3, 6, 10 | One account, many addresses |
+| `SUCCESS_AFTER_FAILURES`, `SUCCESS_AFTER_FAILURES_WINDOW_MINUTES` | 3, 10 | Success after failures |
+| `MAX_AUTO_LOCKS_PER_HOUR`, `MAX_AUTO_BLOCKS_PER_HOUR`, `PROTECTED_IPS`, `AUTH_ATTEMPT_RETENTION_DAYS` | 10, 10, empty, 30 | Safeguards and retention |
+
+These are starting values, not universal truth: calibrate them against your real sign-in traffic.
+
+**What was verified.** `tests/test_auth_defense.py` (34 tests) drives the real login endpoint: recording and hashing of unknown
+names, each detector and its thresholds, automatic lock, session revocation, expiry, address blocks and their expiry, private and
+protected addresses, the administrator exemption, detect-only mode, the hourly caps, concurrent attempts (one incident, one
+lock), recovery by an administrator, authorization (401/403), payload validation, idempotent replay, restart persistence, and the
+schema 3 to 4 migration. `tests/test_auth_defense_ui.py` drives the real SOC page against a real backend process, and the page was
+also checked in a browser against real failed sign-ins. **Not verified:** any public deployment, an attacker on a separate
+device, behaviour on PostgreSQL with several instances (concurrency was tested on SQLite), the thresholds against real
+traffic, or the gateway's address handling behind a real platform proxy.
+
+**Not done in this phase** (still to build): a firewall provider integration (Vercel or another WAF) and its enforcement states,
+Redis, removal of the Simulation Console, detections for IDOR, password changes, bulk-export authorization and geolocation,
+progressive login delays, analyst assignment, a Next.js front end, and calibration on real traffic.
+
 ## Detection rules in detail
 
 The rules are data, not code: `backend/detection_rules.json` (19 rules, hot-reloadable). Every rule has a *weight*
@@ -1265,7 +1335,7 @@ ml/detect/                   window builder, features, models, hybrid risk, benc
 docs/                        cert-dataset.md, detection-evaluation.md, deployment.md, detection-results/
 docs/cert-dataset.md         CERT dataset setup, field mapping, label rules, caveats
 frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       479 pytest tests
+tests/                       526 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
 requirements.txt  requirements-dev.txt (adds pgserver for the PostgreSQL tests)  requirements-deploy.txt (pinned runtime for the image)
 Dockerfile  .dockerignore  render.yaml  .env.example
@@ -1274,7 +1344,7 @@ Dockerfile  .dockerignore  render.yaml  .env.example
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 479 tests, about eight minutes (a real backend is started several times)
+python -m pytest tests -q          # 526 tests, about eight minutes (a real backend is started several times)
 python -m pip install -r requirements-dev.txt   # optional: adds pgserver so tests/test_postgres.py runs instead of skipping
 ```
 

@@ -102,6 +102,11 @@ def is_trusted_frontend(request: Request) -> bool:
 def resolve_ip(request: Request, employee: Employee | None = None) -> str:
     """Source IP as seen by the backend; clients cannot supply it.
 
+    A request that proves it comes from our own dashboards (X-Frontend-Key matching TRUSTED_FRONTEND_KEY) may also carry
+    X-Client-IP: the end user's address as measured by the trusted edge (the gateway, which overwrites anything the browser
+    sent). That is the only way a client address other than the peer's is ever believed, and it is validated and normalised.
+    Without it:
+
     Everything runs on one machine in the local demo, so loopback connections are attributed to the
     employee's registered workstation address (MAP_LOOPBACK_TO_WORKSTATION=true). When the dashboards run on a
     different host (for example Streamlit Cloud calling a hosted API) the backend only sees the dashboard
@@ -109,6 +114,10 @@ def resolve_ip(request: Request, employee: Employee | None = None) -> str:
     TRUSTED_FRONTEND_KEY) is attributed the same way. Any other peer address is recorded as-is, and
     X-Forwarded-For is never used.
     """
+    if is_trusted_frontend(request):
+        client = normalize_ip(request.headers.get("x-client-ip"))
+        if client:
+            return client
     host = normalize_ip(request.client.host if request.client else None)
     is_local = host is None or ipaddress.ip_address(host).is_loopback
     has_workstation = employee is not None and bool(employee.known_ips)

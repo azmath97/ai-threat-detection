@@ -368,9 +368,9 @@ def test_the_old_confidence_columns_are_renamed_with_their_values_kept(tmp_path)
         conn.exec_driver_sql("ALTER TABLE security_alerts RENAME COLUMN peak_risk_score TO attack_confidence")
         conn.exec_driver_sql("ALTER TABLE security_alerts DROP COLUMN impact_severity")
         conn.exec_driver_sql("ALTER TABLE security_alerts DROP COLUMN score_basis")
-        conn.exec_driver_sql("DELETE FROM schema_migrations WHERE version = 3")
+        conn.exec_driver_sql("DELETE FROM schema_migrations WHERE version >= 3")
     assert migrations.current_version(db) == 2
-    assert migrations.upgrade(db) == [3]
+    assert migrations.upgrade(db) == list(range(3, migrations.CURRENT_VERSION + 1))
     with db.connect() as conn:
         cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(attack_investigations)")}
         alert_cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(security_alerts)")}

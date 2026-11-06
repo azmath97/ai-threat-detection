@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import streamlit as st  # noqa: E402
 
 from frontend import components as ui  # noqa: E402
+from frontend import soc_auth_defense as auth_page  # noqa: E402
 from frontend import soc_components as sc  # noqa: E402
 from frontend.api_client import ApiClient, ApiError, env_seconds  # noqa: E402
 
@@ -21,7 +22,7 @@ st.set_page_config(page_title=f"{ui.ORG_NAME} - Security Operations", layout="wi
 sc.inject()
 
 PAGES = ["Security Overview", "Live Event Feed", "Attack Investigations", "Employee Risk Monitor", "Attack Timeline",
-         "Attack Graph", "Response Centre", "Audit Logs"]
+         "Attack Graph", "Authentication Defence", "Response Centre", "Audit Logs"]
 # How often a dashboard session asks the backend for its cheap change token, and how long cached panels are reused.
 # Set SOC_REFRESH_SECONDS / SOC_CACHE_SECONDS to tune the load on the backend; values below the minimum are raised to it.
 LIVE_SECONDS = env_seconds("SOC_REFRESH_SECONDS", 3, 1)
@@ -965,20 +966,26 @@ def page_audit() -> None:
     live(render)
 
 
+# ------------------------------------------------------------------ authentication defence
+def page_auth_defense() -> None:
+    auth_page.page(api=api, api_with_key=lambda key: ApiClient(st.session_state.get("token"), "SOC Dashboard (Streamlit)", key),
+                   cached=cached, live=live, refresh_token=refresh_token, handle=handle, short=short, pselect=pselect)
+
+
 # ------------------------------------------------------------------ shell
 PAGE_FUNCTIONS = {
     "Security Overview": page_overview, "Live Event Feed": page_feed, "Attack Investigations": page_investigations,
     "Employee Risk Monitor": page_risk, "Attack Timeline": page_timeline, "Attack Graph": page_graph,
-    "Response Centre": page_response, "Audit Logs": page_audit,
+    "Authentication Defence": page_auth_defense, "Response Centre": page_response, "Audit Logs": page_audit,
 }
 
 
 NAV_GROUPS = [("Overview", ["Security Overview", "Live Event Feed"]),
               ("Investigate", ["Attack Investigations", "Employee Risk Monitor", "Attack Timeline", "Attack Graph"]),
-              ("Respond", ["Response Centre", "Audit Logs"])]
+              ("Respond", ["Authentication Defence", "Response Centre", "Audit Logs"])]
 NAV_ICONS = {"Security Overview": "dashboard", "Live Event Feed": "monitoring", "Attack Investigations": "manage_search",
              "Employee Risk Monitor": "group", "Attack Timeline": "timeline", "Attack Graph": "hub",
-             "Response Centre": "shield", "Audit Logs": "receipt_long"}
+             "Authentication Defence": "lock_person", "Response Centre": "shield", "Audit Logs": "receipt_long"}
 
 
 def dashboard() -> None:

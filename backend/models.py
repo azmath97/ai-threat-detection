@@ -59,6 +59,12 @@ class Employee(Base):
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # Why and by whom the account is locked. `locked_by` is "policy:<name>" for an automatic lock (which expires at
+    # `lock_expires_at`) or the analyst's employee ID for a manual one (which never expires by itself).
+    lock_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    lock_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    locked_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     permissions: Mapped[list["AccessPermission"]] = relationship(
         back_populates="employee", cascade="all, delete-orphan"
@@ -406,3 +412,130 @@ class ResponseControl(Base):
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     released_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+
+# ------------------------------------------------------------------------------------------ authentication defence
+AUTH_OUTCOMES = ("success", "failure", "denied")
+INCIDENT_KINDS = ("account_brute_force", "credential_stuffing", "ip_failure_burst", "distributed_account_attack",
+                  "login_after_failures")
+INCIDENT_STATUSES = ("open", "investigating", "contained", "resolved", "false_positive")
+ACTION_TYPES = ("lock_account", "unlock_account", "revoke_sessions", "block_ip", "unblock_ip")
+ACTION_STATUSES = ("completed", "failed", "skipped", "pending_approval")
+
+
+class AuthAttempt(Base):
+    """One real sign-in attempt that reached the backend (never a password or token).
+
+    `subject` is the employee ID when the identifier belongs to an account, otherwise "unknown:" plus a keyed hash of what
+    was typed, so credential stuffing across unknown names can be counted without storing a mistyped password."""
+
+    __tablename__ = "auth_attempts"
+    __table_args__ = (
+        Index("ix_auth_attempts_ip_time", "source_ip", "timestamp"),
+        Index("ix_auth_attempts_subject_time", "subject", "timestamp"),
+        Index("ix_auth_attempts_employee_time", "employee_id", "timestamp"),
+        Index("ix_auth_attempts_time", "timestamp"),
+        CheckConstraint(_in("outcome", AUTH_OUTCOMES), name="ck_auth_attempts_outcome"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    source_ip: Mapped[str] = mapped_column(String(45))
+    subject: Mapped[str] = mapped_column(String(40))
+    employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    outcome: Mapped[str] = mapped_column(String(12))   # success | failure (wrong credentials) | denied (blocked or locked)
+    reason: Mapped[str] = mapped_column(String(32))    # ok | bad_password | unknown_identifier | account_locked | ip_blocked
+    device_info: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+
+class AuthIncident(Base):
+    """A detected authentication attack. At most one open, investigating or contained incident per kind and subject."""
+
+    __tablename__ = "auth_incidents"
+    __table_args__ = (
+        Index("uq_auth_incidents_one_active", "dedup_key", unique=True, **_partial("status IN ('open', 'investigating', 'contained')")),
+        Index("ix_auth_incidents_status_severity", "status", "severity"),
+        Index("ix_auth_incidents_ip", "source_ip"),
+        Index("ix_auth_incidents_employee", "employee_id"),
+        Index("ix_auth_incidents_updated", "updated_at"),
+        CheckConstraint(_in("status", INCIDENT_STATUSES), name="ck_auth_incidents_status"),
+        CheckConstraint(_in("severity", SEVERITY_LEVELS), name="ck_auth_incidents_severity"),
+        CheckConstraint(_in("kind", INCIDENT_KINDS), name="ck_auth_incidents_kind"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    severity: Mapped[str] = mapped_column(String(16))     # a rule-based band for this pattern, not a probability
+    status: Mapped[str] = mapped_column(String(16), default="open")
+    dedup_key: Mapped[str] = mapped_column(String(120))
+    source_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    title: Mapped[str] = mapped_column(String(200))
+    explanation: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)   # counts, window, thresholds and the attempt ids behind them
+    attempts_count: Mapped[int] = mapped_column(Integer, default=0)
+    first_seen: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_seen: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    resolution_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    employee: Mapped[Employee | None] = relationship()
+    actions: Mapped[list["ResponseAction"]] = relationship(back_populates="incident", order_by="ResponseAction.id")
+
+
+class ResponseAction(Base):
+    """What the response engine or an analyst did about an incident, and the result. Enforcement happens inside this
+    application (account status, sessions, application-level IP blocks); no external system is contacted."""
+
+    __tablename__ = "auth_response_actions"
+    __table_args__ = (
+        Index("uq_auth_actions_idempotency_key", "idempotency_key", unique=True),
+        Index("ix_auth_actions_incident", "incident_id"),
+        Index("ix_auth_actions_target_time", "target", "created_at"),
+        CheckConstraint(_in("action_type", ACTION_TYPES), name="ck_auth_actions_type"),
+        CheckConstraint(_in("status", ACTION_STATUSES), name="ck_auth_actions_status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    incident_id: Mapped[int | None] = mapped_column(ForeignKey("auth_incidents.id", ondelete="SET NULL"), nullable=True)
+    employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    target: Mapped[str] = mapped_column(String(64))          # employee ID or IP address
+    action_type: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(20))
+    automatic: Mapped[bool] = mapped_column(Boolean, default=False)
+    policy: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    performed_by: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    result: Mapped[str] = mapped_column(String(300), default="")
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    idempotency_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+
+    incident: Mapped[AuthIncident | None] = relationship(back_populates="actions")
+    performer: Mapped[Employee | None] = relationship(foreign_keys=[performed_by])
+
+
+class IpBlock(Base):
+    """An application-level block: this backend refuses sign-ins and API calls from the address. It is not a firewall rule
+    and does not stop traffic reaching the host."""
+
+    __tablename__ = "ip_blocks"
+    __table_args__ = (
+        Index("uq_ip_blocks_one_active", "ip", unique=True, **_partial("active")),
+        Index("ix_ip_blocks_active_expiry", "active", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ip: Mapped[str] = mapped_column(String(45))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    source: Mapped[str] = mapped_column(String(16), default="policy")        # policy | analyst
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    incident_id: Mapped[int | None] = mapped_column(ForeignKey("auth_incidents.id", ondelete="SET NULL"), nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    released_by: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    release_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)

@@ -14,6 +14,8 @@ os.environ["LOCAL_SECRET_FILE"] = str(Path(_tmp, "local_secret"))
 os.environ["DEMO_CREDENTIALS_FILE"] = str(Path(_tmp, "demo_credentials.json"))      # random per test run, generated on first use
 os.environ.pop("DEMO_PASSWORDS_JSON", None)
 os.environ["APP_ENV"] = "development"
+# Lets tests present a source address the way the dashboards do (X-Frontend-Key + X-Client-IP); see tests/test_auth_defense.py.
+os.environ["TRUSTED_FRONTEND_KEY"] = "test-frontend-key-0123456789abcdef"
 for _name in ("SENSITIVE", "HEAVY", "EMPLOYEE"):        # the suite makes many rapid calls; limit tests set their own low values
     os.environ[f"RATE_LIMIT_{_name}_PER_MINUTE"] = "100000"
 os.environ["ML_MODEL_PATH"] = str(Path(_tmp, "isolation_forest.joblib"))  # exercises train-on-first-start
@@ -138,3 +140,8 @@ def restore_state(request):
         con.execute("delete from investigation_evidence where investigation_id > ?", (marks["attack_investigations"],))
         for table in ("security_alerts", "attack_investigations", "risk_assessments", "security_events"):
             con.execute(f"delete from {table} where id > ?", (marks[table],))
+        # authentication defence: attempts, incidents, actions and blocks belong to the test; accounts locked by it are released
+        for table in ("auth_response_actions", "auth_incidents", "auth_attempts", "ip_blocks"):
+            con.execute(f"delete from {table}")
+        con.execute("update employees set status='active', lock_reason=NULL, locked_at=NULL, lock_expires_at=NULL, locked_by=NULL "
+                    "where status='locked'")

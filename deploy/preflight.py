@@ -13,6 +13,7 @@ Two modes, chosen with DEPLOY_MODE:
 import json
 import os
 import re
+import secrets
 import tempfile
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -137,6 +138,11 @@ def child_environment(env: Mapping[str, str]) -> dict[str, str]:
         STREAMLIT_SERVER_CORS_ALLOWED_ORIGINS=url,    # the websocket origin check admits only the deployed address
         PYTHONUNBUFFERED="1",
     )
+    # The dashboards and the backend share a key generated for this start: it lets the backend believe the end user's address
+    # that the gateway measured (X-Client-IP). An operator-supplied key is kept. Render sets RENDER=true and puts a proxy in front,
+    # which is the only reason the gateway may read X-Forwarded-For; anywhere else set TRUST_FORWARDED_FOR yourself.
+    child.setdefault("TRUSTED_FRONTEND_KEY", secrets.token_urlsafe(32))
+    child.setdefault("TRUST_FORWARDED_FOR", "true" if env.get("RENDER") else "false")
     if mode == "demo":
         child["DATABASE_URL"] = demo_database_url(env)
         child["ALLOW_SQLITE_IN_PRODUCTION"] = "true"  # explicit: the demo database is meant to be disposable

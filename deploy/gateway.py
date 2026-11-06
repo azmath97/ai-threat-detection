@@ -24,6 +24,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
 import time
@@ -64,6 +65,7 @@ class GatewayConfig:
     allow_open_admin: bool = False
     gate_key: bytes = b""
     force_https: bool = False
+    trust_forwarded_for: bool = False       # TRUST_FORWARDED_FOR: a platform proxy in front appends the real client to X-Forwarded-For
     max_gate_failures: int = 10
     gate_window_seconds: int = 300
     health_timeout: float = 2.0
@@ -80,6 +82,7 @@ class GatewayConfig:
             allow_open_admin=_flag(env.get("ALLOW_OPEN_ADMIN_UI")),
             gate_key=hmac.new(secret.encode(), b"westbridge-admin-gate-cookie", hashlib.sha256).digest(),
             force_https=_flag(env.get("FORCE_HTTPS")),
+            trust_forwarded_for=_flag(env.get("TRUST_FORWARDED_FOR")),
         )
 
 
@@ -124,6 +127,20 @@ def _client_key(headers, peer: str) -> str:
     return forwarded.split(",")[-1].strip() if forwarded else peer       # the address the platform's proxy saw
 
 
+CLIENT_IP_HEADER = "x-westbridge-client-ip"
+
+
+def trusted_client_ip(cfg: GatewayConfig, headers, peer: str) -> str:
+    """The end user's address. X-Forwarded-For is believed only when TRUST_FORWARDED_FOR says a platform proxy sits in front of
+    this gateway, and then only its LAST entry (the one that proxy appended, which the client cannot forge). Otherwise the
+    TCP peer is used. Anything that is not an IP address falls back to the peer."""
+    candidate = _client_key(headers, peer) if cfg.trust_forwarded_for else peer
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return peer
+
+
 def _throttled(cfg: GatewayConfig, key: str) -> bool:
     now = time.time()
     recent = [t for t in cfg.failures.get(key, []) if now - t < cfg.gate_window_seconds]
@@ -162,8 +179,9 @@ def _without_gate_cookie(cookie: str | None) -> str:
     return "; ".join(parts)
 
 
-def _forward_headers(request: Request, peer: str) -> dict:
-    headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_BY_HOP}
+def _forward_headers(request: Request, peer: str, client_ip: str) -> dict:
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_BY_HOP and k.lower() != CLIENT_IP_HEADER}
+    headers[CLIENT_IP_HEADER] = client_ip                                 # always ours: whatever the browser sent is dropped
     cookie = _without_gate_cookie(headers.get("cookie"))
     headers.pop("cookie", None)
     if cookie:
@@ -229,8 +247,8 @@ def create_app(cfg: GatewayConfig | None = None) -> Starlette:
                                                 headers={"www-authenticate": 'Basic realm="Westbridge administrators", charset="UTF-8"'}), request)
         url = f"http://{target}{path}" + (f"?{request.url.query}" if request.url.query else "")
         try:
-            upstream = await client.send(client.build_request(request.method, url, headers=_forward_headers(request, peer),
-                                                              content=request.stream()), stream=True)
+            upstream = await client.send(client.build_request(request.method, url, headers=_forward_headers(
+                request, peer, trusted_client_ip(cfg, request.headers, peer)), content=request.stream()), stream=True)
         except httpx.HTTPError as exc:
             log.error("upstream %s unavailable: %s", name, type(exc).__name__)
             return secure(PlainTextResponse("The service is temporarily unavailable.", status_code=502), request)
@@ -257,6 +275,7 @@ def create_app(cfg: GatewayConfig | None = None) -> Starlette:
                 return
         query = f"?{websocket.url.query}" if websocket.url.query else ""
         extra = {k: websocket.headers[k] for k in ("user-agent",) if k in websocket.headers}
+        extra[CLIENT_IP_HEADER] = trusted_client_ip(cfg, websocket.headers, peer)    # Streamlit reads it from the handshake
         cookie = _without_gate_cookie(websocket.headers.get("cookie"))
         if cookie:
             extra["cookie"] = cookie

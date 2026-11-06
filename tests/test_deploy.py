@@ -150,7 +150,8 @@ def free_port() -> int:
 def fake_upstream() -> Starlette:
     async def page(request: Request):
         return JSONResponse({"path": request.url.path, "cookie": request.headers.get("cookie", ""),
-                             "forwarded_for": request.headers.get("x-forwarded-for", ""), "method": request.method})
+                             "forwarded_for": request.headers.get("x-forwarded-for", ""), "method": request.method,
+                             "client_ip": request.headers.get("x-westbridge-client-ip", "")})
 
     async def ok(request: Request):
         return PlainTextResponse("ok")
@@ -319,6 +320,62 @@ def test_websockets_are_proxied_and_admin_sockets_need_the_gate(upstream_port):
         with client.websocket_connect("/soc/_stcore/stream") as ws:
             ws.send_text("hi")
             assert ws.receive_text() == "echo:hi"
+
+
+def test_the_gateway_tells_the_dashboards_the_real_client_address_and_ignores_what_the_browser_claims(upstream_port):
+    spoof = {"x-westbridge-client-ip": "198.51.100.99", "x-forwarded-for": "198.51.100.98"}
+    with TestClient(gateway.create_app(make_cfg(upstream_port)), client=("203.0.113.7", 5000)) as direct:
+        # no platform proxy declared: only the TCP peer is believed, never X-Forwarded-For or a header the browser invented
+        assert direct.get("/", headers=spoof).json()["client_ip"] == "203.0.113.7"
+    with TestClient(gateway.create_app(make_cfg(upstream_port, trust_forwarded_for=True)), client=("10.0.0.5", 5000)) as behind:
+        # behind the platform's proxy: the LAST entry (appended by that proxy) is the client; earlier entries are client-supplied
+        seen = behind.get("/", headers={"x-forwarded-for": "198.51.100.98, 203.0.113.44", "x-westbridge-client-ip": "198.51.100.99"})
+        assert seen.json()["client_ip"] == "203.0.113.44"
+        assert behind.get("/", headers={"x-forwarded-for": "not-an-ip"}).json()["client_ip"] == "10.0.0.5"
+        assert behind.get("/").json()["client_ip"] == "10.0.0.5"
+
+
+def test_the_websocket_handshake_carries_the_client_address(upstream_port):
+    cfg = make_cfg(upstream_port)
+    assert gateway.trusted_client_ip(cfg, {"x-forwarded-for": "198.51.100.1"}, "203.0.113.7") == "203.0.113.7"
+    assert gateway.trusted_client_ip(make_cfg(upstream_port, trust_forwarded_for=True), {"x-forwarded-for": "198.51.100.1"}, "10.0.0.5") == "198.51.100.1"
+
+
+def test_each_start_gets_its_own_frontend_key_and_forwarded_for_is_trusted_only_on_render():
+    first, second = preflight.child_environment(good_env()), preflight.child_environment(good_env())
+    assert len(first["TRUSTED_FRONTEND_KEY"]) >= 32 and first["TRUSTED_FRONTEND_KEY"] != second["TRUSTED_FRONTEND_KEY"]
+    assert preflight.child_environment(good_env(TRUSTED_FRONTEND_KEY="operator-chosen-key"))["TRUSTED_FRONTEND_KEY"] == "operator-chosen-key"
+    assert first["TRUST_FORWARDED_FOR"] == "false"
+    assert preflight.child_environment(good_env(RENDER="true"))["TRUST_FORWARDED_FOR"] == "true"
+
+
+def test_the_dashboards_forward_the_client_address_only_with_the_shared_key(monkeypatch):
+    from frontend import api_client
+
+    captured = {}
+
+    class Reply:
+        status_code, headers = 200, {}
+
+        @staticmethod
+        def json():
+            return {}
+
+    def fake_request(method, url, headers=None, **kwargs):
+        captured.update(headers or {})
+        return Reply()
+
+    monkeypatch.setattr(api_client.requests, "request", fake_request)
+    real_browser_ip = api_client._browser_ip
+    monkeypatch.setattr(api_client, "_browser_ip", lambda: "203.0.113.55")
+    monkeypatch.setattr(api_client, "FRONTEND_KEY", "")
+    api_client.ApiClient("token").get("/api/soc/version")
+    assert "X-Client-IP" not in captured and "X-Frontend-Key" not in captured          # nothing is sent without the shared key
+    captured.clear()
+    monkeypatch.setattr(api_client, "FRONTEND_KEY", "shared-key-0123456789")
+    api_client.ApiClient("token").get("/api/soc/version")
+    assert captured["X-Client-IP"] == "203.0.113.55" and captured["X-Frontend-Key"] == "shared-key-0123456789"
+    assert real_browser_ip() is None                                                     # outside a Streamlit run there is no browser
 
 
 # ------------------------------------------------------------------------------------------------ deployment files

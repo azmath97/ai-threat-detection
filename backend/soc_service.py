@@ -28,9 +28,13 @@ from backend.errors import ServiceError
 from backend.models import (
     AttackInvestigation,
     AuditLog,
+    AuthAttempt,
+    AuthIncident,
     ContainmentAction,
     Employee,
     EmployeeSession,
+    IpBlock,
+    ResponseAction,
     ResponseControl,
     RiskAssessment,
     SecurityAlert,
@@ -77,6 +81,10 @@ def version(db: Session) -> dict:
                     f"{db.scalar(select(func.max(ResponseControl.id))) or 0}",
         "employees": f"{db.scalar(select(func.count(Employee.id))) or 0}:"
                      f"{db.scalar(select(func.count(Employee.id)).where(Employee.status == 'locked')) or 0}",
+        # authentication defence: a new attempt, an incident change, a response action or a block moves the token
+        "auth": f"{db.scalar(select(func.max(AuthAttempt.id))) or 0}:{last(AuthIncident.updated_at)}:"
+                f"{db.scalar(select(func.max(ResponseAction.id))) or 0}:"
+                f"{db.scalar(select(func.count(IpBlock.id)).where(IpBlock.active.is_(True))) or 0}",
     }
     return {**parts, "token": "|".join(str(v) for v in parts.values())}
 

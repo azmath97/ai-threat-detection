@@ -33,6 +33,17 @@ def _api_base_url() -> str:
 API_BASE_URL = _api_base_url()
 TIMEOUT = _timeout()          # raise it on free hosts whose API sleeps when idle
 FRONTEND_KEY = os.getenv("TRUSTED_FRONTEND_KEY", "")
+CLIENT_IP_HEADER = "X-Westbridge-Client-IP"      # set by the gateway from what the hosting platform observed; never by the browser
+
+
+def _browser_ip() -> str | None:
+    """The end user's address for this Streamlit session, as the gateway measured it (None locally, where there is no gateway)."""
+    try:
+        import streamlit as st
+
+        return st.context.headers.get(CLIENT_IP_HEADER) or None
+    except Exception:  # noqa: BLE001 - outside a Streamlit run there is simply no browser to ask
+        return None
 
 
 class ApiError(Exception):
@@ -56,6 +67,9 @@ class ApiClient:
             headers["X-Device-Info"] = self.device
         if FRONTEND_KEY:
             headers["X-Frontend-Key"] = FRONTEND_KEY
+            client_ip = _browser_ip()
+            if client_ip:
+                headers["X-Client-IP"] = client_ip       # the backend believes this only because the key above proves who is asking
         if self.idempotency_key:
             headers["Idempotency-Key"] = self.idempotency_key
         try:

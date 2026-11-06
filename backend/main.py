@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend import (
+    auth_defense_routes,
     baseline as baseline_service,
     event_service,
     investigation_routes,
@@ -146,6 +147,7 @@ install_error_handlers(app)
 app.include_router(portal_routes.router)
 app.include_router(simulation_routes.router)
 app.include_router(soc_routes.router)
+app.include_router(auth_defense_routes.router)
 app.include_router(investigation_routes.router)
 
 

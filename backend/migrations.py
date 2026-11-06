@@ -248,10 +248,19 @@ def _v3_score_columns(conn: Connection) -> None:
         log.info("Migration 3 renamed score columns: %s", ", ".join(renamed))
 
 
+def _v4_auth_defense(conn: Connection) -> None:
+    """Authentication defence: sign-in attempts, incidents, response actions and application-level IP blocks (new tables),
+    plus the account-lock columns on employees. Existing rows are untouched; new columns are empty."""
+    Base.metadata.create_all(conn, checkfirst=True)
+    database._add_missing_columns(conn)
+    _create_missing_indexes(conn)
+
+
 MIGRATIONS = [
     Migration(1, "baseline tables and columns", _v1_baseline),
     Migration(2, "indexes, event de-duplication key, check and uniqueness constraints", _v2_indexes_and_constraints),
     Migration(3, "heuristic risk score columns, impact severity and evidence strength", _v3_score_columns),
+    Migration(4, "authentication defence: attempts, incidents, response actions, IP blocks, account lock details", _v4_auth_defense),
 ]
 CURRENT_VERSION = MIGRATIONS[-1].version
 

@@ -1,7 +1,8 @@
-# Deploying the simulated platform
+# Deploying the platform
 
-This is an **educational, simulated** insider-threat detection and response demo with synthetic data. It is not production
-banking security, and containment is a simulation that never touches real systems. Deploying it publishes that demo; it does
+This is an **educational** insider-threat and account-defence demo with synthetic data. It is not production
+banking security. Its enforcement (account locks, address blocks, session revocation) acts only inside this application, and the
+investigation containment buttons only change its own records; nothing here touches a firewall, a network or a real system. Deploying it publishes that demo; it does
 not make it a bank-grade service.
 
 > **Status: prepared and rehearsed locally, not deployed.** No Render (or other) account was available while this was written,
@@ -10,25 +11,23 @@ not make it a bank-grade service.
 
 ## 1. Why one container
 
-The application is four processes: the FastAPI backend and three Streamlit apps (employee portal, SOC dashboard, simulation
-console). Streamlit Community Cloud runs a single Streamlit file and Vercel-style function hosts cannot hold the long-lived
+The application is three processes: the FastAPI backend and two Streamlit apps (employee portal and SOC dashboard). Streamlit Community Cloud runs a single Streamlit file and Vercel-style function hosts cannot hold the long-lived
 backend or Streamlit's websockets, so neither fits unchanged. Render runs a Docker service with one public port, so one
 container runs everything and a small gateway (`deploy/gateway.py`) is the only thing exposed:
 
 ```text
 internet -> Render (TLS) -> gateway :$PORT --+-- /          employee portal   127.0.0.1:8501
                                              +-- /soc/      SOC dashboard     127.0.0.1:8503  (admin login)
-                                             +-- /console/  simulation console 127.0.0.1:8502 (admin login)
-                                             +-- /healthz   probes all four
+                                             +-- /healthz   probes all three
                                              +-- /api, /docs, /redoc, /openapi.json -> 404 (never public)
-                              backend (FastAPI) 127.0.0.1:8000, reached only by the three apps -> PostgreSQL
+                              backend (FastAPI) 127.0.0.1:8000, reached only by the two apps -> PostgreSQL
 ```
 
 - **The API is private on purpose.** The dashboards call it from inside the container, so there is no browser-to-API CORS
   path and `CORS_ORIGINS` is just the public URL. Exposing it would also let outside callers inherit the "registered
   workstation" attribution that loopback clients get, which would break unfamiliar-address detection.
 - **Admin pages are gated twice**: the gateway asks for a browser login (HTTP Basic, `ADMIN_UI_USER` / `ADMIN_UI_PASSWORD`)
-  before `/soc/` or `/console/`, and the backend then still enforces role-based access on every call. Failed gate logins are
+  before `/soc/`, and the backend then still enforces role-based access on every call. Failed gate logins are
   limited to 10 per 5 minutes per client.
 - **Nothing is public with default credentials.** There are none: the container refuses to start unless every secret below is
   set, and the demo-account passwords are random values you generate.
@@ -51,7 +50,7 @@ All are set in the host's environment settings (Render: service -> Environment).
 |---|---|---|
 | `SECRET_KEY` | yes | 32+ random characters. Signs sessions and the gate cookie. |
 | `DEMO_PASSWORDS_JSON` | yes | JSON object `{"username": "password", ...}` for all 11 demo accounts. |
-| `ADMIN_UI_USER`, `ADMIN_UI_PASSWORD` | yes | Gate login for `/soc/` and `/console/` (3+ / 16+ characters). Waived only by `ALLOW_OPEN_ADMIN_UI=true`. |
+| `ADMIN_UI_USER`, `ADMIN_UI_PASSWORD` | yes | Gate login for `/soc/` (3+ / 16+ characters). Waived only by `ALLOW_OPEN_ADMIN_UI=true`. |
 | `DATABASE_URL` | persistent mode | `postgresql://...` (`postgres://` is accepted). Forbidden in demo mode. |
 | `PUBLIC_URL` | unless on Render | `https://...` address of the service. Render supplies `RENDER_EXTERNAL_URL`. |
 | `DEPLOY_MODE` | no | `persistent` (default) or `demo`. |
@@ -73,7 +72,7 @@ These need your own account, so they are manual:
    **Internal Database URL** (for a service in the same region) or External URL.
 3. On your own machine run `python -m deploy.make_secrets` and keep the output.
 4. Render -> New -> **Blueprint** -> select the repository. `render.yaml` defines one Docker web service on the `1c-2g` plan.
-   The four processes need roughly 0.6 GB while idle (measured on Windows, see section 6), so the free and 512 MB plans will not
+   The four processes of the earlier layout needed roughly 0.6 GB while idle (measured on Windows, see section 6; the current three need less but were not re-measured), so the free and 512 MB plans will not
    fit. Enter the values it asks for (`DATABASE_URL`, `SECRET_KEY`, `DEMO_PASSWORDS_JSON`, `ADMIN_UI_USER`, `ADMIN_UI_PASSWORD`).
    For a disposable showcase, change `DEPLOY_MODE` to `demo` and leave `DATABASE_URL` empty.
 5. Wait for the first deploy. The Docker build trains the anomaly model from the repository's seeded synthetic generator
@@ -95,11 +94,15 @@ HTTPS, the admin pages refuse a missing or wrong gate login, the Streamlit webso
 none of your secrets appear in any page or header.
 
 The behaviour checks need the private API, so run them in the Render **Shell** of the service (they sign in, ingest an event
-with a retried idempotency key, confirm one stored event, compare dashboard totals, run a seeded synthetic scenario, open the
-alert and investigation, run simulated containment and its replay, then reset the simulation):
+with a retried idempotency key, confirm one stored event, compare dashboard totals, confirm refused requests are recorded, hold,
+approve and use a bulk export once, and, when `--frontend-key` is given, lock an account with five failed sign-ins and unlock it).
+Those checks send real requests, so what they cause stays in the audit trail (one event, one approved 12,000-record export request
+for `EMP-1001`, and five failed sign-ins for `EMP-1010`); prefer a `demo` deployment for them. The lock check needs the shared
+`TRUSTED_FRONTEND_KEY`: set it yourself as a service secret (a random 24+ character value; the container keeps a key you supply and
+otherwise generates one at each start) and pass it as `VERIFY_FRONTEND_KEY`. Without it that one check prints SKIP.
 
 ```bash
-VERIFY_EMPLOYEE_PASSWORD=... VERIFY_ADMIN_PASSWORD=... \
+VERIFY_EMPLOYEE_PASSWORD=... VERIFY_ADMIN_PASSWORD=... VERIFY_FRONTEND_KEY=... \
 python -m deploy.verify --api http://127.0.0.1:8000 --snapshot /tmp/snap.json
 ```
 
@@ -122,7 +125,9 @@ the SOC pages, and reload a page a few times to see that the event count does no
 **Verified on a Windows development machine** (a faithful rehearsal, not a deployment):
 
 - The whole stack through `python -m deploy.start`, in `demo` mode and in `persistent` mode against a real embedded PostgreSQL
-  16 server, with `deploy.verify` passing every public and behaviour check (25 of 25).
+  16 server, with the earlier version of `deploy.verify` (which drove a scenario console that has since been removed) passing every public and
+  behaviour check (25 of 25). The current verifier has been run only against a local backend process, inside `tests/test_runtime.py`
+  (14 behaviour checks plus the restart comparison); it has not been re-run against the full container stack.
 - A hard kill and restart of the stack on PostgreSQL, then `deploy.verify --compare` (3 of 3): same database, no lower row
   counts, the marker event still stored.
 - `requirements-deploy.txt` installed in a clean virtual environment with no test dependencies; `python -m ml.train_model` then

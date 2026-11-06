@@ -22,7 +22,7 @@ notice that **while it is happening** and before the simulated data leaves.
 
 * **One FastAPI backend and one configured database are the single source of truth** (SQLite for local development,
   PostgreSQL for anything deployed; see [Database and persistence](#database-and-persistence)). The portal, the SOC
-  dashboard and the simulation console only call the backend; none of them has its own data, scores or event system.
+  dashboard only call the backend; neither has its own data, scores or event system.
 * **Detection is hybrid, and its numbers are labelled for what they are:** an Isolation Forest anomaly model, configurable rules and
   event correlation produce a **heuristic risk score** (0-100, hand-weighted, **not a probability**), a **risk band** (a calibrated
   threshold on that score, limited by how many independent attack stages the evidence spans), a separate **impact severity**
@@ -41,7 +41,7 @@ notice that **while it is happening** and before the simulated data leaves.
 5. [Database initialisation](#database-initialisation) and [database and persistence](#database-and-persistence)
 6. [Demo credentials](#demo-credentials)
 7. [Launching](#launching-the-application)
-8. [Simulate an attack](#how-to-simulate-an-attack) and [reset](#how-to-reset-the-simulation)
+8. [Exercise the platform](#how-to-exercise-the-platform) and [the offline scenario lab](#the-offline-scenario-lab)
 9. [How it works, end to end](#how-it-works-end-to-end)
 10. [The data: what is stored and what datasets are used](#the-data)
 11. [Machine learning in detail](#machine-learning-in-detail)
@@ -60,7 +60,7 @@ notice that **while it is happening** and before the simulated data leaves.
 
 ```
  Employee Portal  (Streamlit :8501) --\
- Simulation Console (Streamlit :8502) ---HTTP/JSON-->  FastAPI backend (:8000)  -->  SQLite (local) or PostgreSQL (DATABASE_URL)
+                                       ---HTTP/JSON-->  FastAPI backend (:8000)  -->  SQLite (local) or PostgreSQL (DATABASE_URL)
  SOC Dashboard    (Streamlit :8503) --/                      |
                                                             +-- ml/  Isolation Forest (ml/artifacts/*.joblib)
  every action -> security event -> rules + anomaly score -> heuristic risk score -> risk band / impact / evidence strength -> alert -> investigation
@@ -85,9 +85,9 @@ The dashboards only read what the backend stored. The portal never shows scores,
 | Detection | `detection_engine.py`, `detection_rules.json`, `rules.py`, `baseline.py`, `correlation_engine.py`, `threat_engine.py`, `data_exposure.py`, `ml/` |
 | Investigation and response | `investigation_service.py`, `investigation_explainer.py`, `investigation_export.py`, `investigation_routes.py`, `response_service.py`, `controls.py` |
 | SOC read models | `soc_service.py`, `soc_routes.py` |
-| Simulation | `scenario_generator.py` (seeded plans), `simulation_runs.py` (background runs, status, stop), `simulation_service.py` (manual steps, reset), `simulation_routes.py` |
-| Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `simulation_console.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
-| Tests | `tests/` (563 tests) |
+| Offline scenario lab | `lab/scenario_generator.py` (seeded plans), `simulation_runs.py`, `simulation_service.py`, `simulation_routes.py` (tests and calibration only; `LAB_MODE=true`, refused in production, not in the image) |
+| Front ends | `frontend/employee_portal.py`, `soc_dashboard.py`, `soc_auth_defense.py`, `components.py`, `soc_components.py`, `theme.py`, `api_client.py` |
+| Tests | `tests/` (567 tests) |
 
 ## Technology stack
 
@@ -133,13 +133,12 @@ git-ignored and created with owner-only permissions where the platform supports 
 are kept. Skipping it also works for a quick look (the backend then creates the same files on first start), but run
 `python app.py credentials` to see the passwords. **No password or secret is stored in the repository.**
 
-That starts the backend and all three dashboards:
+That starts the backend and both dashboards:
 
 | Service | URL |
 |---|---|
 | Backend API and interactive docs | http://127.0.0.1:8000 and http://127.0.0.1:8000/docs |
 | Employee Workspace Portal | http://127.0.0.1:8501 |
-| Simulation Console (administrators) | http://127.0.0.1:8502 |
 | SOC Dashboard (administrators) | http://127.0.0.1:8503 |
 
 On first start the backend creates and seeds the database and trains the anomaly model (a few seconds). If port 8000
@@ -163,7 +162,7 @@ Copy-Item .env.example .env        # bash: cp .env.example .env
 | `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT_SECONDS`, `DB_POOL_RECYCLE_SECONDS` | `10`, `10`, `30`, `1800` | PostgreSQL connection pool (ignored for SQLite) |
 | `DASHBOARD_WINDOW_DAYS` | `30` | the SOC overview totals cover this many days (the response says so in `window_days`) |
 | `MAX_PAGE_SIZE` | `500` | most rows a list endpoint returns per request (a larger `limit` is a 422) |
-| `SOC_REFRESH_SECONDS`, `SOC_CACHE_SECONDS`, `SIM_POLL_SECONDS` | `3`, `25`, `1` | read by the Streamlit apps: how often a SOC session checks the change token, how long fetched panels are reused, and how often the console polls a running simulation. Values below `1`, `5` and `0.5` are raised to those minimums |
+| `SOC_REFRESH_SECONDS`, `SOC_CACHE_SECONDS` | `3`, `25` | read by the Streamlit apps: how often a SOC session checks the change token and how long fetched panels are reused. Values below `1` and `5` are raised to those minimums |
 | `PORTAL_REPEAT_WINDOW_SECONDS` | `3` | a repeated identical portal action inside this window (double click, rerun) is recorded once |
 | `SECRET_KEY` | none | keys the session-token HMAC. **No default exists.** Development: if unset, a random per-machine key is created in `data/.local_secret` (git-ignored). Production: must be set (32+ random characters) by the environment or your platform's secret manager, or the backend refuses to start |
 | `DEMO_PASSWORDS_JSON` | unset | production: JSON object `{"alice.morgan": "...", ...}` giving all 11 demo usernames a unique password of 12+ characters, from a secret manager. Alternative: `DEMO_CREDENTIALS_FILE` |
@@ -172,8 +171,8 @@ Copy-Item .env.example .env        # bash: cp .env.example .env
 | `DISPLAY_TIMEZONE` | `Asia/Kolkata` | zone used for `*_local` timestamps and "after hours" |
 | `CORS_ORIGINS` | portal and SOC origins | explicit allowed origins; a wildcard, `null` or a malformed origin stops start-up; credentials are never allowed |
 | `AUTO_SEED` | `true` | seed the synthetic data when the database is empty (in production this needs a demo credential source) |
-| `SIMULATION_ENABLED` | `true` | set `false` for "normal" mode; the simulation API then returns 403 to everyone |
-| `SIMULATION_PRIVILEGED_PASSWORD` | derived from `SECRET_KEY` | password of the privileged account the simulation creates; set it only to override |
+| `LAB_MODE` | `false` | mounts the offline scenario lab's API (needs the `lab/` package, which the container image does not contain). The backend **refuses to start** with `LAB_MODE=true` when `APP_ENV=production`. Tests and threshold calibration turn it on |
+| `SIMULATION_PRIVILEGED_PASSWORD` | derived from `SECRET_KEY` | password of the privileged account the lab creates; used only when `LAB_MODE=true` |
 | `ARGON2_TIME_COST`, `ARGON2_MEMORY_KIB`, `ARGON2_PARALLELISM` | `3`, `65536`, `2` | Argon2id cost (hashes made with weaker settings are upgraded at the next login) |
 | `MAP_LOOPBACK_TO_WORKSTATION` | `true` | local demo: attribute loopback connections to the employee's registered workstation IP |
 | `TRUSTED_FRONTEND_KEY` | empty (off) | split hosting: shared secret (24+ characters) sent by the dashboards as `X-Frontend-Key`; requests carrying it are attributed to the employee's registered workstation IP |
@@ -212,10 +211,10 @@ Data persists across restarts (SQLite file `data/insider_threat.db`, git-ignored
 
 ## Database and persistence
 
-**One store.** The backend is the only process that opens the database. The three Streamlit apps never import SQLAlchemy,
+**One store.** The backend is the only process that opens the database. The two Streamlit apps never import SQLAlchemy,
 SQLite or the models (a test parses their source to prove it) and keep no business data of their own: everything they show
 is fetched from `/api/*`, and what they hold in `st.session_state` is the sign-in token, filters and a short-lived copy of
-what the backend returned. So the employee portal, the SOC dashboard and the simulation console always read the same rows,
+what the backend returned. So the employee portal and the SOC dashboard always read the same rows,
 and two dashboard sessions see the same figures.
 
 ### SQLite (local development) and its limits
@@ -327,13 +326,13 @@ A test asks SQLite's `EXPLAIN QUERY PLAN` for 14 of these queries and fails if a
   for employees with events in the correlation window; investigation and action summaries are grouped in SQL; list endpoints
   take a `limit` capped by `MAX_PAGE_SIZE`; the live feed pages with a keyset cursor (`before_id`, returning `has_more` and
   `next_before_id`) and a "Show 150 more events" button, up to 450 rows in the page.
-* Refresh intervals are configuration (`SOC_REFRESH_SECONDS`, `SOC_CACHE_SECONDS`, `SIM_POLL_SECONDS`) with minimums so a typo
+* Refresh intervals are configuration (`SOC_REFRESH_SECONDS`, `SOC_CACHE_SECONDS`) with minimums so a typo
   cannot make a dashboard hammer the backend. Each refresh is one small request; panels are re-fetched only when the token
   moves (or when the cached copy is older than `SOC_CACHE_SECONDS`, because time windows slide).
 
 ### What was and was not verified
 
-Run in this repository (`python -m pytest tests -q`, 563 tests): migrations on a fresh database, on a database from an earlier
+Run in this repository (`python -m pytest tests -q`, 567 tests): migrations on a fresh database, on a database from an earlier
 release (including duplicate repair), and the refusal of a newer one; constraint and index behaviour; query plans;
 de-duplication, 12-way same-key and 9-way different-key concurrent ingestion on SQLite; transaction rollback; the
 bounded-query checks; two SOC sessions and a portal session seeing the same data; Streamlit reruns and double clicks against a
@@ -372,18 +371,18 @@ that were committed to earlier versions of the repository remain in its git hist
 | `EMP-1008` | `henry.novak` | Henry Novak | Engineering / Software Engineer | Source Code rw, Wiki rw | 10.20.7.81 |
 | `EMP-1009` | `isla.murphy` | Isla Murphy | Lending / Loan Officer | Loan Applications rw, Customer Accounts r, Wiki r | 10.20.8.91 |
 | `EMP-1010` | `jack.silva` | Jack Silva | Marketing / Marketing Coordinator | Marketing Assets rw, Wiki r | 10.20.9.101 |
-| `SEC-9011` | `soc.admin` | Sam Okafor | Security / SOC Analyst (**security administrator**) | Audit Reports r, Wiki r; SOC dashboard and simulation console | 10.20.10.5 (also 127.0.0.1 and ::1) |
+| `SEC-9011` | `soc.admin` | Sam Okafor | Security / SOC Analyst (**security administrator**) | Audit Reports r, Wiki r; SOC dashboard | 10.20.10.5 (also 127.0.0.1 and ::1) |
 
 Every employee can also reach the self-service pages (own profile and payslips, directory, document library). The HR
 manager sees HR records, the payroll specialist the payroll register and export, and the IT administrator can create
-privileged accounts; the security administrator is the only role that can open the SOC dashboard or the simulation.
+privileged accounts; the security administrator is the only role that can open the SOC dashboard.
 
 ## Launching the application
 
 ```powershell
-python app.py all           # backend + portal + simulation console + SOC dashboard
+python app.py all           # backend + portal + SOC dashboard
 python app.py               # backend only
-python app.py portal        # one dashboard (needs the backend running): portal | simulation | soc
+python app.py portal        # one dashboard (needs the backend running): portal | soc
 ```
 
 Stop with Ctrl+C. All state stays in `data/insider_threat.db`.
@@ -395,15 +394,14 @@ Stop with Ctrl+C. All state stays in `data/insider_threat.db`.
 > [docs/deployment.md](docs/deployment.md#5-required-checks-after-deploying) against your own deployment before relying on it.
 > This is an educational, simulated demo with synthetic data, not production banking security.
 
-The platform is four processes (the FastAPI backend and three Streamlit apps) and one public port is available on most hosts,
-so it deploys as **one Docker service**: [deploy/start.py](deploy/start.py) runs the four processes on loopback and
+The platform is three processes (the FastAPI backend and two Streamlit apps) and one public port is available on most hosts,
+so it deploys as **one Docker service**: [deploy/start.py](deploy/start.py) runs the three processes on loopback and
 [deploy/gateway.py](deploy/gateway.py) is the only public listener.
 
 ```text
 internet -> TLS (the host) -> gateway :$PORT --+-- /          employee portal
                                                +-- /soc/      SOC dashboard      (admin login at the gateway, then backend roles)
-                                               +-- /console/  simulation console (admin login at the gateway, then backend roles)
-                                               +-- /healthz   backend and all three apps
+                                               +-- /healthz   backend and both apps
                                                +-- /api /docs /redoc /openapi.json -> 404 (the backend is never public)
 ```
 
@@ -428,7 +426,7 @@ Steps that need **your** accounts (full detail in [docs/deployment.md](docs/depl
 2. Create a Render PostgreSQL database and copy its URL (skip for `DEPLOY_MODE=demo`).
 3. Run `python -m deploy.make_secrets` locally and keep the output.
 4. *New > Blueprint* on this repository; [render.yaml](render.yaml) defines a Docker service on the 2 GB `1c-2g` plan (the
-   four processes need about 0.6 GB while idle, so 512 MB plans will not fit). Paste `DATABASE_URL`, `SECRET_KEY`,
+   processes needed about 0.6 GB while idle when there were four of them (measured on Windows; three need less, not re-measured), so 512 MB plans will not fit). Paste `DATABASE_URL`, `SECRET_KEY`,
    `DEMO_PASSWORDS_JSON`, `ADMIN_UI_USER` and `ADMIN_UI_PASSWORD` when asked (all `sync: false`, never stored in the repository).
 5. Run `python -m deploy.verify --url https://<service> --gate-user ... --gate-password ...` for the public checks, and the
    behaviour and persistence checks from the Render shell with `--api http://127.0.0.1:8000`.
@@ -443,131 +441,99 @@ memory or load, real TLS behaviour, and anything on a public URL.
 **Other layouts.** On one VM you can still run `python app.py all` behind your own HTTPS reverse proxy (WebSocket support
 required) with `APP_ENV=production`, a random `SECRET_KEY`, `DEMO_PASSWORDS_JSON` (or `AUTO_SEED=false`) and PostgreSQL in
 `DATABASE_URL` (or `ALLOW_SQLITE_IN_PRODUCTION=true` for one process on a persistent disk). Keep the backend on `127.0.0.1`,
-and you must add your own authentication in front of the SOC and console pages. Hosting the dashboards on Streamlit
+and you must add your own authentication in front of the SOC pages. Hosting the dashboards on Streamlit
 Community Cloud and the API elsewhere is possible (set `TRUSTED_FRONTEND_KEY` to the same random value on the API and every
 dashboard so requests are attributed to the employee's registered workstation) but is not covered by the blueprint, and
 Vercel cannot host this architecture at all (long-running processes, WebSockets, no persistent filesystem).
 
-## How to simulate an attack
+## How to exercise the platform
 
-The simulation runs through the **same** authentication, permission checks, event collection and detection engine as a
-normal employee. It is only available to the security administrator and clearly marked as synthetic. A seeded
-**scenario generator** (`backend/scenario_generator.py`) plans each run; a background runner
-(`backend/simulation_runs.py`) submits the planned actions one by one through the backend's ingestion functions
-(`authenticate`, `access_resource`, `record_event`, the same ones the API routes call). The simulator never writes an alert, a
-risk score or an investigation: those come only from the detection pipeline, so a run's outcome is whatever the detector
-decides.
+The platform reacts to **real requests**. There is no attack generator in the product and no administrator console that writes
+events: the portal, the API and the defences below are the only sources. (The old seeded scenario generator still exists, but only
+as an offline tool for tests and calibration; see [the offline scenario lab](#the-offline-scenario-lab).)
 
-**Scenarios**
-
-| Scenario | What it does |
-|---|---|
-| Benign employee activity | a normal session from a familiar address |
-| Benign high-volume file transfer | a legitimate large export from a resource the employee is entitled to (a lookalike for bulk export) |
-| Gradual collection followed by staging | one session of growing downloads from several classified resources, then a large consolidated export; no external transfer |
-| Bulk export | a compromised account (usually from an unfamiliar address) probes classified resources and exports a very large set |
-| Suspicious external transfer | a collection step, then an attempted or confirmed transfer to a synthetic destination (recorded separately from the collection) |
-| Removable-media activity | records copied to a simulated USB device, from routine to large volumes |
-| Multiple low-severity signals | an unfamiliar address, a couple of failed logins, a denied low-level request and a modest download that are each minor but suspicious together |
-| Compromised account campaign (full chain) | login, restricted probing, export, failed admin logins, privileged-account attempt, external transfer; which stages happen and in what order varies by seed |
-
-**What is randomised.** Within bounds and from the seed: the employee (if you do not pick one), event timing (gaps of
-0.25 to 2.2 s), volumes, which resources are touched, the order of actions that have no dependency, whether a session is
-closed, the simulated external address and destination, and 1 to 3 other employees whose benign activity is interleaved
-as background noise. Ordering rules always hold (sign in before acting, create an account before using it, collect before
-transferring, nothing after a logout). Failed logins use the real login code with a password that can never be valid.
-
-**Seeds.** *Random (demo)* draws a new seed per run; *Fixed (reproducible)* replays: the same seed, scenario and employee
-give an identical plan (its SHA-256 is stored) and the same sequence of events. Each run stores its seed, seed mode,
-parameters, full plan, per-action results and status in `simulation_runs`; every event and investigation it creates carries
-the run id (`security_events.simulation_run_id`, `attack_investigations.simulation_run_id`).
-
-**Status and controls.** A run is *queued, running, completed, failed* or *cancelled*. **Start run** begins one; **Stop run**
-ends it between actions (events already stored are kept as evidence and the run's sessions are closed); **Reset** is refused
-while a run is active. Only one run can be active at a time (a unique database slot enforces this), a repeated request with
-the same idempotency key returns the original run (the console sends one key per start intent, so reruns and double clicks
-cannot duplicate a run), and a run interrupted by a backend restart is marked failed on startup. A new run on an employee
-who still has flagged simulated events inside the correlation window, or an open investigation, from an earlier run is
-refused with an explanation, so runs never share an investigation; choose another employee or reset. Manual steps are
-disabled during a run.
-
-**Safety.** Everything is synthetic: external addresses come from the RFC 5737 documentation ranges (`192.0.2.0/24`,
-`198.51.100.0/24`, `203.0.113.0/24`), destinations end in the reserved `.invalid` top level, and removable media is a label.
-The simulator makes no network connection, performs no name lookup, scans nothing and sends nothing; a test fails if it
-tries. Containment still bites: if an administrator locks the account or revokes a session mid-run, the remaining actions
-are recorded as blocked.
-
-**With the dashboards** (best for a demo)
-
-1. Open the SOC Dashboard (http://127.0.0.1:8503), sign in as `SEC-9011` and stay on *Security Overview*.
-2. Open the Simulation Console (http://127.0.0.1:8502), sign in as `SEC-9011`.
-3. Choose a scenario, an employee (or *Chosen by the seed*), the seed mode, pace (*Demo* spreads the actions over up to 25 s;
-   *Instant* does not wait) and the number of background employees, then press **Start run**. The run panel shows its
-   status, progress, seed, plan fingerprint and what the detector produced (highest level, rules fired, whether an alert
-   was raised). The individual stages can also be triggered by hand under *Individual steps*.
-4. Watch the SOC dashboard. Malicious scenarios can reach the Alert risk band and raise an alert and an investigation, but none
-   is guaranteed: benign scenarios stay Normal or at most Watch, and the same malicious scenario reaches different bands for
-   different seeds.
-
-**With the API**
+**1. The verifier (quickest, and it checks itself).** Set `TRUSTED_FRONTEND_KEY` in `.env` to a random value of 24 or more
+characters, restart the stack, then run:
 
 ```powershell
-$base = "http://127.0.0.1:8000"
-$pw = (Get-Content data\demo_credentials.local.json | ConvertFrom-Json).'soc.admin'      # created by python app.py setup
-$login = @{ employee_id = "SEC-9011"; password = $pw } | ConvertTo-Json
-$tok = (Invoke-RestMethod "$base/api/auth/login" -Method Post -ContentType application/json -Body $login).access_token
-$h = @{ Authorization = "Bearer $tok" }
-$body = @{ scenario = "bulk_export"; seed = 42; pace = "instant"; idempotency_key = [guid]::NewGuid().ToString("N") } | ConvertTo-Json
-$run = Invoke-RestMethod "$base/api/simulation/runs" -Method Post -Headers $h -ContentType application/json -Body $body
-Invoke-RestMethod "$base/api/simulation/runs/$($run.id)" -Headers $h                        # status, plan, results, observed outcome
-Invoke-RestMethod "$base/api/simulation/runs/$($run.id)/cancel" -Method Post -Headers $h    # stop a running run
+python -m deploy.verify --api http://127.0.0.1:8000 `
+    --employee-password (Get-Content data\demo_credentials.local.json | ConvertFrom-Json).'alice.morgan' `
+    --admin-password (Get-Content data\demo_credentials.local.json | ConvertFrom-Json).'soc.admin' `
+    --frontend-key <the same TRUSTED_FRONTEND_KEY>
 ```
 
-Omit `seed` for a random one and `target_employee_id` to let the seed choose an eligible employee. Other optional fields:
-`records` (primary transfer volume), `source_ip` (external address for the scenarios that use one) and `noise` (0 to 3
-background employees). Individual stages remain available at `POST /api/simulation/steps`
-(`{"target_employee_id": .., "step": "large_export", "records": 8000}`).
-Run it on an account nobody is using: genuine activity during the run is scored in the same window.
-The stages are explained in [The simulated attack, step by step](#the-simulated-attack-step-by-step).
+It sends real requests to the running backend: refused administrator requests, an export of 12,000 records that is held for
+approval and then approved and used once, and five failed sign-ins for `EMP-1010` from the documentation address
+`203.0.113.77` that lock the account and are then unlocked by an administrator. Each check prints PASS or FAIL. What it causes
+stays in the audit trail and in the SOC page (*Authentication Defence*). Without `--frontend-key` the lock check is skipped and
+says so.
 
-## How to reset the simulation
+**2. By hand.** Any HTTP client works. A client address is believed only together with the shared key, so send both headers:
 
-* Simulation Console: tick *Confirm reset*, press **Reset simulation** (disabled while a run is active; stop it first).
-* API: `POST /api/simulation/reset` (administrator; 409 while a run is active).
+```powershell
+$base = "http://127.0.0.1:8000"; $key = "<your TRUSTED_FRONTEND_KEY>"
+$h = @{ "X-Frontend-Key" = $key; "X-Client-IP" = "203.0.113.50" }
+1..5 | ForEach-Object {
+    try { Invoke-RestMethod "$base/api/auth/login" -Method Post -Headers $h -ContentType application/json `
+          -Body (@{ employee_id = "EMP-1008"; password = "not-the-password-$_" } | ConvertTo-Json) } catch { $_.Exception.Response.StatusCode.value__ }
+}
+```
 
-Reset removes every synthetic event, session, alert, investigation (with its evidence), assessment, privileged account,
-response control and simulation run record, undoes containment applied to the affected employees and restores their
-last-login time. The seeds and plan fingerprints of the removed runs are kept in the reset's audit entry. Real
-(non-synthetic) data is never touched. The reset is recorded in the audit log.
+The fifth failure locks `EMP-1008` for 15 minutes. Open the SOC dashboard, *Authentication Defence*, to see the incident, its
+evidence, the automatic response and the unlock button.
+
+**3. In the browser.** The portal's sign-ins and every refused API call it makes are recorded too. Locally, though, every browser
+connects from the same machine, which the backend attributes to the employee's own registered workstation. Failures from an
+account's own known address need 10 to count as brute force, while the older sign-in throttle already answers HTTP 429 after 5, so
+a lock is not reached from the browser on one machine. Use method 1 or 2 for the lock, which also shows why the client address
+is never taken from the browser.
+
+**Bulk export by hand.** As `EMP-1001`, `POST /api/resources/financial-reports/access` with
+`{"action": "export", "record_count": 12000}` returns HTTP 409 and creates a request. In the SOC page, *Authentication Defence*,
+approve it with a note, then repeat the call with `"approval_id": <id>`: it succeeds once and the approval is spent.
+
+## The offline scenario lab
+
+The earlier seeded scenario generator lives in `lab/` (`scenario_generator.py` plans a run from a seed, `simulation_runs.py`
+runs it, `simulation_service.py` holds the manual steps and the reset, `simulation_routes.py` is its API). It feeds synthetic
+actions through the same ingestion functions the API uses and never writes an alert or a score itself. It is **not part of the
+product**:
+
+* its routes are mounted only when `LAB_MODE=true` (the test suite and `python -m ml.calibrate_scoring` set it);
+* the backend **refuses to start** with `LAB_MODE=true` when `APP_ENV=production`;
+* the `lab/` folder is not copied into the container image (a test builds that copy and checks it), so a deployed service has no
+  such routes and no way to turn them on;
+* there is no user interface for it any more.
+
+Scenarios (benign activity, benign high-volume transfer, gradual collection and staging, bulk export, suspicious external
+transfer, removable media, several weak signals, and the compromised-account campaign) use seeds, so the same seed, scenario and
+employee give the same plan (its SHA-256 is stored). External addresses come from the RFC 5737 documentation ranges, destinations
+end in `.invalid`, and the lab makes no network connection (a test fails if it tries).
+
+To reset lab data in a development database: `POST /api/simulation/reset` as an administrator (409 while a run is active). It
+removes every synthetic event, session, alert, investigation, assessment, privileged account, response control and lab run
+record and undoes containment applied to the affected employees; real (non-synthetic) data is not touched, and the reset is
+audited.
 
 ## Demo script (about 10 minutes)
 
-Say at the start: *"This is a simulated threat-detection and response platform on synthetic data. The detection logic is real
-code; the containment buttons edit this application's own records and nothing else."* Then:
+What to say first: *"This is an educational research platform on synthetic data. Sign-in monitoring, the account lock and the
+address block are real enforcement inside this application. It does not control a firewall, a network or a real bank, and the
+older investigation containment buttons only change this application's own records."* Then:
 
-1. `python app.py all`. Open the SOC Dashboard (8503) as `SEC-9011` and the Simulation Console (8502) in a second window.
-2. In the console pick **Compromised account campaign (full chain)**, *Fixed (reproducible)* seed `1`, pace *Demo*, press
-   **Start run**. Point out the run status and seed, and that the console only reports what the backend's detector produced.
-3. In the SOC dashboard watch *Security Overview*. The run raises an Alert-band alert only if the detector decides to (seed 1 does
-   on the data this project ships; other seeds and scenarios may stay below Alert, and the benign scenarios must). Point out that the
-   score, the impact severity and the evidence strength are three different readings.
-4. Open the investigation: show the evidence with event IDs and timestamps, the explanation, the missing evidence and the
-   alternative explanations. State that "confirmed" appears only for simulation ground truth.
-5. Open **Containment** on the investigation, press **Simulate containment** on "Disable account (simulated)", read the
-   confirmation panel ("Simulation only: this application's own records. No external system is contacted."), tick the
-   confirmation and press **Run simulation**. The message that follows starts "Simulation completed:" and lists the records
-   changed.
-6. Show the history row: requested action, who initiated it, the alert and investigation, the result. Then try to sign in to
-   the portal as the disabled employee: this application's login now returns "Account is locked". Say plainly that nothing
-   outside this application changed.
-7. Press **Run simulation** again on a retried request (or call the API twice with the same `idempotency_key`): no second
-   action appears. Show the audit log.
-8. Download the JSON report from the investigation page: its notice says the containment actions were simulations.
-9. Reset in the console (stop any active run first).
+1. `python app.py setup`, add a random `TRUSTED_FRONTEND_KEY` (24+ characters) to `.env`, and `python app.py all`. Open the SOC
+   dashboard (8503) as `SEC-9011`, go to *Authentication Defence* and show it quiet.
+2. Run the verifier or the PowerShell loop from [How to exercise the platform](#how-to-exercise-the-platform).
+3. Refresh *Authentication Defence*: a locked account, an incident with the five attempts as evidence, the threshold and window,
+   the automatic response (policy name, who or what did it, expiry) and the statement of what it does not do.
+4. Unlock the account in the SOC page with a reason. Show the response history and the audit log.
+5. Show the held-export flow (the *Bulk export by hand* paragraph): the 409 response, the request waiting in the SOC page, the
+   approval, the single use, and the second attempt being refused.
+6. Open the *Attack Investigations* and *Response Centre* pages for the investigation workflow. Without the lab there are no seeded
+   alerts, so these pages show only what real or test traffic produced.
 
-Avoid saying "the attack was blocked" or "the account was disabled" (say "the simulated account record was set to locked").
-Avoid claiming "this protects the bank" and avoid quoting the benchmark figures as a guarantee; see Known limitations and
-`docs/detection-evaluation.md`.
+Avoid saying "the attack was blocked at the network" or "this protects the bank". The scores are heuristics, not probabilities,
+and the benchmark figures are not a guarantee; see Known limitations and `docs/detection-evaluation.md`.
 
 ## How it works, end to end
 
@@ -629,8 +595,8 @@ Generated by `data/seed_data.py` (random seed `20260101`) the first time the bac
   history has no after-hours sessions; those appear only in the ML dataset.
 * Seeded events are stored with `evaluate_alerts=False`: rule flags are saved but no ML scoring or alerts are produced,
   so seeding never creates alerts.
-* Everything created later by the simulation is flagged `is_synthetic = true` (events also carry `"synthetic": true` in
-  their metadata) and is removed by *Reset simulation*. Seeded history is also synthetic data, but it is the "real"
+* Everything created later by the offline scenario lab is flagged `is_synthetic = true` (events also carry `"synthetic": true` in
+  their metadata) and is removed by the lab's reset (`POST /api/simulation/reset`, `LAB_MODE=true` only). Seeded history is also synthetic data, but it is the "real"
   baseline from the application's point of view and is never touched by reset.
 
 ### 2. Machine-learning training and evaluation dataset
@@ -917,7 +883,7 @@ device, behaviour on PostgreSQL with several instances (concurrency was tested o
 traffic, or the gateway's address handling behind a real platform proxy.
 
 **Not done in this phase** (still to build): a firewall provider integration (Vercel or another WAF) and its enforcement states,
-Redis, removal of the Simulation Console, detections for password changes and geolocation, a portal screen for employees to
+Redis, detections for password changes and geolocation, a portal screen for employees to
 track their own export requests (the API exists),
 progressive login delays, analyst assignment, a Next.js front end, and calibration on real traffic.
 
@@ -1120,8 +1086,8 @@ A large export alone is reported as an export, **never** as exfiltration.
 
 ## The simulated attack, step by step
 
-These are the stages an administrator can trigger by hand under *Individual steps* (`POST /api/simulation/steps`) and that
-the *Compromised account campaign* scenario draws from. Defaults for the manual steps: attacker address `203.0.113.45` (an
+These are the stages of the offline scenario lab's manual steps (`POST /api/simulation/steps`, `LAB_MODE=true` only, never in
+production) and the ones its *Compromised account campaign* scenario draws from. Defaults for the manual steps: attacker address `203.0.113.45` (an
 RFC 5737 documentation address), device `SimulatedAttackerToolkit/1.0 (Linux x86_64; synthetic)`, external destination
 `files.exfil-sim.example.invalid`. The attacker uses the target's stolen password through the normal login code path.
 
@@ -1368,8 +1334,8 @@ ml/cert/                     CERT r4.2 pipeline: schema, validate, prepare, labe
 ml/detect/                   window builder, features, models, hybrid risk, benchmark and summary (offline benchmark)
 docs/                        cert-dataset.md, detection-evaluation.md, deployment.md, detection-results/
 docs/cert-dataset.md         CERT dataset setup, field mapping, label rules, caveats
-frontend/                    employee_portal.py, soc_dashboard.py, simulation_console.py, components, theme, api_client
-tests/                       563 pytest tests
+frontend/                    employee_portal.py, soc_dashboard.py, soc_auth_defense.py, components, theme, api_client
+tests/                       567 pytest tests
 .streamlit/config.toml       Streamlit theme and server settings
 requirements.txt  requirements-dev.txt (adds pgserver for the PostgreSQL tests)  requirements-deploy.txt (pinned runtime for the image)
 Dockerfile  .dockerignore  render.yaml  .env.example
@@ -1378,7 +1344,7 @@ Dockerfile  .dockerignore  render.yaml  .env.example
 ## Tests
 
 ```powershell
-python -m pytest tests -q          # 563 tests, about eight minutes (a real backend is started several times)
+python -m pytest tests -q          # 567 tests, about six to twelve minutes (a real backend is started several times)
 python -m pip install -r requirements-dev.txt   # optional: adds pgserver so tests/test_postgres.py runs instead of skipping
 ```
 
@@ -1396,7 +1362,7 @@ removes rows each test creates. It covers:
 * **Security and reliability:** hashed passwords and session tokens; every endpoint requires authentication except health
   and login; admin endpoints reject employees; employees cannot read other employees' restricted records; invalid
   paths, queries and bodies never produce a 5xx; audit entries; UTC timestamps; bounded scores whose bands follow the thresholds and the stage gate.
-* **Runtime:** data, sessions and the model survive a backend restart; the three Streamlit apps run against a live backend,
+* **Runtime:** data, sessions and the model survive a backend restart; the two Streamlit apps run against a live backend,
   employees are refused by the SOC dashboard, and the apps stay usable when the backend is unreachable.
 * **Detection, ML, SOC and investigation workflow:** normal activity, unfamiliar IP, restricted access, large export,
   failed logins, privileged account creation, external transfer, a complete attack, duplicate events, false positives,
@@ -1440,7 +1406,7 @@ been reviewed or penetration-tested. What is in place, and what is not:
   logged or returned. Session tokens are random and only an HMAC of them is stored.
 * **Authentication and authorization.** Every route except `/api/health` and login needs a valid session; administrator
   routes check the role server-side. State-changing routes (simulation, investigations, alerts, containment, detection)
-  need the administrator role, and the simulation also needs `SIMULATION_ENABLED`. Employees can reach only their own data;
+  need the administrator role, and the lab API also needs `LAB_MODE=true` (never in production). Employees can reach only their own data;
   a job title such as IT administrator never grants the SOC role. Expired, revoked, locked and tampered sessions are refused.
 * **Brute force and abuse.** Failed sign-ins are throttled per employee ID and per source address (HTTP 429, `Retry-After`);
   uniform error text for unknown IDs and wrong passwords; per-caller, per-minute limits on administrator state changes,
@@ -1501,8 +1467,8 @@ been reviewed or penetration-tested. What is in place, and what is not:
   with a handful of parallel requests, not under load.
 * **One active investigation per employee.** Once resolved, a later Alert-band alert opens a new one.
 * **Explanations are rule-based.** They state only what the stored events show; an LLM is not used.
-* **Evidence retention.** Nothing deletes real events, but *Reset simulation* deletes synthetic events and investigations,
-  by design.
+* **Evidence retention.** Nothing deletes real events, but the lab's reset deletes synthetic events and investigations,
+  by design (it exists only in development and test setups).
 * **Genuine activity during a run** is scored in the same correlation window as the simulated attack.
 * **Scenario runs are scripted, bounded generators, not adaptive attackers.** Randomisation changes timing, volumes, ordering
   and background noise within fixed rules; it does not react to detections (apart from actions being blocked by containment).

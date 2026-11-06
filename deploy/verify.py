@@ -4,20 +4,21 @@
     python -m deploy.verify --url https://your-service.onrender.com --gate-user U --gate-password P
 
     # behaviour checks, run where the backend answers (the host's shell, or a local stack): sign-in, roles, ingestion,
-    # de-duplication, detection, investigation, simulated containment, persistence
-    python -m deploy.verify --url ... --api http://127.0.0.1:8000 --employee-password E --admin-password A [--snapshot s.json]
+    # de-duplication, refused-access recording, bulk-export approval, automatic brute-force lock and recovery, persistence
+    python -m deploy.verify --url ... --api http://127.0.0.1:8000 --employee-password E --admin-password A [--frontend-key K] [--snapshot s.json]
     # ...restart the service, then:
     python -m deploy.verify --api http://127.0.0.1:8000 --admin-password A --compare s.json
 
 Secrets are read from arguments or the VERIFY_* environment variables and are never printed. Every check prints PASS or FAIL
-with what was observed; the exit code is non-zero if any check failed. Behaviour checks create synthetic events and one synthetic
-scenario run, and clean up after themselves (simulation reset, account restore).
+with what was observed; the exit code is non-zero if any check failed. The behaviour checks send real requests to the running
+service, so what they cause stays in its audit trail: one synthetic event, one approved 12,000-record export request for EMP-1001
+and, with --frontend-key, five failed sign-ins for EMP-1010 (the account is locked, then unlocked again). Run them against a demo
+deployment or accept those records. The brute-force check needs the shared TRUSTED_FRONTEND_KEY (set it on the service yourself).
 """
 import argparse
 import json
 import os
 import sys
-import time
 import uuid
 from pathlib import Path
 
@@ -42,7 +43,7 @@ def public_checks(url: str, gate_user: str | None, gate_password: str | None, fo
     url = url.rstrip("/")
     health = SESSION.get(f"{url}/healthz", timeout=30)
     body = health.json() if health.headers.get("content-type", "").startswith("application/json") else {}
-    check(health.status_code == 200 and body.get("status") == "ok", "healthz: backend and all three dashboards are up", str(body.get("components")))
+    check(health.status_code == 200 and body.get("status") == "ok", "healthz: backend and both dashboards are up", str(body.get("components")))
 
     home = SESSION.get(f"{url}/", timeout=30)
     check(home.status_code == 200 and "streamlit" in home.text.lower(), "the employee portal loads without any local connection")
@@ -55,7 +56,7 @@ def public_checks(url: str, gate_user: str | None, gate_password: str | None, fo
         check(plain.status_code in (301, 302, 307, 308) and plain.headers.get("location", "").startswith("https://"),
               "plain HTTP is redirected to HTTPS", str(plain.status_code))
 
-    for path, name in (("/soc/", "SOC dashboard"), ("/console/", "simulation console")):
+    for path, name in (("/soc/", "SOC dashboard"),):
         # a fresh request each time: the gate sets a cookie after a successful login, and a visitor has none
         denied = requests.get(f"{url}{path}", timeout=30)
         check(denied.status_code == 401 and "www-authenticate" in denied.headers, f"{name} refuses visitors without the administrator gate")
@@ -91,7 +92,45 @@ def get(api: str, headers: dict, path: str, **params):
     return r.json()
 
 
-def behaviour_checks(api: str, employee_password: str, admin_password: str, snapshot: Path | None) -> None:
+ATTACKER_IP = "203.0.113.77"        # documentation address (RFC 5737): never a real host
+BRUTE_FORCE_TARGET = "EMP-1010"     # a seeded account that is not one of the sign-in accounts used elsewhere in these checks
+
+
+def auth_defence_checks(api: str, admin: dict, employee: dict, frontend_key: str | None) -> None:
+    """Real requests against the live defences: refused access, bulk-export approval, and (with the shared key) a brute-force lock."""
+    token = employee
+    body = {"action": "export", "record_count": 12_000}
+    held = SESSION.post(f"{api}/api/resources/financial-reports/access", headers=token, json=body, timeout=30)
+    pending = [r for r in get(api, admin, "/api/soc/auth/export-requests", status="pending")["rows"] if r["employee_id"] == "EMP-1001"]
+    check(held.status_code == 409 and bool(pending), "an export above the limit is held for approval before anything is processed",
+          f"{held.status_code}, {len(pending)} pending")
+    if pending:
+        request_id = pending[0]["id"]
+        decided = SESSION.post(f"{api}/api/soc/auth/export-requests/{request_id}/decision", headers=admin, timeout=30,
+                               json={"decision": "approve", "note": "Deployment verification drill", "valid_minutes": 10})
+        check(decided.status_code == 200 and decided.json().get("status") == "approved", "a security administrator can approve the held export")
+        done = SESSION.post(f"{api}/api/resources/financial-reports/access", headers=token, json={**body, "approval_id": request_id}, timeout=30)
+        again = SESSION.post(f"{api}/api/resources/financial-reports/access", headers=token, json={**body, "approval_id": request_id}, timeout=30)
+        check(done.status_code == 200 and again.status_code == 409, "the approval works once and cannot be reused", f"{done.status_code}/{again.status_code}")
+
+    if not frontend_key:
+        print("SKIP  brute-force lock and recovery: they need the shared key the dashboards use to report a client address. Set "
+              "TRUSTED_FRONTEND_KEY on the service yourself, then pass it as --frontend-key / VERIFY_FRONTEND_KEY.")
+        return
+    attack = {"X-Frontend-Key": frontend_key, "X-Client-IP": ATTACKER_IP}
+    codes = [SESSION.post(f"{api}/api/auth/login", headers=attack, timeout=30,
+                          json={"employee_id": BRUTE_FORCE_TARGET, "password": f"not-the-password-{n}-0000"}).status_code for n in range(5)]
+    check(codes == [401] * 5, "five wrong passwords are each refused without revealing that the account is about to be locked", str(codes))
+    target = next(e for e in get(api, admin, "/api/employees") if e["employee_code"] == BRUTE_FORCE_TARGET)
+    check(target["status"] == "locked", "the account is locked automatically after the fifth failure")
+    overview = get(api, admin, "/api/soc/auth/overview")
+    check(any(a["employee_id"] == BRUTE_FORCE_TARGET for a in overview["locked_accounts"]), "the SOC shows the locked account and the incident behind it")
+    unlock = SESSION.post(f"{api}/api/soc/auth/actions", headers=admin, timeout=30,
+                          json={"action": "unlock_account", "target": BRUTE_FORCE_TARGET, "reason": "Deployment verification clean-up"})
+    check(unlock.status_code == 201 and unlock.json().get("status") == "completed", "a security administrator can unlock it", str(unlock.status_code))
+
+
+def behaviour_checks(api: str, employee_password: str, admin_password: str, snapshot: Path | None, frontend_key: str | None = None) -> None:
     api = api.rstrip("/")
     wrong = SESSION.post(f"{api}/api/auth/login", json={"employee_id": "EMP-1001", "password": "not-the-password-0000"}, timeout=30)
     check(wrong.status_code == 401, "a wrong password is refused")
@@ -116,41 +155,10 @@ def behaviour_checks(api: str, employee_password: str, admin_password: str, snap
     check(overview["kpis"]["total_events"] <= stats["events_total"] and overview["kpis"]["total_events"] > 0,
           "the SOC overview and the dashboard statistics read the same database")
 
-    run = SESSION.post(f"{api}/api/simulation/runs", headers=admin, timeout=30,
-                       json={"scenario": "compromised_account_campaign", "seed": 1, "pace": "instant"})
-    if run.status_code != 202:
-        check(False, "a synthetic attack scenario starts", f"{run.status_code} {run.text[:120]}")
-        return
-    run_id, target = run.json()["id"], run.json()["target"]["id"]
-    for _ in range(240):
-        state = get(api, admin, f"/api/simulation/runs/{run_id}")
-        if state["status"] in ("completed", "failed", "cancelled"):
-            break
-        time.sleep(0.5)
-    check(state["status"] == "completed", "the synthetic attack scenario runs through the normal ingestion path", state["status"])
-    alerts = [a for a in get(api, admin, "/api/alerts", employee_id=target) if a["status"] in ("open", "investigating")]
-    check(bool(alerts), "detection raises an alert for the scenario that warrants one",
-          f"risk band {alerts[0]['risk_band']}, impact {alerts[0]['impact_severity']}, evidence {alerts[0]['evidence_strength']}" if alerts else "no alert")
-    invs = [i for i in get(api, admin, "/api/soc/investigations", status="active") if i["employee_pk"] == target]
-    check(bool(invs), "an investigation exists with preserved evidence")
-    if invs:
-        detail = get(api, admin, f"/api/soc/investigations/{invs[0]['id']}")
-        check(bool(detail["timeline"]) and detail["integrity"]["intact"], "the investigation's evidence is intact", f"{len(detail['timeline'])} events")
-        key = uuid.uuid4().hex
-        body = {"employee_id": target, "action_type": "lock_account", "reason": "Deployment verification drill", "confirm": True,
-                "investigation_id": invs[0]["id"], "idempotency_key": key}
-        first = SESSION.post(f"{api}/api/containment", headers=admin, json=body, timeout=30)
-        again = SESSION.post(f"{api}/api/containment", headers=admin, json=body, timeout=30)
-        record = first.json() if first.status_code in (200, 201) else {}
-        check(first.status_code == 201 and again.status_code == 200 and again.json().get("id") == record.get("id"),
-              "simulated containment completes once and a retry replays it", f"{first.status_code}/{again.status_code}")
-        check(record.get("simulated") is True and not record.get("external_systems_contacted"),
-              "the containment record says it only changed this application's own state")
-        locked = next(e for e in get(api, admin, "/api/employees") if e["id"] == target)["status"] == "locked"
-        check(locked, "the simulated account lock took effect inside the application")
-        SESSION.post(f"{api}/api/containment", headers=admin, timeout=30,
-                     json={"employee_id": target, "action_type": "restore_account", "reason": "Verification clean-up", "confirm": True})
-    SESSION.post(f"{api}/api/simulation/reset", headers=admin, timeout=60)
+    denials = get(api, admin, "/api/soc/auth/denials", account="EMP-1001", limit=50)["rows"]
+    check(bool(denials), "the refused administrator requests above were recorded as access denials")
+
+    auth_defence_checks(api, admin, employee, frontend_key)
 
     if snapshot is not None:
         stored = get(api, admin, "/api/system/database")
@@ -181,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gate-password", default=os.getenv("VERIFY_GATE_PASSWORD"))
     parser.add_argument("--employee-password", default=os.getenv("VERIFY_EMPLOYEE_PASSWORD"), help="password of EMP-1001")
     parser.add_argument("--admin-password", default=os.getenv("VERIFY_ADMIN_PASSWORD"), help="password of SEC-9011")
+    parser.add_argument("--frontend-key", default=os.getenv("VERIFY_FRONTEND_KEY"), help="the service's TRUSTED_FRONTEND_KEY (enables the brute-force check)")
     parser.add_argument("--snapshot", type=Path, help="write a snapshot for the persistence check")
     parser.add_argument("--compare", type=Path, help="compare against a snapshot taken before a restart")
     args = parser.parse_args(argv)
@@ -189,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
 
     forbidden = [(n, os.getenv(n, "")) for n in ("SECRET_KEY", "ADMIN_UI_PASSWORD", "DEMO_PASSWORDS_JSON", "DATABASE_URL")]
     forbidden += [("--gate-password", args.gate_password or ""), ("--admin-password", args.admin_password or ""),
-                  ("--employee-password", args.employee_password or "")]
+                  ("--employee-password", args.employee_password or ""), ("--frontend-key", args.frontend_key or "")]
     if args.url:
         public_checks(args.url, args.gate_user, args.gate_password, [(n, v) for n, v in forbidden if len(v) >= 8])
     if args.api and args.compare:
@@ -199,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.api:
         if not (args.employee_password and args.admin_password):
             parser.error("behaviour checks need --employee-password and --admin-password")
-        behaviour_checks(args.api, args.employee_password, args.admin_password, args.snapshot)
+        behaviour_checks(args.api, args.employee_password, args.admin_password, args.snapshot, args.frontend_key)
     failed = [name for ok, name in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)} passed, {len(failed)} failed")
     return 1 if failed else 0

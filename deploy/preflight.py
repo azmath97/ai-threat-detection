@@ -23,7 +23,7 @@ PUBLIC_URL_PATTERN = re.compile(r"^https://[A-Za-z0-9.-]+(:\d{1,5})?$")
 LOCAL_URL_PATTERN = re.compile(r"^http://(localhost|127\.0\.0\.1)(:\d{1,5})?$")
 MODES = ("persistent", "demo")
 PLACEHOLDERS = ("change-me", "changeme", "dev-only", "secret", "test-secret", "password")
-INTERNAL = {"API_PORT": "8000", "PORTAL_PORT": "8501", "CONSOLE_PORT": "8502", "SOC_PORT": "8503"}
+INTERNAL = {"API_PORT": "8000", "PORTAL_PORT": "8501", "SOC_PORT": "8503"}
 
 
 def _flag(value: str | None) -> bool:
@@ -109,9 +109,9 @@ def problems(env: Mapping[str, str]) -> list[str]:
 
     if not _flag(env.get("ALLOW_OPEN_ADMIN_UI")):
         if len(env.get("ADMIN_UI_USER", "")) < 3:
-            found.append("ADMIN_UI_USER is not set (the user name of the gate in front of the SOC dashboard and simulation console)")
+            found.append("ADMIN_UI_USER is not set             (the user name of the gate in front of the SOC dashboard)")
         if len(env.get("ADMIN_UI_PASSWORD", "")) < 16:
-            found.append("ADMIN_UI_PASSWORD must be at least 16 characters (the gate in front of the SOC dashboard and simulation console)")
+                        found.append("ADMIN_UI_PASSWORD must be at least 16 characters (the gate in front of the SOC dashboard)")
 
     if _flag(env.get("AUTO_SEED", "true")):
         problem = _demo_credentials_problem(env)

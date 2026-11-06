@@ -140,34 +140,6 @@ class ApiClient:
     def departments(self) -> list[str]:
         return self._json("GET", "/api/portal/directory/departments")
 
-    # simulation (security administrators only)
-    def sim_scenarios(self) -> dict:
-        return self._json("GET", "/api/simulation/scenarios")
-
-    def sim_status(self) -> dict:
-        return self._json("GET", "/api/simulation/status")
-
-    def sim_step(self, target_employee_id: int, step: str, source_ip: str, scenario: str, records: int | None = None) -> dict:
-        body = {"target_employee_id": target_employee_id, "step": step, "source_ip": source_ip, "scenario": scenario}
-        if records:
-            body["records"] = records
-        return self._json("POST", "/api/simulation/steps", json=body)
-
-    def sim_start_run(self, body: dict) -> dict:
-        return self._json("POST", "/api/simulation/runs", json=body)
-
-    def sim_get_run(self, run_id: int) -> dict:
-        return self._json("GET", f"/api/simulation/runs/{run_id}")
-
-    def sim_runs(self, limit: int = 8) -> list[dict]:
-        return self._json("GET", "/api/simulation/runs", params={"limit": limit})["items"]
-
-    def sim_cancel_run(self, run_id: int) -> dict:
-        return self._json("POST", f"/api/simulation/runs/{run_id}/cancel")
-
-    def sim_reset(self) -> dict:
-        return self._json("POST", "/api/simulation/reset")
-
     def synthetic_events(self, limit: int = 20) -> list[dict]:
         return self._json("GET", "/api/events", params={"synthetic": "true", "limit": limit})["items"]
 

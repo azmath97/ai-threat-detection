@@ -1,4 +1,4 @@
-# Render Blueprint: the whole simulated platform as ONE Docker web service (FastAPI backend + the three Streamlit apps on
+# Render Blueprint: the whole platform as ONE Docker web service (FastAPI backend + the two Streamlit apps on
 # loopback behind the gateway in deploy/gateway.py, which is the only public port). See docs/deployment.md.
 #
 # Nothing secret is stored in this file. Every value marked sync: false is entered in the Render dashboard.
@@ -9,7 +9,7 @@ services:
     name: westbridge-platform
     runtime: docker
     dockerfilePath: ./Dockerfile
-    # The four Python processes need roughly 0.6 GB at idle, so the 512 MB plans (including free) will not fit.
+    # The three Python processes need roughly 0.5 GB at idle, so the 512 MB plans (including free) will not fit.
     plan: 1c-2g
     healthCheckPath: /healthz
     envVars:
@@ -25,12 +25,10 @@ services:
         sync: false
       - key: DEMO_PASSWORDS_JSON
         sync: false
-      # Browser login (HTTP Basic) that protects the SOC dashboard and the simulation console.
+      # Browser login (HTTP Basic) that protects the SOC dashboard.
       - key: ADMIN_UI_USER
         sync: false
       - key: ADMIN_UI_PASSWORD
         sync: false
-      - key: SIMULATION_ENABLED
-        value: "true"
       - key: DISPLAY_TIMEZONE
         value: Asia/Kolkata

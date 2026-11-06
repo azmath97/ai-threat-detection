@@ -1,4 +1,4 @@
-# Westbridge Bank - simulated insider-threat platform: ONE container running the FastAPI backend and the three Streamlit
+# Westbridge Bank - insider-threat and account-defence platform: ONE container running the FastAPI backend and the two Streamlit
 # apps on loopback behind a small gateway that is the only public port ($PORT). See docs/deployment.md.
 FROM python:3.12-slim
 

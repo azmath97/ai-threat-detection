@@ -162,7 +162,7 @@ def fake_upstream() -> Starlette:
             await websocket.send_text(f"echo:{text}")
 
     return Starlette(routes=[
-        Route("/api/health", ok), Route("/_stcore/health", ok), Route("/soc/_stcore/health", ok), Route("/console/_stcore/health", ok),
+        Route("/api/health", ok), Route("/_stcore/health", ok), Route("/soc/_stcore/health", ok),
         WebSocketRoute("/{path:path}", echo), Route("/{path:path}", page, methods=["GET", "POST"]),
     ])
 
@@ -188,7 +188,7 @@ GATE_USER, GATE_PASSWORD = "gate-user", "a-long-gate-password-1"
 
 def make_cfg(port: int, **overrides) -> GatewayConfig:
     target = f"127.0.0.1:{port}"
-    values = {"backend": target, "portal": target, "console": target, "soc": target, "admin_user": GATE_USER,
+    values = {"backend": target, "portal": target, "soc": target, "admin_user": GATE_USER,
               "admin_password": GATE_PASSWORD, "gate_key": gateway.hmac.new(b"unit-test-secret-key", b"gate", "sha256").digest()}
     values.update(overrides)
     return GatewayConfig(**values)
@@ -207,7 +207,6 @@ def gw(upstream_port):
 def test_gateway_routes_each_path_to_its_own_application(gw):
     assert gw.get("/").json()["path"] == "/"
     assert gw.get("/soc/", headers=basic()).json()["path"] == "/soc/"
-    assert gw.get("/console/", headers=basic()).json()["path"] == "/console/"
 
 
 def test_the_backend_api_and_its_documentation_are_never_public(gw):
@@ -217,7 +216,7 @@ def test_the_backend_api_and_its_documentation_are_never_public(gw):
 
 
 def test_admin_pages_need_the_gate_login(gw):
-    for path in ("/soc/", "/console/", "/soc/anything"):
+    for path in ("/soc/", "/soc/anything"):
         denied = gw.get(path)
         assert denied.status_code == 401 and "Basic" in denied.headers["www-authenticate"]
     assert gw.get("/soc/", headers=basic(password="wrong-password-123456")).status_code == 401
@@ -292,7 +291,7 @@ def test_force_https_redirects_plain_http_only(upstream_port):
 
 def test_healthz_reports_every_component_and_a_failure(upstream_port, gw):
     ok = gw.get("/healthz")
-    assert ok.status_code == 200 and ok.json()["status"] == "ok" and set(ok.json()["components"]) == {"backend", "portal", "console", "soc"}
+    assert ok.status_code == 200 and ok.json()["status"] == "ok" and set(ok.json()["components"]) == {"backend", "portal", "soc"}
     dead = make_cfg(upstream_port, soc=f"127.0.0.1:{free_port()}")
     with TestClient(gateway.create_app(dead)) as client:
         down = client.get("/healthz")
@@ -430,7 +429,7 @@ def test_the_image_contains_everything_the_application_imports(tmp_path):
 
 def test_the_deployed_image_has_no_scenario_simulator_and_refuses_lab_mode(tmp_path):
     _copy_the_image(tmp_path)
-    assert not (tmp_path / "lab").exists()
+    assert not (tmp_path / "lab").exists() and not (tmp_path / "frontend" / "simulation_console.py").exists()
     routes = _run_in_the_image(tmp_path, "import backend.main as m; print(sorted({r.path for r in m.app.routes if 'simulation' in r.path}))")
     assert routes.returncode == 0 and routes.stdout.strip() == "[]", routes.stderr[-800:]
     refused = _run_in_the_image(tmp_path, "import backend.main", LAB_MODE="true")

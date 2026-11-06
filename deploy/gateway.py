@@ -1,20 +1,19 @@
 """Public entry point of the single-container deployment.
 
-The container runs four processes: the FastAPI backend and three Streamlit apps, all on 127.0.0.1. Only this gateway listens
-on the public port. It routes by path, keeps the backend API private, gates the administrator apps, and proxies the websocket
+The container runs three processes: the FastAPI backend and two Streamlit apps, all on 127.0.0.1. Only this gateway listens
+on the public port. It routes by path, keeps the backend API private, gates the administrator app, and proxies the websocket
 that Streamlit needs.
 
     /            Employee Workspace Portal
     /soc/        SOC Dashboard            (administrator gate, then the application's own administrator sign-in)
-    /console/    Simulation Console       (administrator gate, then the application's own administrator sign-in)
-    /healthz     liveness and readiness of all four processes (only ok / down per component)
+    /healthz     liveness and readiness of all three processes (only ok / down per component)
     /api/...     not routed: the backend is never reachable from the internet
 
 Why the API stays private: every request the backend sees from this container comes from loopback, which the backend maps to
 the signed-in employee's registered workstation address (MAP_LOOPBACK_TO_WORKSTATION). If the API were proxied, an attacker
 using it would inherit that attribution and the unfamiliar-address signals would stop working.
 
-The administrator gate is HTTP Basic authentication in front of the SOC and console apps (ADMIN_UI_USER / ADMIN_UI_PASSWORD), in
+The administrator gate is HTTP Basic authentication in front of the SOC app (ADMIN_UI_USER / ADMIN_UI_PASSWORD), in
 addition to the application's own sign-in and role checks. After a successful Basic login the gateway sets a signed, HttpOnly,
 SameSite=Strict cookie so websocket connections, which some browsers send without Basic credentials, are admitted too.
 
@@ -58,7 +57,6 @@ def _flag(value: str | None) -> bool:
 class GatewayConfig:
     backend: str = "127.0.0.1:8000"
     portal: str = "127.0.0.1:8501"
-    console: str = "127.0.0.1:8502"
     soc: str = "127.0.0.1:8503"
     admin_user: str = ""
     admin_password: str = ""
@@ -77,7 +75,7 @@ class GatewayConfig:
         secret = env.get("SECRET_KEY", "")
         return cls(
             backend=f"127.0.0.1:{env.get('API_PORT', '8000')}", portal=f"127.0.0.1:{env.get('PORTAL_PORT', '8501')}",
-            console=f"127.0.0.1:{env.get('CONSOLE_PORT', '8502')}", soc=f"127.0.0.1:{env.get('SOC_PORT', '8503')}",
+            soc=f"127.0.0.1:{env.get('SOC_PORT', '8503')}",
             admin_user=env.get("ADMIN_UI_USER", ""), admin_password=env.get("ADMIN_UI_PASSWORD", ""),
             allow_open_admin=_flag(env.get("ALLOW_OPEN_ADMIN_UI")),
             gate_key=hmac.new(secret.encode(), b"westbridge-admin-gate-cookie", hashlib.sha256).digest(),
@@ -89,9 +87,8 @@ class GatewayConfig:
 # ------------------------------------------------------------------------------------------------------------- routing
 def route_for(path: str, cfg: GatewayConfig) -> tuple[str, str, bool]:
     """(upstream name, upstream host:port, needs the administrator gate)."""
-    for prefix, name, target in (("/soc", "soc", cfg.soc), ("/console", "console", cfg.console)):
-        if path == prefix or path.startswith(prefix + "/"):
-            return name, target, True
+    if path == "/soc" or path.startswith("/soc/"):
+        return "soc", cfg.soc, True
     return "portal", cfg.portal, False
 
 
@@ -217,7 +214,7 @@ def create_app(cfg: GatewayConfig | None = None) -> Starlette:
     async def healthz(request: Request) -> Response:
         results = await asyncio.gather(
             probe("backend", f"http://{cfg.backend}/api/health"), probe("portal", f"http://{cfg.portal}/_stcore/health"),
-            probe("console", f"http://{cfg.console}/console/_stcore/health"), probe("soc", f"http://{cfg.soc}/soc/_stcore/health"))
+            probe("soc", f"http://{cfg.soc}/soc/_stcore/health"))
         healthy = all(ok for _, ok in results)
         return JSONResponse({"status": "ok" if healthy else "unavailable", "components": {n: "ok" if ok else "down" for n, ok in results}},
                             status_code=200 if healthy else 503, headers={"cache-control": "no-store"})

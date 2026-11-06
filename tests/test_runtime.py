@@ -125,7 +125,7 @@ def _page_text(at: AppTest) -> str:
 def test_dashboards_degrade_gracefully_when_the_backend_is_unreachable(monkeypatch):
     dead = f"http://127.0.0.1:{_free_port()}"
     monkeypatch.setattr(api_client, "API_BASE_URL", dead)
-    for path in ("frontend/employee_portal.py", "frontend/soc_dashboard.py", "frontend/simulation_console.py"):
+    for path in ("frontend/employee_portal.py", "frontend/soc_dashboard.py"):
         at = AppTest.from_file(str(ROOT / path), default_timeout=60).run()
         assert not at.exception, path
         at = _sign_in(at, "SEC-9011", ADMIN_PASSWORD)
@@ -208,37 +208,26 @@ def test_response_centre_runs_simulated_containment_with_a_confirmation_and_reco
     assert new["external_systems_contacted"] == [] and new["performed_by_username"] == "soc.admin"
     requests.post(f"{backend.url}/api/simulation/reset", headers=admin, timeout=30).raise_for_status()
 
+def _verify(backend: Backend, *extra: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, "-m", "deploy.verify", "--api", backend.url, "--admin-password", ADMIN_PASSWORD, *extra],
+                          cwd=ROOT, env=backend.env, capture_output=True, text=True, timeout=240)
 
-def test_simulation_console_drives_an_attack_that_the_soc_then_shows(backend, monkeypatch):
-    import time
 
-    admin = backend.login("SEC-9011", ADMIN_PASSWORD)
-    at = _sign_in(_run_app("frontend/simulation_console.py", backend, monkeypatch), "SEC-9011", ADMIN_PASSWORD)
-    assert not at.exception and at.session_state["token"]
-    next(s for s in at.selectbox if s.label == "Scenario").select("Compromised account campaign (full chain)")
-    next(s for s in at.selectbox if s.label == "Pace").select("instant")
-    next(r for r in at.radio if r.label == "Seed").set_value("Fixed (reproducible)")
-    at = at.run()                                                          # the seed field is enabled once a fixed seed is chosen
-    next(n for n in at.number_input if n.label == "Seed value").set_value(1)
-    at = at.run()
-    start = next(b for b in at.button if b.label == "Start run")
-    at = start.click().run()
-    assert not at.exception, [e.value for e in at.exception]
-    deadline = time.time() + 60
-    while backend.get("/api/simulation/status", admin)["active_run_id"] and time.time() < deadline:
-        time.sleep(0.2)
-    runs = backend.get("/api/simulation/runs", admin)["items"]
-    assert runs and runs[0]["status"] == "completed" and runs[0]["seed"] == 1 and runs[0]["seed_mode"] == "fixed"
-    at = at.run()
-    assert not at.exception
-    overview = backend.get("/api/soc/overview", admin)
-    assert overview["kpis"]["critical_alerts"] >= 1
-    investigations = backend.get("/api/soc/investigations", admin)
-    assert investigations and investigations[0]["level"] == "critical"
+def test_the_deployment_verifier_exercises_the_real_defences_and_the_data_survives_a_restart(backend, tmp_path):
+    snapshot = tmp_path / "snapshot.json"
+    key = backend.env["TRUSTED_FRONTEND_KEY"]
+    run = _verify(backend, "--employee-password", EMPLOYEE_PASSWORD, "--frontend-key", key, "--snapshot", str(snapshot))
+    assert run.returncode == 0 and "FAIL" not in run.stdout and "SKIP" not in run.stdout, run.stdout[-2500:] + run.stderr[-800:]
+    for expected in ("held for approval", "reused", "locked automatically", "unlock it"):
+        assert expected in run.stdout
+    assert ADMIN_PASSWORD not in run.stdout and EMPLOYEE_PASSWORD not in run.stdout and key not in run.stdout
 
-    at = next(c for c in at.checkbox if c.label.startswith("Confirm reset")).check().run()
-    reset = next(b for b in at.button if b.label == "Reset simulation")
-    at = reset.click().run()
-    assert not at.exception
-    assert backend.get("/api/soc/overview", admin)["kpis"]["critical_alerts"] == 0
-    assert backend.get("/api/simulation/status", admin)["synthetic_events"] == 0
+    backend.stop()
+    backend.start()
+    after = _verify(backend, "--compare", str(snapshot))
+    assert after.returncode == 0 and "FAIL" not in after.stdout, after.stdout[-1500:]
+
+
+def test_the_verifier_says_plainly_when_it_cannot_run_the_brute_force_check(backend):
+    run = _verify(backend, "--employee-password", EMPLOYEE_PASSWORD)
+    assert run.returncode == 0 and "SKIP  brute-force lock and recovery" in run.stdout, run.stdout[-1500:]

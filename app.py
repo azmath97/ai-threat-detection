@@ -4,9 +4,8 @@
     python app.py credentials  show the local demo sign-in credentials (never printed by the servers)
     python app.py            backend API only            (http://127.0.0.1:8000)
     python app.py portal     Employee Workspace Portal   (http://127.0.0.1:8501)
-    python app.py simulation Simulation Console (admin)  (http://127.0.0.1:8502)
     python app.py soc        SOC Dashboard (admin)       (http://127.0.0.1:8503)
-    python app.py all        backend + portal + simulation console + SOC dashboard
+    python app.py all        backend + portal + SOC dashboard
 """
 import os
 import secrets
@@ -23,7 +22,6 @@ API_HOST = os.getenv("API_HOST", "127.0.0.1")
 API_PORT = int(os.getenv("API_PORT", "8000"))
 FRONTENDS = {
     "portal": ("frontend/employee_portal.py", 8501),
-    "simulation": ("frontend/simulation_console.py", 8502),
     "soc": ("frontend/soc_dashboard.py", 8503),
 }
 
@@ -85,7 +83,7 @@ def main() -> None:
             for child in children:
                 child.terminate()
     else:
-        sys.exit(f"Unknown mode '{mode}'. Use: setup | credentials | backend | portal | simulation | soc | all")
+        sys.exit(f"Unknown mode '{mode}'. Use: setup | credentials | backend | portal | soc | all")
 
 
 if __name__ == "__main__":

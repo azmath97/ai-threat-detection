@@ -1,4 +1,4 @@
-"""Container entry point: checks the configuration, starts the backend and the three Streamlit apps on loopback, then the public
+"""Container entry point: checks the configuration, starts the backend and the two Streamlit apps on loopback, then the public
 gateway, and supervises them. If any process dies the others are stopped and the container exits non-zero so the host restarts it.
 
     python -m deploy.start
@@ -27,7 +27,7 @@ STREAMLIT_FLAGS = ["--server.headless=true", "--server.address=127.0.0.1", "--br
 def apps(env: dict[str, str]) -> list[tuple[str, list[str], str]]:
     """(name, command, health URL) for the backend and each Streamlit app."""
     py = sys.executable
-    api, portal, console, soc = (int(env[k]) for k in ("API_PORT", "PORTAL_PORT", "CONSOLE_PORT", "SOC_PORT"))
+    api, portal, soc = (int(env[k]) for k in ("API_PORT", "PORTAL_PORT", "SOC_PORT"))
 
     def streamlit(script: str, port: int, base: str = "") -> list[str]:
         command = [py, "-m", "streamlit", "run", script, f"--server.port={port}", *STREAMLIT_FLAGS]
@@ -37,7 +37,6 @@ def apps(env: dict[str, str]) -> list[tuple[str, list[str], str]]:
         ("backend", [py, "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", str(api), "--workers", "1",
                      "--log-level", env.get("LOG_LEVEL", "info").lower()], f"http://127.0.0.1:{api}/api/health"),
         ("portal", streamlit("frontend/employee_portal.py", portal), f"http://127.0.0.1:{portal}/_stcore/health"),
-        ("console", streamlit("frontend/simulation_console.py", console, "console"), f"http://127.0.0.1:{console}/console/_stcore/health"),
         ("soc", streamlit("frontend/soc_dashboard.py", soc, "soc"), f"http://127.0.0.1:{soc}/soc/_stcore/health"),
     ]
 

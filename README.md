@@ -6,6 +6,9 @@ The backend records every sign-in and every refused request as it happens, detec
 probing of other people's records, bulk exports and compromised-account behaviour, and responds automatically. It is a research
 and teaching project, not a security product, and it has not been validated against real traffic.
 
+> **New here?** [working info.md](<working info.md>) explains the whole system in one place: features, workflow, detection, prevention,
+> how every score is calculated, when scores return to normal, the stack, and the limits. This README is the long reference.
+
 ## Scope: what is enforced and what is not
 
 * **Detection runs on the requests this application actually receives.** Every sign-in attempt, refused request and export

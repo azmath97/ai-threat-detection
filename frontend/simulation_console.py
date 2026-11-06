@@ -147,8 +147,6 @@ def console() -> None:
         ui.user_card(st.session_state.admin_name, "Security administrator")
         st.button("Logout", on_click=sign_out, width="stretch", icon=":material/logout:")
 
-    st.markdown('<div class="sim-banner">SIMULATION ENVIRONMENT - SYNTHETIC DATA ONLY. Actions run through the live backend '
-                "and are stored in the shared database flagged as synthetic.</div>", unsafe_allow_html=True)
     ui.page_header("Attack simulation", "Simulate a compromised employee account")
 
     ui.section("Scenario run")

@@ -994,8 +994,6 @@ def dashboard() -> None:
         st.button("Logout", key="nav_logout", width="stretch", on_click=sign_out, icon=":material/logout:")
         ui.user_card(st.session_state.get("admin_id", ""), "Security administrator")
         st.markdown(f'<div class="org-sub" style="margin:.8rem 0 0 .2rem">Live refresh: {LIVE_SECONDS} s</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sim-banner">SIMULATED THREAT-DETECTION AND RESPONSE PLATFORM - synthetic data only. Containment changes '
-                "this application's own records; it does not act on any real network, account or device.</div>", unsafe_allow_html=True)
     PAGE_FUNCTIONS[page]()
 
 

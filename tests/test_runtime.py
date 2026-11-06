@@ -188,7 +188,7 @@ def test_response_centre_runs_simulated_containment_with_a_confirmation_and_reco
     assert backend.get("/api/soc/overview", admin)["kpis"]["critical_alerts"] >= 1
 
     at = _sign_in(_run_app("frontend/soc_dashboard.py", backend, monkeypatch), "SEC-9011", ADMIN_PASSWORD)
-    assert not at.exception and "SIMULATED THREAT-DETECTION AND RESPONSE PLATFORM" in _page_text(at)
+    assert not at.exception and "SIMULATED THREAT-DETECTION AND RESPONSE PLATFORM" not in _page_text(at)
     at = at.button(key="nav_Response Centre").click().run()
     assert not at.exception, [e.value for e in at.exception]
     labels = [b.label for b in at.button]
